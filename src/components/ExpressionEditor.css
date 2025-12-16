@@ -1,0 +1,83 @@
+/* Expression Editor Wrapper */
+.expression-editor-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+/* Custom Input Styling */
+.expression-input {
+  width: 100%;
+  padding: 8px 10px; /* Consistent padding for pixel measurement */
+  font-family: monospace; /* Monospace makes cursor tracking easier/consistent */
+  font-size: 14px;
+  background-color: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: white;
+  transition: border-color 0.2s;
+}
+
+.expression-input:focus {
+  outline: none;
+  border-color: #646cff;
+  box-shadow: 0 0 0 1px #646cff;
+}
+
+.expression-input.error {
+  border-color: #ff4d4d;
+}
+
+/* Autocomplete Dropdown */
+.autocomplete-dropdown {
+  position: absolute;
+  top: 100%; /* Directly below input */
+  /* Left is set dynamically in JS */
+  margin: 4px 0 0 0;
+  padding: 0;
+  list-style: none;
+  background-color: #1e1e1e;
+  border: 1px solid #444;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  min-width: 150px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.autocomplete-dropdown li {
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #2a2a2a;
+  font-size: 0.9em;
+}
+
+.autocomplete-dropdown li:last-child {
+  border-bottom: none;
+}
+
+/* Active State (Hover or Arrow Key Selection) */
+.autocomplete-dropdown li.active,
+.autocomplete-dropdown li:hover {
+  background-color: #646cff; /* Attractive Blue */
+  color: white;
+}
+
+/* Text inside the dropdown */
+.var-key {
+  font-weight: bold;
+}
+
+.var-value {
+  color: #aaa;
+  font-family: monospace;
+  margin-left: 10px;
+}
+
+.autocomplete-dropdown li.active .var-value,
+.autocomplete-dropdown li:hover .var-value {
+  color: rgba(255, 255, 255, 0.8);
+}

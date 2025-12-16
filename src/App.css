@@ -1,3 +1,9 @@
+/* src/App.css */
+/* Add this at the very top of src/App.css */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 14px;
@@ -99,9 +105,12 @@ td {
 }
 
 /* Input & Select Styling */
+/* UPDATED: Matches ExpressionEditor font and sizing */
 input, select {
   width: 95%;
-  padding: 8px;
+  padding: 8px 10px; 
+  font-family: monospace;
+  font-size: 14px;
   background-color: #2a2a2a;
   border: 1px solid #444;
   color: white;
@@ -160,4 +169,54 @@ button.danger:hover {
 .row {
   display: flex;
   gap: 10px;
+}
+
+/* Result Preview Text */
+.math-result {
+    font-size: 0.85em;
+    text-align: right;
+    font-family: monospace;
+    min-height: 1.2em; /* Prevents jumping */
+}
+
+/* Ensure table cells align nicely with the taller editor */
+td {
+    vertical-align: top;
+}
+
+/* Action Buttons Grouping */
+.action-buttons {
+  display: flex;
+  gap: 5px;
+  justify-content: center;
+}
+
+/* Small square buttons for moving/deleting */
+.icon-btn {
+  padding: 5px 0;
+  width: 30px;
+  text-align: center;
+  font-size: 1.1em;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Specific colors */
+.btn-up, .btn-down {
+  background-color: #444;
+  color: #ccc;
+}
+
+.btn-up:hover, .btn-down:hover {
+  background-color: #646cff;
+  color: white;
+}
+
+/* Dim buttons if they are disabled (e.g. moving top row up) */
+button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  background-color: #333;
 }

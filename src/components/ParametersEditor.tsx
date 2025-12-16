@@ -1,3 +1,4 @@
+// src/components/ParametersEditor.tsx
 import { Parameter } from "../types";
 
 interface Props {
@@ -11,7 +12,7 @@ export default function ParametersEditor({ params, setParams }: Props) {
   function addRow() {
     const newParam: Parameter = {
       id: crypto.randomUUID(),
-      key: "New Parameter",
+      key: "New_Parameter", // defaulted to underscore style
       value: 0,
       unit: "mm", // Default unit
     };
@@ -55,7 +56,10 @@ export default function ParametersEditor({ params, setParams }: Props) {
                 <input
                   type="text"
                   value={item.key}
-                  onChange={(e) => updateRow(item.id, "key", e.target.value)}
+                  // UPDATED: Replace spaces with underscores on change
+                  onChange={(e) => 
+                    updateRow(item.id, "key", e.target.value.replace(/ /g, "_"))
+                  }
                 />
               </td>
               <td>
