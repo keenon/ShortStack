@@ -3,16 +3,22 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import "./App.css";
 
-// Define the shape of our data
-interface Parameter {
-  id: string; // Unique ID for React rendering
-  key: string;
-  value: number;
-}
+// Import Types
+import { Parameter } from "./types";
+
+// Import Components
+import ParametersEditor from "./components/ParametersEditor";
+import StackupEditor from "./components/StackupEditor";
+import FootprintEditor from "./components/FootprintEditor";
+import LayoutEditor from "./components/LayoutEditor";
+
+// Tab definitions
+type Tab = "stackup" | "footprint" | "layout" | "parameters";
 
 function App() {
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [params, setParams] = useState<Parameter[]>([]);
+  const [activeTab, setActiveTab] = useState<Tab>("stackup");
 
   // AUTO-SAVE: Whenever 'params' changes, write to file if we have a path
   useEffect(() => {
@@ -20,8 +26,6 @@ function App() {
 
     const saveData = async () => {
       try {
-        // We strip the 'id' before saving to keep the JSON clean, 
-        // or keep it if you want the ID to persist.
         const content = JSON.stringify(params, null, 2);
         await writeTextFile(currentPath, content);
         console.log("Auto-saved to", currentPath);
@@ -29,8 +33,6 @@ function App() {
         console.error("Failed to auto-save", err);
       }
     };
-
-    // specific delay/debounce could be added here if the table gets huge
     saveData();
   }, [params, currentPath]);
 
@@ -40,12 +42,12 @@ function App() {
       const path = await save({
         filters: [{ name: "Project JSON", extensions: ["json"] }],
       });
-      
+
       if (path) {
-        // Initialize with empty array
-        await writeTextFile(path, "[]"); 
+        await writeTextFile(path, "[]");
         setParams([]);
         setCurrentPath(path);
+        setActiveTab("stackup"); // Default tab on new project
       }
     } catch (err) {
       console.error(err);
@@ -64,45 +66,22 @@ function App() {
       if (path) {
         const content = await readTextFile(path as string);
         const data = JSON.parse(content);
-        
-        // Ensure data has IDs for React (if the JSON is just keys/values)
-        // If your JSON saves IDs, you don't need to generate new ones.
+
+        // Sanitize data: Ensure ID and Unit exist for older files
         const dataWithIds = data.map((item: any) => ({
           ...item,
-          id: item.id || crypto.randomUUID()
+          id: item.id || crypto.randomUUID(),
+          unit: item.unit || "mm",
         }));
 
         setParams(dataWithIds);
         setCurrentPath(path as string);
+        setActiveTab("stackup"); // Default tab on load
       }
     } catch (err) {
       console.error(err);
       alert("Failed to load file. Is it valid JSON?");
     }
-  }
-
-  // ACTION: Add a new row
-  function addRow() {
-    const newParam: Parameter = {
-      id: crypto.randomUUID(),
-      key: "New Parameter",
-      value: 0
-    };
-    setParams([...params, newParam]);
-  }
-
-  // ACTION: Update a specific row
-  function updateRow(id: string, field: "key" | "value", newValue: string | number) {
-    setParams((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, [field]: newValue } : item
-      )
-    );
-  }
-
-  // ACTION: Delete a row
-  function deleteRow(id: string) {
-    setParams((prev) => prev.filter((item) => item.id !== id));
   }
 
   // ACTION: Close project
@@ -124,51 +103,57 @@ function App() {
     );
   }
 
-  // VIEW: 2. Parameter Editor
+  // VIEW: 2. Editor Workspace
   return (
     <div className="container editor-screen">
+      {/* Header */}
       <header className="editor-header">
         <div className="file-info">
-          <span>Editing: <strong>{currentPath}</strong></span>
+          <span>
+            Editing: <strong>{currentPath}</strong>
+          </span>
         </div>
-        <button className="secondary" onClick={closeProject}>Close Project</button>
+        <button className="secondary" onClick={closeProject}>
+          Close Project
+        </button>
       </header>
 
+      {/* Navigation Tabs */}
+      <nav className="tab-nav">
+        <button
+          className={`tab-btn ${activeTab === "stackup" ? "active" : ""}`}
+          onClick={() => setActiveTab("stackup")}
+        >
+          Stackup Editor
+        </button>
+        <button
+          className={`tab-btn ${activeTab === "footprint" ? "active" : ""}`}
+          onClick={() => setActiveTab("footprint")}
+        >
+          Footprint Editor
+        </button>
+        <button
+          className={`tab-btn ${activeTab === "layout" ? "active" : ""}`}
+          onClick={() => setActiveTab("layout")}
+        >
+          Layout Editor
+        </button>
+        <button
+          className={`tab-btn ${activeTab === "parameters" ? "active" : ""}`}
+          onClick={() => setActiveTab("parameters")}
+        >
+          Parameters Editor
+        </button>
+      </nav>
+
+      {/* Main Content Area */}
       <main>
-        <table>
-          <thead>
-            <tr>
-              <th>Key</th>
-              <th>Value</th>
-              <th style={{ width: "50px" }}>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {params.map((item) => (
-              <tr key={item.id}>
-                <td>
-                  <input
-                    type="text"
-                    value={item.key}
-                    onChange={(e) => updateRow(item.id, "key", e.target.value)}
-                  />
-                </td>
-                <td>
-                  <input
-                    type="number"
-                    value={item.value}
-                    onChange={(e) => updateRow(item.id, "value", Number(e.target.value))}
-                  />
-                </td>
-                <td>
-                  <button className="danger" onClick={() => deleteRow(item.id)}>X</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        
-        <button className="add-btn" onClick={addRow}>+ Add Parameter</button>
+        {activeTab === "stackup" && <StackupEditor />}
+        {activeTab === "footprint" && <FootprintEditor />}
+        {activeTab === "layout" && <LayoutEditor />}
+        {activeTab === "parameters" && (
+          <ParametersEditor params={params} setParams={setParams} />
+        )}
       </main>
     </div>
   );

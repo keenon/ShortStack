@@ -37,11 +37,46 @@
   color: #aaa;
 }
 
+/* Tab Navigation */
+.tab-nav {
+  display: flex;
+  background-color: #2a2a2a;
+  padding: 0 20px;
+  border-bottom: 1px solid #333;
+}
+
+.tab-btn {
+  background-color: transparent;
+  color: #888;
+  border: none;
+  border-radius: 0;
+  padding: 12px 20px;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  color: #fff;
+  background-color: #333;
+}
+
+.tab-btn.active {
+  color: #646cff;
+  border-bottom: 3px solid #646cff;
+  background-color: rgba(100, 108, 255, 0.1);
+}
+
 /* Main Content */
 main {
-  padding: 20px;
+  padding: 0; /* Remove padding here, let children handle it */
   overflow-y: auto;
   flex-grow: 1;
+}
+
+.editor-content {
+  padding: 20px;
 }
 
 /* Table Styling */
@@ -63,8 +98,8 @@ td {
   border-bottom: 1px solid #333;
 }
 
-/* Input Styling */
-input {
+/* Input & Select Styling */
+input, select {
   width: 95%;
   padding: 8px;
   background-color: #2a2a2a;
@@ -73,7 +108,7 @@ input {
   border-radius: 4px;
 }
 
-input:focus {
+input:focus, select:focus {
   outline: 2px solid #646cff;
 }
 
