@@ -1,0 +1,12 @@
+# Node
+node_modules
+dist
+dist-isolation
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# OS
+.DS_Store
+Thumbs.db
