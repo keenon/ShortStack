@@ -1,3 +1,4 @@
+/* src/components/FootprintEditor.css */
 .footprint-editor-container {
     display: flex;
     flex-direction: column;
@@ -12,6 +13,21 @@
     border-bottom: 1px solid #333;
 }
 .fp-toolbar .spacer { flex-grow: 1; }
+
+.toolbar-name-input {
+    background: #1a1a1a;
+    border: 1px solid #444;
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    margin-left: 10px;
+    font-size: 1em;
+    font-weight: bold;
+}
+.toolbar-name-input:focus {
+    border-color: #646cff;
+    outline: none;
+}
 
 .fp-workspace {
     display: flex;
@@ -68,11 +84,16 @@
     color: #aaa;
 }
 
-.clickable-row {
-    cursor: pointer;
+/* New Action Styles */
+.actions-cell {
+    display: flex;
+    gap: 10px;
+    align-items: center;
 }
-.clickable-row:hover {
-    background-color: #2a2a2a;
+
+.edit-btn {
+    flex-grow: 1;
+    justify-content: center;
 }
 
 .empty-state {

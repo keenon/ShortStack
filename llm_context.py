@@ -1,11 +1,11 @@
 import os
+import sys
 import pyperclip
 
 # Directories to scan relative to the script location
 TARGET_DIRS = ["src", "src-tauri/src"]
 
 # Extensions to include (add or remove as needed)
-# Since this is a Tauri project, we primarily want Rust, JS/TS, CSS, HTML, and Configs
 VALID_EXTENSIONS = {
     ".rs", ".js", ".jsx", ".ts", ".tsx", ".css", ".html", ".svelte", ".vue", ".json", ".toml"
 }
@@ -23,6 +23,14 @@ def get_file_content(filepath):
         return ""
 
 def main():
+    # Capture command line arguments (skipping the script name itself)
+    keywords = sys.argv[1:]
+    
+    if keywords:
+        print(f"🔍 Filtering for paths containing: {', '.join(keywords)}")
+    else:
+        print("📂 No keywords provided. Scanning all valid files...")
+
     output_buffer = []
     
     # Iterate over specific target directories
@@ -35,11 +43,19 @@ def main():
             for file in files:
                 # Filter by extension to avoid binary files or unwanted assets
                 if any(file.endswith(ext) for ext in VALID_EXTENSIONS):
-                    # Create relative path from the project root (e.g., src/components/Button.tsx)
+                    # Create relative path from the project root
                     full_path = os.path.join(root, file)
                     # Normalize path separators for consistency (forward slashes)
                     normalized_path = full_path.replace("\\", "/")
                     
+                    # --- NEW LOGIC: Keyword Filtering ---
+                    if keywords:
+                        # Check if ANY of the keywords exist in the path (case insensitive)
+                        # We use normalized_path so it matches against folder names too
+                        if not any(k.lower() in normalized_path.lower() for k in keywords):
+                            continue # Skip this file if no keywords match
+                    # ------------------------------------
+
                     output_buffer.append(get_file_content(normalized_path))
 
     final_output = "".join(output_buffer)

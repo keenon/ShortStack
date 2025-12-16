@@ -193,8 +193,10 @@ export default function FootprintEditor({ footprints, setFootprints, params }: P
 
   const deleteFootprint = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setFootprints((prev) => prev.filter((fp) => fp.id !== id));
-    if (editingId === id) setEditingId(null);
+    if (window.confirm("Are you sure you want to delete this footprint?")) {
+      setFootprints((prev) => prev.filter((fp) => fp.id !== id));
+      if (editingId === id) setEditingId(null);
+    }
   };
 
   const updateFootprintName = (id: string, name: string) => {
@@ -272,22 +274,27 @@ export default function FootprintEditor({ footprints, setFootprints, params }: P
             <tr>
               <th>Footprint Name</th>
               <th style={{ width: "100px" }}>Shapes</th>
-              <th style={{ width: "80px" }}>Action</th>
+              <th style={{ width: "220px" }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {footprints.map((fp) => (
-              <tr key={fp.id} onClick={() => setEditingId(fp.id)} className="clickable-row">
+              <tr key={fp.id}>
                 <td>
                   <input
                     type="text"
                     value={fp.name}
-                    onClick={(e) => e.stopPropagation()}
                     onChange={(e) => updateFootprintName(fp.id, e.target.value)}
                   />
                 </td>
                 <td>{fp.shapes.length}</td>
-                <td>
+                <td className="actions-cell">
+                  <button
+                    className="edit-btn"
+                    onClick={() => setEditingId(fp.id)}
+                  >
+                    Edit
+                  </button>
                   <button
                     className="danger icon-btn"
                     onClick={(e) => deleteFootprint(fp.id, e)}
@@ -317,7 +324,12 @@ export default function FootprintEditor({ footprints, setFootprints, params }: P
         <button className="secondary" onClick={() => setEditingId(null)}>
           ← Back
         </button>
-        <h3>Editing: {activeFootprint.name}</h3>
+        <input 
+            className="toolbar-name-input"
+            type="text"
+            value={activeFootprint.name}
+            onChange={(e) => updateFootprintName(activeFootprint.id, e.target.value)}
+        />
         <div className="spacer" />
         <button onClick={() => addShape("circle")}>+ Circle</button>
         <button onClick={() => addShape("rect")}>+ Rect</button>
