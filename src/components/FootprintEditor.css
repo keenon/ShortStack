@@ -84,18 +84,6 @@
     color: #aaa;
 }
 
-/* New Action Styles */
-.actions-cell {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-}
-
-.edit-btn {
-    flex-grow: 1;
-    justify-content: center;
-}
-
 .empty-state {
     text-align: center;
     color: #666;

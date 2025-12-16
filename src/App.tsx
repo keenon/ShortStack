@@ -8,7 +8,7 @@ import { Parameter, StackupLayer, ProjectData, Footprint } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
-import FootprintEditor from "./components/FootprintEditor";
+import FootprintLibrary from "./components/FootprintLibrary";
 import LayoutEditor from "./components/LayoutEditor";
 
 const TABLEAU_10 = [
@@ -172,7 +172,7 @@ function App() {
             />
         )}
         {activeTab === "footprint" && (
-            <FootprintEditor 
+            <FootprintLibrary 
                 footprints={footprints}
                 setFootprints={setFootprints}
                 params={params}

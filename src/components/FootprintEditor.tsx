@@ -1,13 +1,14 @@
 // src/components/FootprintEditor.tsx
-import React, { useState, useMemo } from "react";
+import React, { useState } from "react";
 import * as math from "mathjs";
 import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import './FootprintEditor.css';
 
 interface Props {
-  footprints: Footprint[];
-  setFootprints: React.Dispatch<React.SetStateAction<Footprint[]>>;
+  footprint: Footprint;
+  onUpdate: (updatedFootprint: Footprint) => void;
+  onClose: () => void;
   params: Parameter[];
 }
 
@@ -175,39 +176,12 @@ const PropertiesPanel = ({
 // MAIN COMPONENT
 // ------------------------------------------------------------------
 
-export default function FootprintEditor({ footprints, setFootprints, params }: Props) {
-  const [editingId, setEditingId] = useState<string | null>(null);
+export default function FootprintEditor({ footprint, onUpdate, onClose, params }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
 
   // --- ACTIONS ---
 
-  const addFootprint = () => {
-    const newFp: Footprint = {
-      id: crypto.randomUUID(),
-      name: "New Footprint",
-      shapes: [],
-    };
-    setFootprints([...footprints, newFp]);
-    setEditingId(newFp.id); // Auto-open
-  };
-
-  const deleteFootprint = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (window.confirm("Are you sure you want to delete this footprint?")) {
-      setFootprints((prev) => prev.filter((fp) => fp.id !== id));
-      if (editingId === id) setEditingId(null);
-    }
-  };
-
-  const updateFootprintName = (id: string, name: string) => {
-    setFootprints((prev) =>
-      prev.map((fp) => (fp.id === id ? { ...fp, name } : fp))
-    );
-  };
-
   const addShape = (type: "circle" | "rect") => {
-    if (!editingId) return;
-
     const base = {
       id: crypto.randomUUID(),
       name: `New ${type}`,
@@ -221,114 +195,50 @@ export default function FootprintEditor({ footprints, setFootprints, params }: P
       newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10" };
     }
 
-    setFootprints((prev) =>
-      prev.map((fp) =>
-        fp.id === editingId
-          ? { ...fp, shapes: [...fp.shapes, newShape] }
-          : fp
-      )
-    );
+    onUpdate({
+        ...footprint,
+        shapes: [...footprint.shapes, newShape]
+    });
     setSelectedShapeId(newShape.id);
   };
 
   const updateShape = (shapeId: string, field: string, val: string) => {
-    if (!editingId) return;
-    setFootprints((prev) =>
-      prev.map((fp) => {
-        if (fp.id !== editingId) return fp;
-        return {
-          ...fp,
-          shapes: fp.shapes.map((s) =>
+    onUpdate({
+        ...footprint,
+        shapes: footprint.shapes.map((s) =>
             s.id === shapeId ? { ...s, [field]: val } : s
-          ),
-        };
-      })
-    );
+        ),
+    });
   };
 
   const deleteShape = (shapeId: string) => {
-     if (!editingId) return;
-     setFootprints((prev) => 
-        prev.map((fp) => {
-            if(fp.id !== editingId) return fp;
-            return {
-                ...fp,
-                shapes: fp.shapes.filter(s => s.id !== shapeId)
-            }
-        })
-     );
+     onUpdate({
+        ...footprint,
+        shapes: footprint.shapes.filter(s => s.id !== shapeId)
+     });
      setSelectedShapeId(null);
   };
 
-  // --- DERIVED STATE ---
-  const activeFootprint = footprints.find((fp) => fp.id === editingId);
-  const activeShape = activeFootprint?.shapes.find((s) => s.id === selectedShapeId);
+  const updateFootprintName = (name: string) => {
+    onUpdate({ ...footprint, name });
+  };
 
-  // --- RENDER: LIST VIEW ---
-  if (!activeFootprint) {
-    return (
-      <div className="editor-content">
-        <h2>Footprint Library</h2>
-        <table className="footprint-list">
-          <thead>
-            <tr>
-              <th>Footprint Name</th>
-              <th style={{ width: "100px" }}>Shapes</th>
-              <th style={{ width: "220px" }}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {footprints.map((fp) => (
-              <tr key={fp.id}>
-                <td>
-                  <input
-                    type="text"
-                    value={fp.name}
-                    onChange={(e) => updateFootprintName(fp.id, e.target.value)}
-                  />
-                </td>
-                <td>{fp.shapes.length}</td>
-                <td className="actions-cell">
-                  <button
-                    className="edit-btn"
-                    onClick={() => setEditingId(fp.id)}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className="danger icon-btn"
-                    onClick={(e) => deleteFootprint(fp.id, e)}
-                  >
-                    ✕
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {footprints.length === 0 && (
-                <tr><td colSpan={3} style={{textAlign:'center', color:'#666'}}>No footprints yet.</td></tr>
-            )}
-          </tbody>
-        </table>
-        <button className="add-btn" onClick={addFootprint}>
-          + New Footprint
-        </button>
-      </div>
-    );
-  }
+  // --- DERIVED STATE ---
+  const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
 
   // --- RENDER: EDITOR VIEW ---
   return (
     <div className="footprint-editor-container">
       {/* Header Toolbar */}
       <div className="fp-toolbar">
-        <button className="secondary" onClick={() => setEditingId(null)}>
+        <button className="secondary" onClick={onClose}>
           ← Back
         </button>
         <input 
             className="toolbar-name-input"
             type="text"
-            value={activeFootprint.name}
-            onChange={(e) => updateFootprintName(activeFootprint.id, e.target.value)}
+            value={footprint.name}
+            onChange={(e) => updateFootprintName(e.target.value)}
         />
         <div className="spacer" />
         <button onClick={() => addShape("circle")}>+ Circle</button>
@@ -358,7 +268,7 @@ export default function FootprintEditor({ footprints, setFootprints, params }: P
             <line x1="0" y1="-500" x2="0" y2="500" stroke="#444" strokeWidth="1" />
 
             {/* Shapes */}
-            {activeFootprint.shapes.map((shape) => (
+            {footprint.shapes.map((shape) => (
               <ShapeRenderer
                 key={shape.id}
                 shape={shape}
