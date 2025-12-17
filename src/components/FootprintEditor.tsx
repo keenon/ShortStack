@@ -110,6 +110,24 @@ const PropertiesPanel = ({
           {stackup.length === 0 && <div className="empty-hint">No stackup layers defined.</div>}
           {stackup.map((layer) => {
             const isChecked = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
+            
+            // Calculate values for display
+            let depthVal = 0;
+            let thicknessVal = 0;
+            let percentage = 0;
+
+            if (isChecked && layer.type === "Carved/Printed") {
+                const depthExpr = shape.assignedLayers[layer.id] || "0";
+                depthVal = evaluateExpression(depthExpr, params);
+                thicknessVal = evaluateExpression(layer.thicknessExpression, params);
+                if (thicknessVal !== 0) {
+                    percentage = (depthVal / thicknessVal) * 100;
+                    // Cap at 100% as requested ("up to 100%")
+                    if (percentage > 100) percentage = 100;
+                    if (percentage < 0) percentage = 0;
+                }
+            }
+
             return (
               <div key={layer.id} className="layer-assignment-row">
                   <input 
@@ -144,6 +162,10 @@ const PropertiesPanel = ({
                             params={params}
                             placeholder="Depth"
                         />
+                        <div className="depth-result-text">
+                           {/* UPDATED TEXT FORMAT */}
+                           = {depthVal.toFixed(1)}mm ({percentage.toFixed(1)}% of {thicknessVal.toFixed(1)}mm layer)
+                        </div>
                     </div>
                 )}
               </div>

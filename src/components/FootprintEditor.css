@@ -189,6 +189,7 @@
     align-items: center;
     gap: 8px; /* Horizontal spacing */
     min-height: 36px;
+    flex-wrap: wrap; /* Allow content to wrap if text is long */
 }
 
 .layer-checkbox {
@@ -214,8 +215,13 @@
 
 /* Container for depth input to control its size/alignment */
 .layer-depth-wrapper {
-    width: 90px;
+    /* CHANGED: Now takes up the full width, forcing a new line */
+    width: 100%;
     flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch; /* Stretch to fill width */
+    margin-top: 6px;
 }
 
 /* Refined ExpressionEditor styles for the small row */
@@ -223,6 +229,17 @@
     padding: 2px 6px;
     font-size: 12px;
     height: 24px;
+    width: 100%; /* Ensure input takes full width */
+}
+
+/* New: Result text style */
+.depth-result-text {
+    font-size: 0.75em;
+    color: #888;
+    margin-top: 4px;
+    font-family: monospace;
+    white-space: nowrap;
+    text-align: right;
 }
 
 .empty-hint {
