@@ -176,40 +176,53 @@
 .layer-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 4px; /* Reduced gap between rows */
 }
+
+/* Updated Layer Row Styling */
 .layer-assignment-row {
     background: #2a2a2a;
-    padding: 8px;
+    padding: 6px 8px;
     border-radius: 4px;
     border: 1px solid #444;
-}
-.layer-check-header {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 8px; /* Horizontal spacing */
+    min-height: 36px;
 }
+
+.layer-checkbox {
+    margin: 0;
+    cursor: pointer;
+}
+
 .layer-color-badge {
     width: 12px;
     height: 12px;
     border-radius: 2px;
+    flex-shrink: 0;
 }
+
 .layer-name {
     font-size: 0.9em;
     flex-grow: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: default;
 }
-.layer-depth-editor {
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px dashed #444;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+
+/* Container for depth input to control its size/alignment */
+.layer-depth-wrapper {
+    width: 90px;
+    flex-shrink: 0;
 }
-.layer-depth-editor label {
-    font-size: 0.85em;
-    color: #888;
-    width: 40px;
+
+/* Refined ExpressionEditor styles for the small row */
+.layer-depth-wrapper .expression-input {
+    padding: 2px 6px;
+    font-size: 12px;
+    height: 24px;
 }
 
 .empty-hint {

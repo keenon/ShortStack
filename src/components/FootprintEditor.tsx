@@ -112,8 +112,8 @@ const PropertiesPanel = ({
             const isChecked = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
             return (
               <div key={layer.id} className="layer-assignment-row">
-                <div className="layer-check-header">
                   <input 
+                    className="layer-checkbox"
                     type="checkbox"
                     checked={isChecked}
                     onChange={(e) => {
@@ -130,12 +130,10 @@ const PropertiesPanel = ({
                     className="layer-color-badge" 
                     style={{ backgroundColor: layer.color }} 
                   />
-                  <span className="layer-name">{layer.name}</span>
-                </div>
+                  <span className="layer-name" title={layer.name}>{layer.name}</span>
                 
                 {isChecked && layer.type === "Carved/Printed" && (
-                    <div className="layer-depth-editor">
-                        <label>Depth</label>
+                    <div className="layer-depth-wrapper">
                         <ExpressionEditor 
                             value={shape.assignedLayers[layer.id]}
                             onChange={(val) => {

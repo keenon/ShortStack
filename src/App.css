@@ -117,6 +117,11 @@ input, select {
   border-radius: 4px;
 }
 
+/* Fix for checkboxes being too wide */
+input[type="checkbox"] {
+  width: auto;
+}
+
 input:focus, select:focus {
   outline: 2px solid #646cff;
 }
