@@ -113,7 +113,10 @@ function App() {
         newFootprints = newFootprints.map((fp: any) => ({
           ...fp,
           id: fp.id || crypto.randomUUID(),
-          shapes: fp.shapes || []
+          shapes: (fp.shapes || []).map((s: any) => ({
+              ...s,
+              assignedLayers: s.assignedLayers || {}
+          }))
         }));
 
         setParams(newParams);
@@ -176,6 +179,7 @@ function App() {
                 footprints={footprints}
                 setFootprints={setFootprints}
                 params={params}
+                stackup={stackup}
             />
         )}
         {activeTab === "layout" && <LayoutEditor />}

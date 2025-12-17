@@ -1,7 +1,7 @@
 // src/components/FootprintEditor.tsx
 import React, { useState } from "react";
 import * as math from "mathjs";
-import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect } from "../types";
+import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, StackupLayer } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import './FootprintEditor.css';
 
@@ -10,6 +10,7 @@ interface Props {
   onUpdate: (updatedFootprint: Footprint) => void;
   onClose: () => void;
   params: Parameter[];
+  stackup: StackupLayer[];
 }
 
 // ------------------------------------------------------------------
@@ -38,7 +39,6 @@ function evaluateExpression(expression: string, params: Parameter[]): number {
 // ------------------------------------------------------------------
 
 // 1. SHAPE RENDERER (SVG)
-//    Add new shape cases here in the future
 const ShapeRenderer = ({
   shape,
   isSelected,
@@ -73,9 +73,6 @@ const ShapeRenderer = ({
     const h = evaluateExpression(shape.height, params);
     const x = evaluateExpression(shape.x, params);
     const y = evaluateExpression(shape.y, params);
-    // Draw from center logic or top-left? SVG is top-left usually.
-    // Let's assume the user inputs Center X/Y.
-    // To draw a centered rect in SVG we offset by w/2, h/2.
     return (
       <rect
         x={x - w / 2}
@@ -91,20 +88,72 @@ const ShapeRenderer = ({
 };
 
 // 2. PROPERTIES PANEL
-//    Add new shape property inputs here
 const PropertiesPanel = ({
   shape,
   updateShape,
   params,
+  stackup,
 }: {
   shape: FootprintShape;
-  updateShape: (id: string, field: string, val: string) => void;
+  updateShape: (id: string, field: string, val: any) => void;
   params: Parameter[];
+  stackup: StackupLayer[];
 }) => {
   return (
     <div className="properties-panel">
       <h3>{shape.type.toUpperCase()} Properties</h3>
       
+      {/* Layer Assignment Section */}
+      <div className="prop-section">
+        <h4>Layers</h4>
+        <div className="layer-list">
+          {stackup.length === 0 && <div className="empty-hint">No stackup layers defined.</div>}
+          {stackup.map((layer) => {
+            const isChecked = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
+            return (
+              <div key={layer.id} className="layer-assignment-row">
+                <div className="layer-check-header">
+                  <input 
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={(e) => {
+                        const newAssignments = { ...(shape.assignedLayers || {}) };
+                        if (e.target.checked) {
+                            newAssignments[layer.id] = "0"; // Default depth
+                        } else {
+                            delete newAssignments[layer.id];
+                        }
+                        updateShape(shape.id, "assignedLayers", newAssignments);
+                    }}
+                  />
+                  <div 
+                    className="layer-color-badge" 
+                    style={{ backgroundColor: layer.color }} 
+                  />
+                  <span className="layer-name">{layer.name}</span>
+                </div>
+                
+                {isChecked && layer.type === "Carved/Printed" && (
+                    <div className="layer-depth-editor">
+                        <label>Depth</label>
+                        <ExpressionEditor 
+                            value={shape.assignedLayers[layer.id]}
+                            onChange={(val) => {
+                                const newAssignments = { ...shape.assignedLayers };
+                                newAssignments[layer.id] = val;
+                                updateShape(shape.id, "assignedLayers", newAssignments);
+                            }}
+                            params={params}
+                            placeholder="Depth"
+                        />
+                    </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="prop-group">
         <label>Name</label>
         <input 
@@ -172,19 +221,21 @@ const PropertiesPanel = ({
   );
 };
 
-// 3. SHAPE LIST PANEL (NEW)
+// 3. SHAPE LIST PANEL
 const ShapeListPanel = ({
   shapes,
   selectedShapeId,
   onSelect,
   onDelete,
   onRename,
+  stackup,
 }: {
   shapes: FootprintShape[];
   selectedShapeId: string | null;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
+  stackup: StackupLayer[];
 }) => {
   return (
     <div className="fp-left-panel">
@@ -196,6 +247,23 @@ const ShapeListPanel = ({
             className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""}`}
             onClick={() => onSelect(shape.id)}
           >
+            {/* NEW: Colored squares for assigned layers */}
+            <div className="shape-layer-indicators">
+              {stackup.map(layer => {
+                 if (shape.assignedLayers?.[layer.id] !== undefined) {
+                     return (
+                         <div 
+                            key={layer.id}
+                            className="layer-indicator-dot"
+                            style={{ backgroundColor: layer.color }}
+                            title={layer.name}
+                         />
+                     );
+                 }
+                 return null;
+              })}
+            </div>
+
             <input
               type="text"
               value={shape.name}
@@ -224,7 +292,7 @@ const ShapeListPanel = ({
 // MAIN COMPONENT
 // ------------------------------------------------------------------
 
-export default function FootprintEditor({ footprint, onUpdate, onClose, params }: Props) {
+export default function FootprintEditor({ footprint, onUpdate, onClose, params, stackup }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
 
   // --- ACTIONS ---
@@ -233,6 +301,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params }
     const base = {
       id: crypto.randomUUID(),
       name: `New ${type}`,
+      assignedLayers: {}, // Initialize empty
     };
 
     let newShape: FootprintShape;
@@ -250,7 +319,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params }
     setSelectedShapeId(newShape.id);
   };
 
-  const updateShape = (shapeId: string, field: string, val: string) => {
+  const updateShape = (shapeId: string, field: string, val: any) => {
     onUpdate({
         ...footprint,
         shapes: footprint.shapes.map((s) =>
@@ -301,6 +370,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params }
             onSelect={setSelectedShapeId}
             onDelete={deleteShape}
             onRename={(id, name) => updateShape(id, "name", name)}
+            stackup={stackup}
         />
 
         {/* CENTER: VISUAL EDITOR */}
@@ -346,6 +416,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params }
                 shape={activeShape} 
                 updateShape={updateShape} 
                 params={params} 
+                stackup={stackup}
               />
               <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
                 <button className="danger" style={{width: '100%'}} onClick={() => deleteShape(activeShape.id)}>

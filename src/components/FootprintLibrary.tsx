@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Footprint, Parameter } from "../types";
+import { Footprint, Parameter, StackupLayer } from "../types";
 import FootprintEditor from "./FootprintEditor";
 import './FootprintLibrary.css';
 
@@ -7,9 +7,10 @@ interface Props {
   footprints: Footprint[];
   setFootprints: React.Dispatch<React.SetStateAction<Footprint[]>>;
   params: Parameter[];
+  stackup: StackupLayer[];
 }
 
-export default function FootprintLibrary({ footprints, setFootprints, params }: Props) {
+export default function FootprintLibrary({ footprints, setFootprints, params, stackup }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
 
   // --- ACTIONS ---
@@ -55,6 +56,7 @@ export default function FootprintLibrary({ footprints, setFootprints, params }: 
         onUpdate={handleFootprintUpdate}
         onClose={() => setEditingId(null)}
         params={params}
+        stackup={stackup}
       />
     );
   }

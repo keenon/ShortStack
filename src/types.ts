@@ -1,20 +1,4 @@
-export interface Parameter {
-  id: string;
-  key: string;
-  value: number;
-  unit: "mm" | "in";
-}
-
-export type ManufacturingType = "Cut" | "Carved/Printed";
-
-export interface StackupLayer {
-  id: string;
-  name: string;
-  type: ManufacturingType;
-  thicknessExpression: string;
-  color: string; // New field
-}
-
+// src/types.ts
 export interface Parameter {
   id: string;
   key: string;
@@ -40,6 +24,8 @@ export interface BaseShape {
   id: string;
   type: ShapeType;
   name: string;
+  // Key is layerId, Value is depthExpression (or empty string/ignored if not Carved)
+  assignedLayers: Record<string, string>;
 }
 
 // Properties are strings to allow expressions (e.g., "Width / 2")
