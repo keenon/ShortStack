@@ -1,5 +1,5 @@
 // src/components/FootprintEditor.tsx
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import * as math from "mathjs";
 import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, StackupLayer } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
@@ -43,21 +43,21 @@ const ShapeRenderer = ({
   shape,
   isSelected,
   params,
-  onSelect,
+  onShapeDown,
 }: {
   shape: FootprintShape;
   isSelected: boolean;
   params: Parameter[];
-  onSelect: (id: string) => void;
+  onShapeDown: (e: React.MouseEvent, id: string) => void;
 }) => {
   const commonProps = {
-    onClick: (e: React.MouseEvent) => {
-      e.stopPropagation();
-      onSelect(shape.id);
+    onMouseDown: (e: React.MouseEvent) => {
+      onShapeDown(e, shape.id);
     },
     fill: isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)",
     stroke: isSelected ? "#646cff" : "#888",
-    strokeWidth: isSelected ? 1 : 0.5,
+    strokeWidth: isSelected ? 2 : 1,
+    vectorEffect: "non-scaling-stroke",
     style: { cursor: "pointer" },
   };
 
@@ -314,6 +314,200 @@ const ShapeListPanel = ({
 
 export default function FootprintEditor({ footprint, onUpdate, onClose, params, stackup }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
+  
+  // Viewport state for zooming/panning
+  // We initialize with a default, but it will be corrected by ResizeObserver
+  const [viewBox, setViewBox] = useState({ x: -50, y: -50, width: 100, height: 100 });
+  
+  const svgRef = useRef<SVGSVGElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const viewBoxRef = useRef(viewBox);
+
+  // Dragging State Refs
+  const isDragging = useRef(false);
+  const hasMoved = useRef(false);
+  const dragStart = useRef({ x: 0, y: 0 });
+  const dragStartViewBox = useRef({ x: 0, y: 0 });
+  const clickedShapeId = useRef<string | null>(null);
+
+  // Sync ref with state
+  useEffect(() => {
+    viewBoxRef.current = viewBox;
+  }, [viewBox]);
+
+  // --- RESIZE OBSERVER (Adaptive Grid/Fill) ---
+  useLayoutEffect(() => {
+    if (!wrapperRef.current) return;
+    
+    const updateDimensions = () => {
+        if (!wrapperRef.current) return;
+        const { width, height } = wrapperRef.current.getBoundingClientRect();
+        if (width === 0 || height === 0) return;
+
+        // Current scale (units per pixel) = viewBox.width / container.width
+        // We want to preserve this scale to keep the zoom level constant.
+        // If it's the first run, we might want a default scale (e.g. 100mm width).
+        
+        setViewBox(prev => {
+            // Check if we need to initialize
+            const currentRatio = prev.width / prev.height;
+            const newRatio = width / height;
+
+            // If ratio hasn't changed effectively, skip
+            // But we need to update if pixel size changed to keep 1:1 scale feeling? 
+            // Actually usually we want "Zoom Level" constant. 
+            // Zoom Level ~ pixels per mm.
+            // Scale = prev.width / containerWidth (mm per pixel)
+            
+            // To be safe, let's just adjust width/height to match aspect ratio
+            // preserving the center and the 'scale' (width in mm).
+            
+            // Actually, if we resize window, usually we just want to see more area.
+            // So we keep the scale constant.
+            
+            // Calculate current scale based on OLD dimensions? 
+            // We don't have old dimensions easily here without another ref.
+            // But we can assume we want to preserve the visible width or height.
+            // Let's preserve the "Units per Pixel" ratio approx.
+            
+            // Let's just fix the aspect ratio by adjusting height, keeping width constant (or vice versa).
+            // This ensures "Grid always reaches the edge".
+            
+            const newHeight = prev.width / newRatio;
+            
+            // Keep center
+            const centerX = prev.x + prev.width / 2;
+            const centerY = prev.y + prev.height / 2;
+            
+            return {
+                x: centerX - prev.width / 2,
+                y: centerY - newHeight / 2,
+                width: prev.width,
+                height: newHeight
+            };
+        });
+    };
+
+    const observer = new ResizeObserver(() => {
+        updateDimensions();
+    });
+    
+    observer.observe(wrapperRef.current);
+    updateDimensions(); // Initial call
+
+    return () => observer.disconnect();
+  }, []);
+
+  // --- ZOOM HANDLER ---
+  useEffect(() => {
+    const element = wrapperRef.current; // Attach to wrapper to catch events on grid/blank space
+    if (!element) return;
+
+    const onWheel = (e: WheelEvent) => {
+        e.preventDefault();
+        
+        const currentVB = viewBoxRef.current;
+        const rect = element.getBoundingClientRect();
+        
+        // Mouse relative to Element
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        
+        // Ratio 0..1
+        const ratioX = mouseX / rect.width;
+        const ratioY = mouseY / rect.height;
+        
+        // Mouse in user coordinates
+        const userX = currentVB.x + ratioX * currentVB.width;
+        const userY = currentVB.y + ratioY * currentVB.height;
+        
+        const ZOOM_SPEED = 1.1;
+        const delta = Math.sign(e.deltaY); 
+        const scale = delta > 0 ? ZOOM_SPEED : 1 / ZOOM_SPEED;
+        
+        const newWidth = currentVB.width * scale;
+        const newHeight = currentVB.height * scale;
+        
+        const newX = userX - ratioX * newWidth;
+        const newY = userY - ratioY * newHeight;
+        
+        setViewBox({ x: newX, y: newY, width: newWidth, height: newHeight });
+    };
+
+    element.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+        element.removeEventListener('wheel', onWheel);
+    };
+  }, []);
+
+  // --- PAN / SELECT HANDLERS ---
+  
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Only left click pans
+    if (e.button !== 0) return;
+    
+    isDragging.current = true;
+    hasMoved.current = false;
+    dragStart.current = { x: e.clientX, y: e.clientY };
+    dragStartViewBox.current = { x: viewBox.x, y: viewBox.y };
+    
+    // Add global listeners
+    window.addEventListener('mousemove', handleGlobalMouseMove);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+  };
+
+  const handleGlobalMouseMove = (e: MouseEvent) => {
+    if (!isDragging.current || !wrapperRef.current) return;
+    
+    const dx = e.clientX - dragStart.current.x;
+    const dy = e.clientY - dragStart.current.y;
+    
+    // If moved more than small threshold, treat as drag/pan
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        hasMoved.current = true;
+    }
+    
+    // Calculate new viewBox
+    // Scale: User Units / Pixels
+    const rect = wrapperRef.current.getBoundingClientRect();
+    const scaleX = viewBoxRef.current.width / rect.width;
+    const scaleY = viewBoxRef.current.height / rect.height;
+    
+    const newX = dragStartViewBox.current.x - dx * scaleX;
+    const newY = dragStartViewBox.current.y - dy * scaleY;
+    
+    setViewBox(prev => ({
+        ...prev,
+        x: newX,
+        y: newY
+    }));
+  };
+
+  const handleGlobalMouseUp = (e: MouseEvent) => {
+    isDragging.current = false;
+    window.removeEventListener('mousemove', handleGlobalMouseMove);
+    window.removeEventListener('mouseup', handleGlobalMouseUp);
+
+    // If it was a click (not a drag)
+    if (!hasMoved.current) {
+        if (clickedShapeId.current) {
+            setSelectedShapeId(clickedShapeId.current);
+        } else {
+            // Clicked on background
+            setSelectedShapeId(null);
+        }
+    }
+    
+    // Reset clicked shape
+    clickedShapeId.current = null;
+  };
+
+  const handleShapeMouseDown = (e: React.MouseEvent, id: string) => {
+      // Store which shape was clicked
+      clickedShapeId.current = id;
+      // Bubble up to handleMouseDown to start pan logic
+      // We do NOT stop propagation.
+  };
 
   // --- ACTIONS ---
 
@@ -321,7 +515,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     const base = {
       id: crypto.randomUUID(),
       name: `New ${type}`,
-      assignedLayers: {}, // Initialize empty
+      assignedLayers: {}, 
     };
 
     let newShape: FootprintShape;
@@ -360,8 +554,37 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     onUpdate({ ...footprint, name });
   };
 
+  const resetView = () => {
+    if (!wrapperRef.current) {
+        setViewBox({ x: -50, y: -50, width: 100, height: 100 });
+        return;
+    }
+    // Reset to 100mm width, centered at 0,0, matching aspect ratio
+    const { width, height } = wrapperRef.current.getBoundingClientRect();
+    const ratio = height / width; // Note: h/w
+    const newWidth = 100;
+    const newHeight = newWidth * ratio;
+    
+    setViewBox({
+        x: -newWidth / 2,
+        y: -newHeight / 2,
+        width: newWidth,
+        height: newHeight
+    });
+  };
+
   // --- DERIVED STATE ---
   const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
+  
+  // Calculate adaptive grid size
+  const getGridSize = (w: number) => {
+      // 10^floor(log10(width / 10))
+      const target = w / 10;
+      if (target <= 0) return 10;
+      const power = Math.floor(Math.log10(target));
+      return Math.pow(10, power);
+  };
+  const gridSize = getGridSize(viewBox.width);
 
   // --- RENDER: EDITOR VIEW ---
   return (
@@ -394,25 +617,64 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
         />
 
         {/* CENTER: VISUAL EDITOR */}
-        <div className="fp-canvas-wrapper">
-          <svg 
-            className="fp-canvas" 
-            viewBox="-50 -50 100 100" 
-            onClick={() => setSelectedShapeId(null)}
+        <div 
+            className="fp-canvas-wrapper" 
+            ref={wrapperRef}
+        >
+          <button 
+             className="canvas-home-btn" 
+             onClick={resetView}
+             title="Reset View"
           >
-            {/* Grid Definition */}
+             🏠
+          </button>
+
+          <svg 
+            ref={svgRef}
+            className="fp-canvas" 
+            viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
+            onMouseDown={handleMouseDown}
+          >
+            {/* Grid Definition - dynamic size */}
             <defs>
-              <pattern id="grid" width="10" height="10" patternUnits="userSpaceOnUse">
-                <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#333" strokeWidth="0.5" />
+              <pattern 
+                id="grid" 
+                width={gridSize} 
+                height={gridSize} 
+                patternUnits="userSpaceOnUse"
+              >
+                <path 
+                    d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} 
+                    fill="none" 
+                    stroke="#333" 
+                    strokeWidth="1" 
+                    vectorEffect="non-scaling-stroke" 
+                />
               </pattern>
             </defs>
             
-            {/* Grid Background */}
-            <rect x="-500" y="-500" width="1000" height="1000" fill="url(#grid)" />
+            {/* Grid Background: always covers visible area */}
+            <rect 
+                x={viewBox.x} 
+                y={viewBox.y} 
+                width={viewBox.width} 
+                height={viewBox.height} 
+                fill="url(#grid)" 
+            />
             
             {/* Axis Lines */}
-            <line x1="-500" y1="0" x2="500" y2="0" stroke="#444" strokeWidth="1" />
-            <line x1="0" y1="-500" x2="0" y2="500" stroke="#444" strokeWidth="1" />
+            <line 
+                x1={viewBox.x} y1="0" 
+                x2={viewBox.x + viewBox.width} y2="0" 
+                stroke="#444" strokeWidth="2" 
+                vectorEffect="non-scaling-stroke" 
+            />
+            <line 
+                x1="0" y1={viewBox.y} 
+                x2="0" y2={viewBox.y + viewBox.height} 
+                stroke="#444" strokeWidth="2" 
+                vectorEffect="non-scaling-stroke" 
+            />
 
             {/* Shapes */}
             {footprint.shapes.map((shape) => (
@@ -421,11 +683,11 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                 shape={shape}
                 isSelected={shape.id === selectedShapeId}
                 params={params}
-                onSelect={setSelectedShapeId}
+                onShapeDown={handleShapeMouseDown}
               />
             ))}
           </svg>
-          <div className="canvas-hint">Grid: 10mm | (0,0) Center</div>
+          <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
         </div>
 
         {/* RIGHT: PROPERTIES PANEL */}
