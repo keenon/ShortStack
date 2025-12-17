@@ -3,7 +3,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import * as math from "mathjs";
 import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, StackupLayer } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import Footprint3DView from "./Footprint3DView";
+import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import './FootprintEditor.css';
 
 interface Props {
@@ -323,6 +323,9 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const viewBoxRef = useRef(viewBox);
+  
+  // Ref for 3D View to control camera
+  const footprint3DRef = useRef<Footprint3DViewHandle>(null);
 
   // Dragging State Refs
   const isDragging = useRef(false);
@@ -535,6 +538,14 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     });
   };
 
+  const handleHomeClick = () => {
+    if (viewMode === "2D") {
+        resetView();
+    } else {
+        footprint3DRef.current?.resetCamera();
+    }
+  };
+
   // --- DERIVED STATE ---
   const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
@@ -593,16 +604,17 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                 className="fp-canvas-wrapper" 
                 ref={wrapperRef}
             >
-            {viewMode === "2D" ? (
-                <>
+                {/* Home Button handles both views now */}
                 <button 
                     className="canvas-home-btn" 
-                    onClick={resetView}
+                    onClick={handleHomeClick}
                     title="Reset View"
                 >
                     🏠
                 </button>
 
+            {viewMode === "2D" ? (
+                <>
                 <svg 
                     ref={svgRef}
                     className="fp-canvas" 
@@ -662,6 +674,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
             ) : (
                 // 3D VIEW
                 <Footprint3DView 
+                    ref={footprint3DRef}
                     footprint={footprint}
                     params={params}
                     stackup={stackup}

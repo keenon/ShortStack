@@ -1,5 +1,5 @@
 // src/components/Footprint3DView.tsx
-import React, { useMemo } from "react";
+import React, { useMemo, forwardRef, useImperativeHandle, useRef } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, Center } from "@react-three/drei";
 import * as THREE from "three";
@@ -10,6 +10,10 @@ interface Props {
   footprint: Footprint;
   params: Parameter[];
   stackup: StackupLayer[];
+}
+
+export interface Footprint3DViewHandle {
+    resetCamera: () => void;
 }
 
 // Helper to evaluate math expressions (duplicated from Editor to avoid circular deps)
@@ -118,7 +122,17 @@ const CutMesh = ({
   return null;
 };
 
-export default function Footprint3DView({ footprint, params, stackup }: Props) {
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, params, stackup }, ref) => {
+  const controlsRef = useRef<any>(null);
+
+  useImperativeHandle(ref, () => ({
+    resetCamera: () => {
+        if (controlsRef.current) {
+            controlsRef.current.reset();
+        }
+    }
+  }));
+
   return (
     <div style={{ width: "100%", height: "100%", background: "#111" }}>
       <Canvas camera={{ position: [50, 50, 50], fov: 45 }}>
@@ -166,11 +180,13 @@ export default function Footprint3DView({ footprint, params, stackup }: Props) {
             cellColor="#222" 
             position={[0, 0, 0]} 
         />
-        <OrbitControls makeDefault />
+        <OrbitControls makeDefault ref={controlsRef} />
         <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
           <GizmoViewport axisColors={['#9d4b4b', '#2f7f4f', '#3b5b9d']} labelColor="white" />
         </GizmoHelper>
       </Canvas>
     </div>
   );
-}
+});
+
+export default Footprint3DView;
