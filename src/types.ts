@@ -7,6 +7,7 @@ export interface Parameter {
 }
 
 export type ManufacturingType = "Cut" | "Carved/Printed";
+export type CarveSide = "Top" | "Bottom";
 
 export interface StackupLayer {
   id: string;
@@ -14,6 +15,7 @@ export interface StackupLayer {
   type: ManufacturingType;
   thicknessExpression: string;
   color: string;
+  carveSide: CarveSide;
 }
 
 // --- NEW TYPES FOR FOOTPRINT EDITOR ---

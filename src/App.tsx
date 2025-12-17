@@ -106,7 +106,8 @@ function App() {
         newStackup = newStackup.map((layer: any, index: number) => ({
           ...layer,
           id: layer.id || crypto.randomUUID(),
-          color: layer.color || TABLEAU_10[index % TABLEAU_10.length]
+          color: layer.color || TABLEAU_10[index % TABLEAU_10.length],
+          carveSide: layer.carveSide || "Top"
         }));
 
         // Sanitize Footprints

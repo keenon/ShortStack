@@ -26,6 +26,7 @@ export default function StackupEditor({ stackup, setStackup, params }: Props) {
       type: "Cut",
       thicknessExpression: "0",
       color: TABLEAU_10[nextColorIndex],
+      carveSide: "Top",
     };
     setStackup([...stackup, newLayer]);
   }
@@ -136,10 +137,22 @@ export default function StackupEditor({ stackup, setStackup, params }: Props) {
                     onChange={(e) =>
                       updateRow(layer.id, "type", e.target.value as ManufacturingType)
                     }
+                    style={{ marginBottom: layer.type === "Carved/Printed" ? "8px" : "0" }}
                   >
                     <option value="Cut">Cut</option>
                     <option value="Carved/Printed">Carved/Printed</option>
                   </select>
+
+                  {layer.type === "Carved/Printed" && (
+                    <select
+                        value={layer.carveSide}
+                        onChange={(e) => updateRow(layer.id, "carveSide", e.target.value)}
+                        title="Side to carve from"
+                    >
+                        <option value="Top">Cut into Top Side</option>
+                        <option value="Bottom">Cut into Bottom Side</option>
+                    </select>
+                  )}
                 </td>
 
                 {/* EXPRESSION EDITOR */}
