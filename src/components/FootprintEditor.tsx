@@ -556,24 +556,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
         
         <div className="spacer" />
         
-        {/* VIEW TOGGLE */}
-        <div style={{ display: "flex", gap: "2px", background: "#333", padding: "2px", borderRadius: "4px", marginRight: "20px" }}>
-            <button 
-                className={viewMode === "2D" ? "" : "secondary"} 
-                style={{ padding: "4px 12px", fontSize: "0.9em", background: viewMode === "2D" ? "#646cff" : "transparent" }}
-                onClick={() => setViewMode("2D")}
-            >
-                2D Canvas
-            </button>
-            <button 
-                className={viewMode === "3D" ? "" : "secondary"}
-                style={{ padding: "4px 12px", fontSize: "0.9em", background: viewMode === "3D" ? "#646cff" : "transparent" }}
-                onClick={() => setViewMode("3D")}
-            >
-                3D Preview
-            </button>
-        </div>
-
         <button onClick={() => addShape("circle")}>+ Circle</button>
         <button onClick={() => addShape("rect")}>+ Rect</button>
       </div>
@@ -589,85 +571,103 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
             stackup={stackup}
         />
 
-        {/* CENTER: VISUAL EDITOR */}
-        <div 
-            className="fp-canvas-wrapper" 
-            ref={wrapperRef}
-        >
-          {viewMode === "2D" ? (
-            <>
-              <button 
-                 className="canvas-home-btn" 
-                 onClick={resetView}
-                 title="Reset View"
-              >
-                 🏠
-              </button>
+        {/* CENTER: VISUAL EDITOR with Toggle Bar */}
+        <div className="fp-center-column">
+            {/* VIEW TOGGLE */}
+            <div className="view-toggle-bar">
+                <button 
+                    className={`view-toggle-btn ${viewMode === "2D" ? "active" : ""}`}
+                    onClick={() => setViewMode("2D")}
+                >
+                    2D Canvas
+                </button>
+                <button 
+                    className={`view-toggle-btn ${viewMode === "3D" ? "active" : ""}`}
+                    onClick={() => setViewMode("3D")}
+                >
+                    3D Preview
+                </button>
+            </div>
 
-              <svg 
-                ref={svgRef}
-                className="fp-canvas" 
-                viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
-                onMouseDown={handleMouseDown}
-              >
-                <defs>
-                  <pattern 
-                    id="grid" 
-                    width={gridSize} 
-                    height={gridSize} 
-                    patternUnits="userSpaceOnUse"
-                  >
-                    <path 
-                        d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} 
-                        fill="none" 
-                        stroke="#333" 
-                        strokeWidth="1" 
+            <div 
+                className="fp-canvas-wrapper" 
+                ref={wrapperRef}
+            >
+            {viewMode === "2D" ? (
+                <>
+                <button 
+                    className="canvas-home-btn" 
+                    onClick={resetView}
+                    title="Reset View"
+                >
+                    🏠
+                </button>
+
+                <svg 
+                    ref={svgRef}
+                    className="fp-canvas" 
+                    viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
+                    onMouseDown={handleMouseDown}
+                >
+                    <defs>
+                    <pattern 
+                        id="grid" 
+                        width={gridSize} 
+                        height={gridSize} 
+                        patternUnits="userSpaceOnUse"
+                    >
+                        <path 
+                            d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} 
+                            fill="none" 
+                            stroke="#333" 
+                            strokeWidth="1" 
+                            vectorEffect="non-scaling-stroke" 
+                        />
+                    </pattern>
+                    </defs>
+                    
+                    <rect 
+                        x={viewBox.x} 
+                        y={viewBox.y} 
+                        width={viewBox.width} 
+                        height={viewBox.height} 
+                        fill="url(#grid)" 
+                    />
+                    
+                    <line 
+                        x1={viewBox.x} y1="0" 
+                        x2={viewBox.x + viewBox.width} y2="0" 
+                        stroke="#444" strokeWidth="2" 
                         vectorEffect="non-scaling-stroke" 
                     />
-                  </pattern>
-                </defs>
-                
-                <rect 
-                    x={viewBox.x} 
-                    y={viewBox.y} 
-                    width={viewBox.width} 
-                    height={viewBox.height} 
-                    fill="url(#grid)" 
-                />
-                
-                <line 
-                    x1={viewBox.x} y1="0" 
-                    x2={viewBox.x + viewBox.width} y2="0" 
-                    stroke="#444" strokeWidth="2" 
-                    vectorEffect="non-scaling-stroke" 
-                />
-                <line 
-                    x1="0" y1={viewBox.y} 
-                    x2="0" y2={viewBox.y + viewBox.height} 
-                    stroke="#444" strokeWidth="2" 
-                    vectorEffect="non-scaling-stroke" 
-                />
+                    <line 
+                        x1="0" y1={viewBox.y} 
+                        x2="0" y2={viewBox.y + viewBox.height} 
+                        stroke="#444" strokeWidth="2" 
+                        vectorEffect="non-scaling-stroke" 
+                    />
 
-                {footprint.shapes.map((shape) => (
-                  <ShapeRenderer
-                    key={shape.id}
-                    shape={shape}
-                    isSelected={shape.id === selectedShapeId}
+                    {footprint.shapes.map((shape) => (
+                    <ShapeRenderer
+                        key={shape.id}
+                        shape={shape}
+                        isSelected={shape.id === selectedShapeId}
+                        params={params}
+                        onShapeDown={handleShapeMouseDown}
+                    />
+                    ))}
+                </svg>
+                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
+                </>
+            ) : (
+                // 3D VIEW
+                <Footprint3DView 
+                    footprint={footprint}
                     params={params}
-                    onShapeDown={handleShapeMouseDown}
-                  />
-                ))}
-              </svg>
-              <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
-            </>
-          ) : (
-            // 3D VIEW
-            <Footprint3DView 
-                footprint={footprint}
-                params={params}
-                stackup={stackup}
-            />
-          )}
+                    stackup={stackup}
+                />
+            )}
+            </div>
         </div>
 
         {/* RIGHT: PROPERTIES PANEL */}

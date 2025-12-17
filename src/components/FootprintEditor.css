@@ -123,6 +123,47 @@
     border-radius: 4px;
 }
 
+/* CENTER: Layout and Canvas */
+
+.fp-center-column {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    background: #1a1a1a;
+    overflow: hidden;
+}
+
+.view-toggle-bar {
+    display: flex;
+    width: 100%;
+    background: #222;
+    border-bottom: 1px solid #333;
+}
+
+.view-toggle-btn {
+    flex: 1; /* Each takes 50% width */
+    background: transparent;
+    border: none;
+    padding: 10px;
+    color: #888;
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 0.9em;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+}
+
+.view-toggle-btn:hover {
+    background: #2a2a2a;
+    color: #ddd;
+}
+
+.view-toggle-btn.active {
+    background: #2a2a2a;
+    color: #fff;
+    border-bottom-color: #646cff;
+}
+
 .fp-canvas-wrapper {
     flex-grow: 1;
     background: #1a1a1a;
