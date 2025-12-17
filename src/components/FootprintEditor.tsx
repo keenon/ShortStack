@@ -172,6 +172,54 @@ const PropertiesPanel = ({
   );
 };
 
+// 3. SHAPE LIST PANEL (NEW)
+const ShapeListPanel = ({
+  shapes,
+  selectedShapeId,
+  onSelect,
+  onDelete,
+  onRename,
+}: {
+  shapes: FootprintShape[];
+  selectedShapeId: string | null;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  onRename: (id: string, name: string) => void;
+}) => {
+  return (
+    <div className="fp-left-panel">
+      <h3 style={{ marginTop: 0 }}>Shapes</h3>
+      <div className="shape-list-container">
+        {shapes.map((shape) => (
+          <div
+            key={shape.id}
+            className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""}`}
+            onClick={() => onSelect(shape.id)}
+          >
+            <input
+              type="text"
+              value={shape.name}
+              onChange={(e) => onRename(shape.id, e.target.value)}
+              className="shape-name-edit"
+            />
+            <button
+              className="icon-btn danger"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(shape.id);
+              }}
+              title="Delete"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        {shapes.length === 0 && <div className="empty-state-small">No shapes added.</div>}
+      </div>
+    </div>
+  );
+};
+
 // ------------------------------------------------------------------
 // MAIN COMPONENT
 // ------------------------------------------------------------------
@@ -246,7 +294,16 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params }
       </div>
 
       <div className="fp-workspace">
-        {/* LEFT: VISUAL EDITOR */}
+        {/* LEFT: SHAPE LIST */}
+        <ShapeListPanel
+            shapes={footprint.shapes}
+            selectedShapeId={selectedShapeId}
+            onSelect={setSelectedShapeId}
+            onDelete={deleteShape}
+            onRename={(id, name) => updateShape(id, "name", name)}
+        />
+
+        {/* CENTER: VISUAL EDITOR */}
         <div className="fp-canvas-wrapper">
           <svg 
             className="fp-canvas" 
