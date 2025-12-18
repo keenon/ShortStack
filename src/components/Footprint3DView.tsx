@@ -6,7 +6,7 @@ import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/dr
 import { Geometry, Base, Subtraction } from "@react-three/csg";
 import * as THREE from "three";
 import * as math from "mathjs";
-import { Footprint, Parameter, StackupLayer, FootprintShape } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect } from "../types";
 
 interface Props {
   footprint: Footprint;
@@ -151,8 +151,17 @@ const LayerSolid = ({
           } else if (shape.type === "rect") {
             const w = evaluate(shape.width, params);
             const h = evaluate(shape.height, params);
+            // Convert degrees to radians for Three.js
+            // SVG rotation is CW, so we use negative for standard Y-up rotation
+            const angleDeg = evaluate((shape as FootprintRect).angle, params);
+            const angleRad = (angleDeg * Math.PI) / 180;
+
             return (
-              <Subtraction key={shape.id} position={[localX, cutY, localZ]}>
+              <Subtraction 
+                key={shape.id} 
+                position={[localX, cutY, localZ]}
+                rotation={[0, -angleRad, 0]} 
+              >
                 <boxGeometry args={[w, cutDepth, h]} />
               </Subtraction>
             );
@@ -201,8 +210,13 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
             dx = r;
             dy = r;
         } else if (shape.type === "rect") {
-            dx = evaluate(shape.width, params) / 2;
-            dy = evaluate(shape.height, params) / 2;
+            const w = evaluate(shape.width, params);
+            const h = evaluate(shape.height, params);
+            // Calculate a bounding radius to account for rotation 
+            // (The diagonal is the furthest any point can be from center)
+            const radius = Math.sqrt(Math.pow(w / 2, 2) + Math.pow(h / 2, 2));
+            dx = radius;
+            dy = radius;
         }
 
         if (x - dx < minX) minX = x - dx;

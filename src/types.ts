@@ -44,6 +44,7 @@ export interface FootprintRect extends BaseShape {
   y: string;
   width: string;
   height: string;
+  angle: string;
 }
 
 export type FootprintShape = FootprintCircle | FootprintRect;

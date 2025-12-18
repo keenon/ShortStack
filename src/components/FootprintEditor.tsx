@@ -74,12 +74,14 @@ const ShapeRenderer = ({
     const h = evaluateExpression(shape.height, params);
     const x = evaluateExpression(shape.x, params);
     const y = evaluateExpression(shape.y, params);
+    const angle = evaluateExpression(shape.angle, params);
     return (
       <rect
         x={x - w / 2}
         y={y - h / 2}
         width={w}
         height={h}
+        transform={`rotate(${angle}, ${x}, ${y})`}
         {...commonProps}
       />
     );
@@ -234,6 +236,15 @@ const PropertiesPanel = ({
               onChange={(val) => updateShape(shape.id, "height", val)}
               params={params}
               placeholder="10"
+            />
+          </div>
+          <div className="prop-group">
+            <label>Angle (deg)</label>
+            <ExpressionEditor
+              value={(shape as FootprintRect).angle}
+              onChange={(val) => updateShape(shape.id, "angle", val)}
+              params={params}
+              placeholder="0"
             />
           </div>
         </>
@@ -551,7 +562,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     if (type === "circle") {
       newShape = { ...base, type: "circle", x: "0", y: "0", diameter: "10" };
     } else {
-      newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10" };
+      newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0"};
     }
 
     onUpdate({
