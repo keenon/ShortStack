@@ -87,6 +87,11 @@
     background: #333;
 }
 
+/* Hidden state for shape items */
+.shape-item.is-hidden {
+    opacity: 0.5;
+}
+
 /* Layer indicators in shape list */
 .shape-layer-indicators {
     display: flex;
@@ -153,6 +158,12 @@
     background: #2a2a2a;
     padding: 6px 8px;
     border-radius: 4px;
+}
+
+/* Hidden state for layer visibility row */
+.layer-vis-item.is-hidden {
+    background: #202020;
+    opacity: 0.7;
 }
 
 .layer-vis-info {

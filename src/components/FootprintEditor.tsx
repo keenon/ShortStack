@@ -257,7 +257,7 @@ const LayerVisibilityPanel = ({
       <h3 style={{ marginTop: 0 }}>Layers</h3>
       <div className="layer-list-scroll">
         {/* Unassigned Layer */}
-        <div className="layer-vis-item">
+        <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
             <div className="layer-vis-info">
                 <div 
                     className="layer-color-square unassigned"
@@ -269,13 +269,13 @@ const LayerVisibilityPanel = ({
                 className={`vis-toggle-btn ${visibility["unassigned"] !== false ? "visible" : "hidden"}`}
                 onClick={() => onToggle("unassigned")}
             >
-                {visibility["unassigned"] !== false ? "Show" : "Hide"}
+                {visibility["unassigned"] !== false ? "Hide" : "Show"}
             </button>
         </div>
 
         {/* Stackup Layers */}
         {stackup.map((layer) => (
-             <div key={layer.id} className="layer-vis-item">
+             <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`}>
                 <div className="layer-vis-info">
                     <div 
                         className="layer-color-square"
@@ -287,7 +287,7 @@ const LayerVisibilityPanel = ({
                     className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`}
                     onClick={() => onToggle(layer.id)}
                 >
-                    {visibility[layer.id] !== false ? "Show" : "Hide"}
+                    {visibility[layer.id] !== false ? "Hide" : "Show"}
                 </button>
              </div>
         ))}
@@ -305,6 +305,7 @@ const ShapeListPanel = ({
   onDelete,
   onRename,
   stackup,
+  isShapeVisible,
 }: {
   shapes: FootprintShape[];
   selectedShapeId: string | null;
@@ -312,15 +313,18 @@ const ShapeListPanel = ({
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
   stackup: StackupLayer[];
+  isShapeVisible: (shape: FootprintShape) => boolean;
 }) => {
   return (
     <div className="fp-left-subpanel">
       <h3 style={{ marginTop: 0 }}>Shapes</h3>
       <div className="shape-list-container">
-        {shapes.map((shape) => (
+        {shapes.map((shape) => {
+          const visible = isShapeVisible(shape);
+          return (
           <div
             key={shape.id}
-            className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""}`}
+            className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""} ${!visible ? "is-hidden" : ""}`}
             onClick={() => onSelect(shape.id)}
           >
             {/* NEW: Colored squares for assigned layers */}
@@ -357,7 +361,7 @@ const ShapeListPanel = ({
               ✕
             </button>
           </div>
-        ))}
+        )})}
         {shapes.length === 0 && <div className="empty-state-small">No shapes added.</div>}
       </div>
     </div>
@@ -666,6 +670,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                 onDelete={deleteShape}
                 onRename={(id, name) => updateShape(id, "name", name)}
                 stackup={stackup}
+                isShapeVisible={isShapeVisible}
             />
         </div>
 
