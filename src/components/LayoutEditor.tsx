@@ -19,15 +19,18 @@ interface Props {
 
 const InstanceShapeRenderer = ({ 
     shape, 
-    params 
+    params,
+    isSelected // NEW: Prop to handle selection appearance
 }: { 
     shape: FootprintShape; 
-    params: Parameter[] 
+    params: Parameter[];
+    isSelected: boolean; // NEW: Type for selection prop
 }) => {
     const commonProps = {
-        fill: "rgba(255, 255, 255, 0.1)",
-        stroke: "#888",
-        strokeWidth: 1,
+        // UPDATED: Fill and stroke now reflect selection state, matching FootprintEditor
+        fill: isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)",
+        stroke: isSelected ? "#646cff" : "#888",
+        strokeWidth: isSelected ? 2 : 1,
         vectorEffect: "non-scaling-stroke" as const,
     };
 
@@ -271,19 +274,24 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
                         key={inst.id} 
                         transform={`translate(${evalX}, ${evalY}) rotate(${evalAngle})`}
                         style={{ cursor: 'pointer' }}
-                        onMouseDown={(e) => { e.stopPropagation(); clickedInstanceId.current = inst.id; }}
+                        // UPDATED: Removed stopPropagation so the SVG's handleMouseDown also triggers,
+                        // allowing the global mouseup listener to finish the selection click.
+                        onMouseDown={() => { clickedInstanceId.current = inst.id; }}
                       >
                           {/* Invisible hit area for easier clicking if footprint is empty or thin */}
                           <circle r="5" fill="transparent" />
                           
                           {/* Render footprint shapes */}
                           <g style={{ 
-                            stroke: isSelected ? "#646cff" : undefined, 
-                            strokeWidth: isSelected ? 2 : undefined,
                             filter: isSelected ? 'drop-shadow(0 0 2px #646cff)' : undefined
                           }}>
                             {fp.shapes.map(shape => (
-                                <InstanceShapeRenderer key={shape.id} shape={shape} params={params} />
+                                <InstanceShapeRenderer 
+                                    key={shape.id} 
+                                    shape={shape} 
+                                    params={params} 
+                                    isSelected={isSelected} // NEW: Passing selection state
+                                />
                             ))}
                           </g>
                       </g>
