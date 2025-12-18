@@ -242,7 +242,62 @@ const PropertiesPanel = ({
   );
 };
 
-// 3. SHAPE LIST PANEL
+// 3. LAYER VISIBILITY PANEL (NEW)
+const LayerVisibilityPanel = ({
+  stackup,
+  visibility,
+  onToggle,
+}: {
+  stackup: StackupLayer[];
+  visibility: Record<string, boolean>;
+  onToggle: (id: string) => void;
+}) => {
+  return (
+    <div className="fp-left-subpanel">
+      <h3 style={{ marginTop: 0 }}>Layers</h3>
+      <div className="layer-list-scroll">
+        {/* Unassigned Layer */}
+        <div className="layer-vis-item">
+            <div className="layer-vis-info">
+                <div 
+                    className="layer-color-square unassigned"
+                    title="Unassigned"
+                />
+                <span className="layer-vis-name">Unassigned</span>
+            </div>
+            <button 
+                className={`vis-toggle-btn ${visibility["unassigned"] !== false ? "visible" : "hidden"}`}
+                onClick={() => onToggle("unassigned")}
+            >
+                {visibility["unassigned"] !== false ? "Show" : "Hide"}
+            </button>
+        </div>
+
+        {/* Stackup Layers */}
+        {stackup.map((layer) => (
+             <div key={layer.id} className="layer-vis-item">
+                <div className="layer-vis-info">
+                    <div 
+                        className="layer-color-square"
+                        style={{ backgroundColor: layer.color }}
+                    />
+                    <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
+                </div>
+                <button 
+                    className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`}
+                    onClick={() => onToggle(layer.id)}
+                >
+                    {visibility[layer.id] !== false ? "Show" : "Hide"}
+                </button>
+             </div>
+        ))}
+        {stackup.length === 0 && <div className="empty-state-small">No stackup layers.</div>}
+      </div>
+    </div>
+  );
+};
+
+// 4. SHAPE LIST PANEL
 const ShapeListPanel = ({
   shapes,
   selectedShapeId,
@@ -259,7 +314,7 @@ const ShapeListPanel = ({
   stackup: StackupLayer[];
 }) => {
   return (
-    <div className="fp-left-panel">
+    <div className="fp-left-subpanel">
       <h3 style={{ marginTop: 0 }}>Shapes</h3>
       <div className="shape-list-container">
         {shapes.map((shape) => (
@@ -316,6 +371,9 @@ const ShapeListPanel = ({
 export default function FootprintEditor({ footprint, onUpdate, onClose, params, stackup }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   
+  // Layer Visibility State: undefined/true = visible, false = hidden
+  const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
+
   // Viewport state for zooming/panning
   const [viewBox, setViewBox] = useState({ x: -50, y: -50, width: 100, height: 100 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
@@ -520,6 +578,13 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     onUpdate({ ...footprint, name });
   };
 
+  const toggleLayerVisibility = (id: string) => {
+    setLayerVisibility(prev => ({
+        ...prev,
+        [id]: prev[id] === undefined ? false : !prev[id] // toggle between true/undefined (visible) and false (hidden)
+    }));
+  };
+
   const resetView = () => {
     if (!wrapperRef.current) {
         setViewBox({ x: -50, y: -50, width: 100, height: 100 });
@@ -550,6 +615,21 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
+  // VISIBILITY CHECK FOR 2D
+  const isShapeVisible = (shape: FootprintShape) => {
+      const assignedIds = Object.keys(shape.assignedLayers || {});
+      
+      if (assignedIds.length === 0) {
+          // If assigned to no layers, use "unassigned" visibility
+          return layerVisibility["unassigned"] !== false;
+      }
+      
+      // If assigned to layers, visible if NOT ALL of them are hidden.
+      // i.e., at least one assigned layer is visible (undefined or true)
+      const allAssignedLayersHidden = assignedIds.every(id => layerVisibility[id] === false);
+      return !allAssignedLayersHidden;
+  };
+
   // --- RENDER: EDITOR VIEW ---
   return (
     <div className="footprint-editor-container">
@@ -572,15 +652,22 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       </div>
 
       <div className="fp-workspace">
-        {/* LEFT: SHAPE LIST */}
-        <ShapeListPanel
-            shapes={footprint.shapes}
-            selectedShapeId={selectedShapeId}
-            onSelect={setSelectedShapeId}
-            onDelete={deleteShape}
-            onRename={(id, name) => updateShape(id, "name", name)}
-            stackup={stackup}
-        />
+        {/* LEFT: LAYERS AND SHAPES */}
+        <div className="fp-left-panel">
+            <LayerVisibilityPanel 
+                stackup={stackup}
+                visibility={layerVisibility}
+                onToggle={toggleLayerVisibility}
+            />
+            <ShapeListPanel
+                shapes={footprint.shapes}
+                selectedShapeId={selectedShapeId}
+                onSelect={setSelectedShapeId}
+                onDelete={deleteShape}
+                onRename={(id, name) => updateShape(id, "name", name)}
+                stackup={stackup}
+            />
+        </div>
 
         {/* CENTER: VISUAL EDITOR with Toggle Bar */}
         <div className="fp-center-column">
@@ -659,15 +746,18 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                         vectorEffect="non-scaling-stroke" 
                     />
 
-                    {footprint.shapes.map((shape) => (
-                    <ShapeRenderer
-                        key={shape.id}
-                        shape={shape}
-                        isSelected={shape.id === selectedShapeId}
-                        params={params}
-                        onShapeDown={handleShapeMouseDown}
-                    />
-                    ))}
+                    {footprint.shapes.map((shape) => {
+                        if (!isShapeVisible(shape)) return null;
+                        return (
+                            <ShapeRenderer
+                                key={shape.id}
+                                shape={shape}
+                                isSelected={shape.id === selectedShapeId}
+                                params={params}
+                                onShapeDown={handleShapeMouseDown}
+                            />
+                        );
+                    })}
                 </svg>
                 <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
                 </>
@@ -678,6 +768,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                     footprint={footprint}
                     params={params}
                     stackup={stackup}
+                    visibleLayers={layerVisibility} // Pass visibility
                 />
             )}
             </div>

@@ -12,6 +12,7 @@ interface Props {
   footprint: Footprint;
   params: Parameter[];
   stackup: StackupLayer[];
+  visibleLayers?: Record<string, boolean>;
 }
 
 export interface Footprint3DViewHandle {
@@ -164,7 +165,7 @@ const LayerSolid = ({
   );
 };
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, params, stackup }, ref) => {
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, params, stackup, visibleLayers }, ref) => {
   const controlsRef = useRef<any>(null);
 
   useImperativeHandle(ref, () => ({
@@ -232,7 +233,11 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
             let currentZ = 0; // This tracks height (Y in 3D)
             return stackup.map((layer) => {
               const thickness = evaluate(layer.thicknessExpression, params);
-              const node = (
+              
+              // NEW: Check visibility
+              const isVisible = visibleLayers ? visibleLayers[layer.id] !== false : true;
+              
+              const node = isVisible ? (
                 <LayerSolid 
                   key={layer.id}
                   layer={layer}
@@ -242,7 +247,8 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
                   thickness={thickness}
                   bounds={bounds}
                 />
-              );
+              ) : null;
+
               currentZ += thickness;
               return node;
             });
