@@ -3,7 +3,7 @@ import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point } from "../types";
 import { evaluateExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
-import Layout3DView, { Layout3DViewHandle } from "./Layout3DView"; // NEW IMPORT
+import Layout3DView, { Layout3DViewHandle } from "./Layout3DView";
 import './LayoutEditor.css';
 
 interface Props {
@@ -20,6 +20,62 @@ interface Props {
 // SUB-COMPONENTS
 // ------------------------------------------------------------------
 
+// 1. LAYER VISIBILITY PANEL
+const LayerVisibilityPanel = ({
+  stackup,
+  visibility,
+  onToggle,
+}: {
+  stackup: StackupLayer[];
+  visibility: Record<string, boolean>;
+  onToggle: (id: string) => void;
+}) => {
+  return (
+    <div className="layout-left-subpanel">
+      <h3 style={{ marginTop: 0 }}>Layers</h3>
+      <div className="layer-list-scroll">
+        {/* Unassigned Layer */}
+        <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
+            <div className="layer-vis-info">
+                <div 
+                    className="layer-color-square unassigned"
+                    title="Unassigned"
+                />
+                <span className="layer-vis-name">Unassigned</span>
+            </div>
+            <button 
+                className={`vis-toggle-btn ${visibility["unassigned"] !== false ? "visible" : "hidden"}`}
+                onClick={() => onToggle("unassigned")}
+            >
+                {visibility["unassigned"] !== false ? "Hide" : "Show"}
+            </button>
+        </div>
+
+        {/* Stackup Layers */}
+        {stackup.map((layer) => (
+             <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`}>
+                <div className="layer-vis-info">
+                    <div 
+                        className="layer-color-square"
+                        style={{ backgroundColor: layer.color }}
+                    />
+                    <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
+                </div>
+                <button 
+                    className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`}
+                    onClick={() => onToggle(layer.id)}
+                >
+                    {visibility[layer.id] !== false ? "Hide" : "Show"}
+                </button>
+             </div>
+        ))}
+        {stackup.length === 0 && <div className="empty-state-small">No stackup layers.</div>}
+      </div>
+    </div>
+  );
+};
+
+// 2. SHAPE RENDERER
 const InstanceShapeRenderer = ({ 
     shape, 
     params,
@@ -63,9 +119,7 @@ const InstanceShapeRenderer = ({
     return null;
 };
 
-/**
- * Component to edit Board Outline points
- */
+// 3. BOARD OUTLINE PROPERTIES
 const BoardOutlineProperties = ({ 
     boardOutline, 
     setBoardOutline, 
@@ -169,13 +223,17 @@ const BoardOutlineProperties = ({
 export default function LayoutEditor({ layout, setLayout, boardOutline, setBoardOutline, footprints, params, stackup }: Props) {
   // SPECIAL ID: We use "BOARD_OUTLINE" as a hardcoded ID for selection
   const [selectedId, setSelectedId] = useState<string | null>("BOARD_OUTLINE");
+  
+  // Layer Visibility State: undefined/true = visible, false = hidden
+  const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
+
   const [viewBox, setViewBox] = useState({ x: -100, y: -100, width: 200, height: 200 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
   
   const wrapperRef = useRef<HTMLDivElement>(null);
   const viewBoxRef = useRef(viewBox);
   
-  // NEW: Ref for 3D View to control camera
+  // Ref for 3D View to control camera
   const layout3DRef = useRef<Layout3DViewHandle>(null);
 
   // Dragging State Refs for Canvas Pan
@@ -212,6 +270,29 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
 
   const updateInstance = (id: string, field: keyof FootprintInstance, value: string) => {
     setLayout(prev => prev.map(inst => inst.id === id ? { ...inst, [field]: value } : inst));
+  };
+
+  const toggleLayerVisibility = (id: string) => {
+    setLayerVisibility(prev => ({
+        ...prev,
+        [id]: prev[id] === undefined ? false : !prev[id]
+    }));
+  };
+
+  // --- HELPERS ---
+
+  // Check if a shape should be visible based on its layer assignment and current global visibility
+  const isShapeVisible = (shape: FootprintShape) => {
+    const assignedIds = Object.keys(shape.assignedLayers || {});
+    
+    if (assignedIds.length === 0) {
+        // If assigned to no layers, use "unassigned" visibility
+        return layerVisibility["unassigned"] !== false;
+    }
+    
+    // If assigned to layers, visible if NOT ALL of them are hidden.
+    const allAssignedLayersHidden = assignedIds.every(id => layerVisibility[id] === false);
+    return !allAssignedLayersHidden;
   };
 
   // --- 2D CANVAS NAVIGATION LOGIC ---
@@ -309,72 +390,83 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
 
   return (
     <div className="layout-editor-container">
-      {/* 1. LEFT PANEL: FOOTPRINT INSTANCES */}
+      {/* 1. LEFT PANEL: LAYERS & INSTANCES */}
       <div className="layout-sidebar-left">
-        <div className="sidebar-header-row">
-            <h3>Layout Objects</h3>
-        </div>
+        
+        {/* Top Half: Layers */}
+        <LayerVisibilityPanel 
+            stackup={stackup}
+            visibility={layerVisibility}
+            onToggle={toggleLayerVisibility}
+        />
 
-        <div className="layout-instance-list">
-          {/* HARDCODED BOARD OUTLINE ITEM */}
-          <div 
-            className={`instance-item board-outline-item ${selectedId === 'BOARD_OUTLINE' ? 'selected' : ''}`}
-            onClick={() => setSelectedId('BOARD_OUTLINE')}
-          >
-            <div className="instance-info">
-                <strong>Board Outline</strong>
-                <span className="inst-id-tag">Polygon</span>
+        {/* Bottom Half: Layout Objects */}
+        <div className="layout-left-subpanel">
+            <div className="sidebar-header-row">
+                <h3>Layout Objects</h3>
             </div>
-          </div>
 
-          <div style={{ borderBottom: '1px solid #333', margin: '10px 0' }} />
-
-          <div className="sidebar-header-row" style={{ marginBottom: '10px' }}>
-            <span style={{ fontSize: '0.9em', color: '#888' }}>Instances</span>
-            <div className="add-instance-control">
-                <select 
-                    defaultValue=""
-                    onChange={(e) => {
-                        if (e.target.value) {
-                            addInstance(e.target.value);
-                            e.target.value = "";
-                        }
-                    }}
-                >
-                    <option value="" disabled>+ Place...</option>
-                    {footprints.map(fp => (
-                        <option key={fp.id} value={fp.id}>{fp.name}</option>
-                    ))}
-                </select>
+            <div className="layout-instance-list">
+            {/* HARDCODED BOARD OUTLINE ITEM */}
+            <div 
+                className={`instance-item board-outline-item ${selectedId === 'BOARD_OUTLINE' ? 'selected' : ''}`}
+                onClick={() => setSelectedId('BOARD_OUTLINE')}
+            >
+                <div className="instance-info">
+                    <strong>Board Outline</strong>
+                    <span className="inst-id-tag">Polygon</span>
+                </div>
             </div>
-          </div>
 
-          {layout.map((inst) => {
-              const fp = footprints.find(f => f.id === inst.footprintId);
-              return (
-                  <div 
-                    key={inst.id} 
-                    className={`instance-item ${inst.id === selectedId ? 'selected' : ''}`}
-                    onClick={() => setSelectedId(inst.id)}
-                  >
-                      <div className="instance-info">
-                        <input
-                          type="text"
-                          value={inst.name}
-                          onChange={(e) => updateInstance(inst.id, "name", e.target.value)}
-                          className="instance-name-edit"
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                        <span className="inst-id-tag">{fp?.name || 'Unknown Footprint'}</span>
-                      </div>
-                      <button 
-                        className="icon-btn danger" 
-                        onClick={(e) => { e.stopPropagation(); deleteInstance(inst.id); }}
-                      >✕</button>
-                  </div>
-              );
-          })}
-          {layout.length === 0 && <p className="empty-hint">No footprints placed.</p>}
+            <div style={{ borderBottom: '1px solid #333', margin: '10px 0' }} />
+
+            <div className="sidebar-header-row" style={{ marginBottom: '10px' }}>
+                <span style={{ fontSize: '0.9em', color: '#888' }}>Instances</span>
+                <div className="add-instance-control">
+                    <select 
+                        defaultValue=""
+                        onChange={(e) => {
+                            if (e.target.value) {
+                                addInstance(e.target.value);
+                                e.target.value = "";
+                            }
+                        }}
+                    >
+                        <option value="" disabled>+ Place...</option>
+                        {footprints.map(fp => (
+                            <option key={fp.id} value={fp.id}>{fp.name}</option>
+                        ))}
+                    </select>
+                </div>
+            </div>
+
+            {layout.map((inst) => {
+                const fp = footprints.find(f => f.id === inst.footprintId);
+                return (
+                    <div 
+                        key={inst.id} 
+                        className={`instance-item ${inst.id === selectedId ? 'selected' : ''}`}
+                        onClick={() => setSelectedId(inst.id)}
+                    >
+                        <div className="instance-info">
+                            <input
+                            type="text"
+                            value={inst.name}
+                            onChange={(e) => updateInstance(inst.id, "name", e.target.value)}
+                            className="instance-name-edit"
+                            onClick={(e) => e.stopPropagation()}
+                            />
+                            <span className="inst-id-tag">{fp?.name || 'Unknown Footprint'}</span>
+                        </div>
+                        <button 
+                            className="icon-btn danger" 
+                            onClick={(e) => { e.stopPropagation(); deleteInstance(inst.id); }}
+                        >✕</button>
+                    </div>
+                );
+            })}
+            {layout.length === 0 && <p className="empty-hint">No footprints placed.</p>}
+            </div>
         </div>
       </div>
 
@@ -400,7 +492,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
               <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
               
               {/* Render Board Outline */}
-              {/* Hit Area for easier selection (transparent stroke) */}
               <polygon 
                 points={boardPointsStr}
                 fill="none"
@@ -410,7 +501,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                 style={{ cursor: 'pointer' }}
                 onMouseDown={() => { clickedId.current = "BOARD_OUTLINE"; }}
               />
-              {/* Visible Outline */}
               <polygon 
                 points={boardPointsStr}
                 fill="none"
@@ -437,28 +527,32 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                         style={{ cursor: 'pointer' }}
                         onMouseDown={() => { clickedId.current = inst.id; }}
                       >
-                          {/* Invisible hit area for easier clicking if footprint is empty or thin */}
+                          {/* Invisible hit area */}
                           <circle r="5" fill="transparent" />
                           
-                          {/* Render footprint shapes */}
                           <g style={{ 
                             filter: isSelected ? 'drop-shadow(0 0 2px #646cff)' : undefined
                           }}>
-                            {fp.shapes.map(shape => (
-                                <InstanceShapeRenderer 
-                                    key={shape.id} 
-                                    shape={shape} 
-                                    params={params} 
-                                    isSelected={isSelected} 
-                                />
-                            ))}
+                            {fp.shapes.map(shape => {
+                                // 2D VISIBILITY CHECK
+                                if (!isShapeVisible(shape)) return null;
+
+                                return (
+                                    <InstanceShapeRenderer 
+                                        key={shape.id} 
+                                        shape={shape} 
+                                        params={params} 
+                                        isSelected={isSelected} 
+                                    />
+                                );
+                            })}
                           </g>
                       </g>
                   );
               })}
             </svg>
           ) : (
-            // NEW: 3D Preview
+            // 3D Preview
             <Layout3DView 
                 ref={layout3DRef}
                 layout={layout}
@@ -466,6 +560,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                 footprints={footprints}
                 params={params}
                 stackup={stackup}
+                visibleLayers={layerVisibility} // PASS VISIBILITY
             />
           )}
           {viewMode === "2D" && (

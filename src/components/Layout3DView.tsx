@@ -13,6 +13,7 @@ interface Props {
   footprints: Footprint[];
   params: Parameter[];
   stackup: StackupLayer[];
+  visibleLayers?: Record<string, boolean>; // NEW PROP
 }
 
 export interface Layout3DViewHandle {
@@ -39,15 +40,8 @@ const LayerVolume = ({
     // We construct the geometry in a Local Space where:
     // Local X = World X
     // Local Y = World Z (Depth)
-    // Local Z = World -Y (Downwards, Thickness) -> Wait, rotation -90 X makes Local Z point to World Y
-    //
-    // Rotation -90 deg around X:
-    // Local (0,0,1) -> World (0,1,0)
-    //
-    // ExtrudeGeometry extrudes along positive Z (Local).
-    // So it creates a volume from Local Z=0 to Local Z=thickness.
-    // In World space, this maps to Y=0 to Y=thickness (relative to mesh position).
-
+    // Local Z = World -Y (Downwards, Thickness) due to rotation -90 X
+    
     return (
         <mesh 
             rotation={[-Math.PI / 2, 0, 0]} 
@@ -68,7 +62,6 @@ const LayerVolume = ({
                     const instAngle = evaluateExpression(inst.angle, params);
                     const instAngleRad = (instAngle * Math.PI) / 180;
                     
-                    // Optimization: calc cos/sin once per instance
                     const cosA = Math.cos(instAngleRad);
                     const sinA = Math.sin(instAngleRad);
 
@@ -77,29 +70,22 @@ const LayerVolume = ({
                          if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return null;
 
                          // Calculate Cut Depth / Position (Local Z)
-                         // Local Z=0 is Bottom Surface (World Y=bottomZ). 
-                         // Local Z=thickness is Top Surface (World Y=bottomZ+thickness).
                          let cutDepth = 0;
-                         let cutZ = 0; // Center of cut in Local Z
+                         let cutZ = 0;
 
                          if (layer.type === "Cut") {
-                             cutDepth = thickness + 1.0; // Overshoot for clean cut
+                             cutDepth = thickness + 1.0; 
                              cutZ = thickness / 2;
                          } else {
                              const rawDepth = evaluateExpression(shape.assignedLayers[layer.id], params);
                              const val = Math.max(0, Math.min(rawDepth, thickness));
                              if (val <= 0) return null;
                              
-                             cutDepth = val + 0.1; // small overshoot
+                             cutDepth = val + 0.1;
                              
                              if (layer.carveSide === "Top") {
-                                 // From Z=thickness (Top) downwards
-                                 // Center of cut = Top - (val / 2)
-                                 // Add small offset to ensure it breaks the surface
                                  cutZ = thickness - (val / 2) + 0.05;
                              } else {
-                                 // From Z=0 (Bottom) upwards
-                                 // Center of cut = Bottom + (val / 2)
                                  cutZ = (val / 2) - 0.05;
                              }
                          }
@@ -108,24 +94,18 @@ const LayerVolume = ({
                          const sx = evaluateExpression(shape.x, params);
                          const sy = evaluateExpression(shape.y, params);
                          
-                         // Rotate Shape Vector by Instance Angle
-                         // Standard 2D rotation: x' = x cos - y sin, y' = x sin + y cos
-                         // This produces CW rotation if Y axis is down (Screen/SVG coords), or CCW if Y is up.
-                         // Consistent with FootprintEditor 2D view.
                          const rotX = sx * cosA - sy * sinA;
                          const rotY = sx * sinA + sy * cosA;
                          
                          const finalX = instX + rotX;
-                         const finalY = instY + rotY; // This maps to Local Y (World Z)
+                         const finalY = instY + rotY; // Maps to Local Y
                          
-                         // Orientation & Geometry
                          if (shape.type === "circle") {
                              const diameter = evaluateExpression(shape.diameter, params);
                              return (
                                  <Subtraction 
                                     key={`${inst.id}-${shape.id}`}
                                     position={[finalX, finalY, cutZ]}
-                                    // Rotate Cylinder to align with Local Z (Axis of thickness)
                                     rotation={[Math.PI/2, 0, 0]}
                                  >
                                      <cylinderGeometry args={[diameter/2, diameter/2, cutDepth, 32]} />
@@ -137,14 +117,10 @@ const LayerVolume = ({
                              const sAngle = evaluateExpression((shape as FootprintRect).angle, params);
                              const totalAngleRad = instAngleRad + (sAngle * Math.PI) / 180;
                              
-                             // Box args: Width(X), Height(Y), Depth(Z)
-                             // We map 2D Rect (w, h) to Local (X, Y). Cut Depth to Local Z.
                              return (
                                  <Subtraction
                                     key={`${inst.id}-${shape.id}`}
                                     position={[finalX, finalY, cutZ]}
-                                    // Rotate around Local Z axis (Thickness axis)
-                                    // Positive angle is CW in Top-Down view (Local X to Local Y)
                                     rotation={[0, 0, totalAngleRad]}
                                  >
                                      <boxGeometry args={[w, h, cutDepth]} />
@@ -159,7 +135,7 @@ const LayerVolume = ({
     );
 };
 
-const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutline, footprints, params, stackup }, ref) => {
+const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutline, footprints, params, stackup, visibleLayers }, ref) => {
   const controlsRef = useRef<any>(null);
 
   useImperativeHandle(ref, () => ({
@@ -170,7 +146,6 @@ const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutli
     }
   }));
 
-  // Create THREE.Shape from board outline
   const boardShape = useMemo(() => {
       const s = new THREE.Shape();
       if (boardOutline.points.length > 0) {
@@ -195,12 +170,14 @@ const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutli
 
         <group>
           {(() => {
-            let currentZ = 0; // World Y (Height)
-            // FIXED: Reverse stackup to match Footprint3DView and logical Bottom-to-Top visual stacking
+            let currentZ = 0; // World Y
             return [...stackup].reverse().map((layer) => {
               const thickness = evaluateExpression(layer.thicknessExpression, params);
               
-              const node = (
+              // NEW: CHECK VISIBILITY
+              const isVisible = visibleLayers ? visibleLayers[layer.id] !== false : true;
+
+              const node = isVisible ? (
                 <LayerVolume 
                   key={layer.id}
                   layer={layer}
@@ -211,7 +188,7 @@ const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutli
                   bottomZ={currentZ}
                   thickness={thickness}
                 />
-              );
+              ) : null;
 
               currentZ += thickness;
               return node;
