@@ -4,7 +4,7 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, FootprintInstance } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -23,8 +23,9 @@ function App() {
   
   const [params, setParams] = useState<Parameter[]>([]);
   const [stackup, setStackup] = useState<StackupLayer[]>([]);
-  // NEW: State for Footprints
   const [footprints, setFootprints] = useState<Footprint[]>([]);
+  // NEW: State for Layout
+  const [layout, setLayout] = useState<FootprintInstance[]>([]);
   
   const [activeTab, setActiveTab] = useState<Tab>("stackup");
 
@@ -34,8 +35,7 @@ function App() {
 
     const saveData = async () => {
       try {
-        // Include footprints in save data
-        const projectData: ProjectData = { params, stackup, footprints };
+        const projectData: ProjectData = { params, stackup, footprints, layout };
         const content = JSON.stringify(projectData, null, 2);
         await writeTextFile(currentPath, content);
         console.log("Auto-saved to", currentPath);
@@ -46,7 +46,7 @@ function App() {
     
     const timer = setTimeout(saveData, 500);
     return () => clearTimeout(timer);
-  }, [params, stackup, footprints, currentPath]);
+  }, [params, stackup, footprints, layout, currentPath]);
 
   // CREATE PROJECT
   async function createProject() {
@@ -56,11 +56,12 @@ function App() {
       });
 
       if (path) {
-        const initialData: ProjectData = { params: [], stackup: [], footprints: [] };
+        const initialData: ProjectData = { params: [], stackup: [], footprints: [], layout: [] };
         await writeTextFile(path, JSON.stringify(initialData));
         setParams([]);
         setStackup([]);
-        setFootprints([]); // Reset
+        setFootprints([]);
+        setLayout([]);
         setCurrentPath(path);
         setActiveTab("stackup");
       }
@@ -84,20 +85,20 @@ function App() {
 
         let needsUpgrade = false;
 
-        // Handle backward compatibility or raw arrays
         let rawParams: any[] = [];
         let rawStackup: any[] = [];
         let rawFootprints: any[] = [];
+        let rawLayout: any[] = [];
 
         if (Array.isArray(rawData)) {
-            // Very old legacy check
             rawParams = rawData;
             needsUpgrade = true;
         } else {
             rawParams = rawData.params || [];
             rawStackup = rawData.stackup || [];
             rawFootprints = rawData.footprints || [];
-            if (!rawData.params || !rawData.stackup || !rawData.footprints) needsUpgrade = true;
+            rawLayout = rawData.layout || [];
+            if (!rawData.params || !rawData.stackup || !rawData.footprints || !rawData.layout) needsUpgrade = true;
         }
 
         // Sanitize Parameters
@@ -121,14 +122,11 @@ function App() {
           };
         });
 
-        // Sanitize Footprints & Shapes (Backward Compatibility for 'angle', etc.)
+        // Sanitize Footprints
         const newFootprints: Footprint[] = rawFootprints.map((fp: any) => {
           if (!fp.id || !fp.shapes) needsUpgrade = true;
-          
           const sanitizedShapes = (fp.shapes || []).map((s: any) => {
-            // Check for missing core properties
             if (!s.id || !s.assignedLayers || s.name === undefined) needsUpgrade = true;
-            
             const baseShape = {
               ...s,
               id: s.id || crypto.randomUUID(),
@@ -137,28 +135,28 @@ function App() {
               x: s.x ?? "0",
               y: s.y ?? "0",
             };
-
             if (s.type === "rect") {
-              // Specifically handle the new 'angle' property
-              if (s.angle === undefined) {
-                needsUpgrade = true;
-                baseShape.angle = "0";
-              }
-              if (s.width === undefined || s.height === undefined) needsUpgrade = true;
+              if (s.angle === undefined) { needsUpgrade = true; baseShape.angle = "0"; }
               baseShape.width = s.width ?? "10";
               baseShape.height = s.height ?? "10";
             } else if (s.type === "circle") {
-              if (s.diameter === undefined) needsUpgrade = true;
               baseShape.diameter = s.diameter ?? "10";
             }
-
             return baseShape as FootprintShape;
           });
+          return { ...fp, id: fp.id || crypto.randomUUID(), shapes: sanitizedShapes };
+        });
 
+        // Sanitize Layout
+        const newLayout: FootprintInstance[] = rawLayout.map((inst: any) => {
+          if (!inst.id || !inst.footprintId) needsUpgrade = true;
           return {
-            ...fp,
-            id: fp.id || crypto.randomUUID(),
-            shapes: sanitizedShapes
+            ...inst,
+            id: inst.id || crypto.randomUUID(),
+            footprintId: inst.footprintId || "",
+            x: inst.x ?? "0",
+            y: inst.y ?? "0",
+            angle: inst.angle ?? "0"
           };
         });
 
@@ -169,6 +167,7 @@ function App() {
         setParams(newParams);
         setStackup(newStackup);
         setFootprints(newFootprints);
+        setLayout(newLayout);
         setCurrentPath(path as string);
         setActiveTab("stackup");
       }
@@ -183,6 +182,7 @@ function App() {
     setParams([]);
     setStackup([]);
     setFootprints([]);
+    setLayout([]);
   }
 
   if (!currentPath) {
@@ -214,7 +214,6 @@ function App() {
       </nav>
 
       <main>
-        {/* We keep all tabs mounted but use display: none to hide inactive ones */}
         <div className={`tab-pane ${activeTab === "stackup" ? "active" : ""}`}>
           <StackupEditor 
             stackup={stackup} 
@@ -231,7 +230,13 @@ function App() {
           />
         </div>
         <div className={`tab-pane ${activeTab === "layout" ? "active" : ""}`}>
-          <LayoutEditor />
+          <LayoutEditor 
+            layout={layout}
+            setLayout={setLayout}
+            footprints={footprints}
+            params={params}
+            stackup={stackup}
+          />
         </div>
         <div className={`tab-pane ${activeTab === "parameters" ? "active" : ""}`}>
           <ParametersEditor params={params} setParams={setParams} />

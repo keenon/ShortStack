@@ -18,7 +18,7 @@ export interface StackupLayer {
   carveSide: CarveSide;
 }
 
-// --- NEW TYPES FOR FOOTPRINT EDITOR ---
+// --- FOOTPRINT TYPES ---
 
 export type ShapeType = "circle" | "rect";
 
@@ -26,11 +26,9 @@ export interface BaseShape {
   id: string;
   type: ShapeType;
   name: string;
-  // Key is layerId, Value is depthExpression (or empty string/ignored if not Carved)
   assignedLayers: Record<string, string>;
 }
 
-// Properties are strings to allow expressions (e.g., "Width / 2")
 export interface FootprintCircle extends BaseShape {
   type: "circle";
   x: string;
@@ -55,8 +53,17 @@ export interface Footprint {
   shapes: FootprintShape[];
 }
 
+export interface FootprintInstance {
+  id: string;
+  footprintId: string; // References Footprint.id
+  x: string;           // Expression
+  y: string;           // Expression
+  angle: string;       // Expression
+}
+
 export interface ProjectData {
   params: Parameter[];
   stackup: StackupLayer[];
   footprints: Footprint[];
+  layout: FootprintInstance[]; // Added layout state
 }
