@@ -1,6 +1,6 @@
 // src/components/LayoutEditor.tsx
 import { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape } from "../types";
+import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point } from "../types";
 import { evaluateExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
 import './LayoutEditor.css';
@@ -8,6 +8,8 @@ import './LayoutEditor.css';
 interface Props {
   layout: FootprintInstance[];
   setLayout: React.Dispatch<React.SetStateAction<FootprintInstance[]>>;
+  boardOutline: BoardOutline;
+  setBoardOutline: React.Dispatch<React.SetStateAction<BoardOutline>>;
   footprints: Footprint[];
   params: Parameter[];
   stackup: StackupLayer[];
@@ -20,14 +22,13 @@ interface Props {
 const InstanceShapeRenderer = ({ 
     shape, 
     params,
-    isSelected // NEW: Prop to handle selection appearance
+    isSelected 
 }: { 
     shape: FootprintShape; 
     params: Parameter[];
-    isSelected: boolean; // NEW: Type for selection prop
+    isSelected: boolean; 
 }) => {
     const commonProps = {
-        // UPDATED: Fill and stroke now reflect selection state, matching FootprintEditor
         fill: isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)",
         stroke: isSelected ? "#646cff" : "#888",
         strokeWidth: isSelected ? 2 : 1,
@@ -61,12 +62,112 @@ const InstanceShapeRenderer = ({
     return null;
 };
 
+/**
+ * NEW: Component to edit Board Outline points
+ */
+const BoardOutlineProperties = ({ 
+    boardOutline, 
+    setBoardOutline, 
+    params 
+}: { 
+    boardOutline: BoardOutline, 
+    setBoardOutline: React.Dispatch<React.SetStateAction<BoardOutline>>,
+    params: Parameter[]
+}) => {
+    const updatePoint = (id: string, field: "x" | "y", val: string) => {
+        setBoardOutline(prev => ({
+            ...prev,
+            points: prev.points.map(p => p.id === id ? { ...p, [field]: val } : p)
+        }));
+    };
+
+    const addPoint = () => {
+        const lastPoint = boardOutline.points[boardOutline.points.length - 1];
+        const newPoint: Point = {
+            id: crypto.randomUUID(),
+            x: lastPoint ? lastPoint.x : "0",
+            y: lastPoint ? lastPoint.y : "0"
+        };
+        setBoardOutline(prev => ({ ...prev, points: [...prev.points, newPoint] }));
+    };
+
+    const deletePoint = (id: string) => {
+        if (boardOutline.points.length <= 3) return;
+        setBoardOutline(prev => ({ ...prev, points: prev.points.filter(p => p.id !== id) }));
+    };
+
+    const movePoint = (index: number, direction: -1 | 1) => {
+        if (direction === -1 && index === 0) return;
+        if (direction === 1 && index === boardOutline.points.length - 1) return;
+        const newPoints = [...boardOutline.points];
+        const target = index + direction;
+        [newPoints[index], newPoints[target]] = [newPoints[target], newPoints[index]];
+        setBoardOutline(prev => ({ ...prev, points: newPoints }));
+    };
+
+    return (
+        <div className="properties-editor">
+            <h3>Board Outline Points</h3>
+            <table className="points-table">
+                <thead>
+                    <tr>
+                        <th>X</th>
+                        <th>Y</th>
+                        <th style={{ width: "90px" }}>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {boardOutline.points.map((p, idx) => (
+                        <tr key={p.id}>
+                            <td>
+                                <ExpressionEditor 
+                                    value={p.x} 
+                                    onChange={(v) => updatePoint(p.id, "x", v)} 
+                                    params={params} 
+                                />
+                            </td>
+                            <td>
+                                <ExpressionEditor 
+                                    value={p.y} 
+                                    onChange={(v) => updatePoint(p.id, "y", v)} 
+                                    params={params} 
+                                />
+                            </td>
+                            <td>
+                                <div className="action-buttons">
+                                    <button 
+                                        className="icon-btn btn-up" 
+                                        onClick={() => movePoint(idx, -1)} 
+                                        disabled={idx === 0}
+                                    >↑</button>
+                                    <button 
+                                        className="icon-btn btn-down" 
+                                        onClick={() => movePoint(idx, 1)} 
+                                        disabled={idx === boardOutline.points.length - 1}
+                                    >↓</button>
+                                    <button 
+                                        className="icon-btn danger" 
+                                        onClick={() => deletePoint(p.id)}
+                                        disabled={boardOutline.points.length <= 3}
+                                    >✕</button>
+                                </div>
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+            <button className="add-btn" onClick={addPoint}>+ Add Point</button>
+        </div>
+    );
+};
+
 // ------------------------------------------------------------------
 // MAIN COMPONENT
 // ------------------------------------------------------------------
 
-export default function LayoutEditor({ layout, setLayout, footprints, params, stackup }: Props) {
-  const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
+export default function LayoutEditor({ layout, setLayout, boardOutline, setBoardOutline, footprints, params, stackup }: Props) {
+  // SPECIAL ID: We use "BOARD_OUTLINE" as a hardcoded ID for selection
+  const [selectedId, setSelectedId] = useState<string | null>("BOARD_OUTLINE");
   const [viewBox, setViewBox] = useState({ x: -100, y: -100, width: 200, height: 200 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
   
@@ -78,7 +179,7 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
   const hasMoved = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const dragStartViewBox = useRef({ x: 0, y: 0 });
-  const clickedInstanceId = useRef<string | null>(null);
+  const clickedId = useRef<string | null>(null);
 
   useEffect(() => {
     viewBoxRef.current = viewBox;
@@ -97,12 +198,12 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
         angle: "0"
     };
     setLayout([...layout, newInstance]);
-    setSelectedInstanceId(newInstance.id);
+    setSelectedId(newInstance.id);
   };
 
   const deleteInstance = (id: string) => {
     setLayout(prev => prev.filter(inst => inst.id !== id));
-    if (selectedInstanceId === id) setSelectedInstanceId(null);
+    if (selectedId === id) setSelectedId(null);
   };
 
   const updateInstance = (id: string, field: keyof FootprintInstance, value: string) => {
@@ -176,9 +277,9 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
     window.removeEventListener('mousemove', handleGlobalMouseMove);
     window.removeEventListener('mouseup', handleGlobalMouseUp);
     if (!hasMoved.current) {
-        setSelectedInstanceId(clickedInstanceId.current);
+        setSelectedId(clickedId.current);
     }
-    clickedInstanceId.current = null;
+    clickedId.current = null;
   };
 
   const resetView = () => {
@@ -191,14 +292,37 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
 
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
-  const selectedInstance = layout.find(inst => inst.id === selectedInstanceId);
+  const selectedInstance = layout.find(inst => inst.id === selectedId);
+
+  // Construct SVG polygon points string
+  const boardPointsStr = boardOutline.points
+    .map(p => `${evaluateExpression(p.x, params)},${evaluateExpression(p.y, params)}`)
+    .join(' ');
 
   return (
     <div className="layout-editor-container">
       {/* 1. LEFT PANEL: FOOTPRINT INSTANCES */}
       <div className="layout-sidebar-left">
         <div className="sidebar-header-row">
-            <h3>Footprints</h3>
+            <h3>Layout Objects</h3>
+        </div>
+
+        <div className="layout-instance-list">
+          {/* HARDCODED BOARD OUTLINE ITEM */}
+          <div 
+            className={`instance-item board-outline-item ${selectedId === 'BOARD_OUTLINE' ? 'selected' : ''}`}
+            onClick={() => setSelectedId('BOARD_OUTLINE')}
+          >
+            <div className="instance-info">
+                <strong>Board Outline</strong>
+                <span className="inst-id-tag">Polygon</span>
+            </div>
+          </div>
+
+          <div style={{ borderBottom: '1px solid #333', margin: '10px 0' }} />
+
+          <div className="sidebar-header-row" style={{ marginBottom: '10px' }}>
+            <span style={{ fontSize: '0.9em', color: '#888' }}>Instances</span>
             <div className="add-instance-control">
                 <select 
                     defaultValue=""
@@ -209,22 +333,21 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
                         }
                     }}
                 >
-                    <option value="" disabled>+ Add Instance...</option>
+                    <option value="" disabled>+ Place...</option>
                     {footprints.map(fp => (
                         <option key={fp.id} value={fp.id}>{fp.name}</option>
                     ))}
                 </select>
             </div>
-        </div>
+          </div>
 
-        <div className="layout-instance-list">
           {layout.map((inst) => {
               const fp = footprints.find(f => f.id === inst.footprintId);
               return (
                   <div 
                     key={inst.id} 
-                    className={`instance-item ${inst.id === selectedInstanceId ? 'selected' : ''}`}
-                    onClick={() => setSelectedInstanceId(inst.id)}
+                    className={`instance-item ${inst.id === selectedId ? 'selected' : ''}`}
+                    onClick={() => setSelectedId(inst.id)}
                   >
                       <div className="instance-info">
                         <input
@@ -268,6 +391,18 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
               <line x1={viewBox.x} y1="0" x2={viewBox.x + viewBox.width} y2="0" stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
               <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
               
+              {/* Render Board Outline */}
+              <polygon 
+                points={boardPointsStr}
+                fill="none"
+                stroke={selectedId === "BOARD_OUTLINE" ? "#646cff" : "#555"}
+                strokeWidth={selectedId === "BOARD_OUTLINE" ? 3 : 2}
+                strokeDasharray={selectedId === "BOARD_OUTLINE" ? "0" : "5,5"}
+                vectorEffect="non-scaling-stroke"
+                style={{ cursor: 'pointer' }}
+                onMouseDown={() => { clickedId.current = "BOARD_OUTLINE"; }}
+              />
+
               {layout.map((inst) => {
                   const fp = footprints.find(f => f.id === inst.footprintId);
                   if (!fp) return null;
@@ -275,14 +410,14 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
                   const evalX = evaluateExpression(inst.x, params);
                   const evalY = evaluateExpression(inst.y, params);
                   const evalAngle = evaluateExpression(inst.angle, params);
-                  const isSelected = inst.id === selectedInstanceId;
+                  const isSelected = inst.id === selectedId;
 
                   return (
                       <g 
                         key={inst.id} 
                         transform={`translate(${evalX}, ${evalY}) rotate(${evalAngle})`}
                         style={{ cursor: 'pointer' }}
-                        onMouseDown={() => { clickedInstanceId.current = inst.id; }}
+                        onMouseDown={() => { clickedId.current = inst.id; }}
                       >
                           {/* Invisible hit area for easier clicking if footprint is empty or thin */}
                           <circle r="5" fill="transparent" />
@@ -296,7 +431,7 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
                                     key={shape.id} 
                                     shape={shape} 
                                     params={params} 
-                                    isSelected={isSelected} // NEW: Passing selection state
+                                    isSelected={isSelected} 
                                 />
                             ))}
                           </g>
@@ -315,9 +450,15 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
 
       {/* 3. RIGHT PANEL: PROPERTIES */}
       <div className="layout-sidebar-right">
-        <h3>Properties</h3>
-        {selectedInstance ? (
+        {selectedId === "BOARD_OUTLINE" ? (
+            <BoardOutlineProperties 
+                boardOutline={boardOutline} 
+                setBoardOutline={setBoardOutline} 
+                params={params} 
+            />
+        ) : selectedInstance ? (
           <div className="properties-editor">
+            <h3>Footprint Properties</h3>
             <div className="prop-group">
                 <label>Name</label>
                 <input 
@@ -372,7 +513,7 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
           </div>
         ) : (
           <div className="properties-placeholder">
-            <p className="empty-hint">Select a footprint to edit.</p>
+            <p className="empty-hint">Select an object to edit.</p>
           </div>
         )}
       </div>

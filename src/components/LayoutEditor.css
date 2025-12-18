@@ -17,7 +17,7 @@
 }
 
 .layout-sidebar-left { border-right: 1px solid #333; }
-.layout-sidebar-right { border-left: 1px solid #333; width: 300px; }
+.layout-sidebar-right { border-left: 1px solid #333; width: 320px; }
 
 .layout-center {
     flex-grow: 1;
@@ -41,7 +41,7 @@
 }
 
 .add-instance-control select {
-    width: 130px;
+    width: 100px;
     font-size: 0.85em;
     padding: 4px 8px;
     background: #646cff;
@@ -73,6 +73,10 @@
 .instance-item.selected {
     border-color: #646cff;
     background: #333;
+}
+
+.board-outline-item {
+    background-color: #242424;
 }
 
 .instance-info {
@@ -137,6 +141,29 @@
     border-radius: 4px;
     border: 1px solid #333;
     color: #888;
+}
+
+.points-table {
+    width: 100%;
+    margin-bottom: 15px;
+    font-size: 0.9em;
+}
+
+.points-table th {
+    padding: 5px;
+    font-size: 0.8em;
+    color: #888;
+}
+
+.points-table td {
+    padding: 3px;
+    border-bottom: 1px solid #333;
+    vertical-align: middle;
+}
+
+.points-table .expression-input {
+    padding: 4px 6px;
+    font-size: 12px;
 }
 
 /* MISC UI */

@@ -4,7 +4,7 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, FootprintInstance } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, FootprintInstance, BoardOutline } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -16,6 +16,15 @@ const TABLEAU_10 = [
   "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC"
 ];
 
+const DEFAULT_BOARD: BoardOutline = {
+  points: [
+    { id: crypto.randomUUID(), x: "-50", y: "-50" },
+    { id: crypto.randomUUID(), x: "50", y: "-50" },
+    { id: crypto.randomUUID(), x: "50", y: "50" },
+    { id: crypto.randomUUID(), x: "-50", y: "50" },
+  ]
+};
+
 type Tab = "stackup" | "footprint" | "layout" | "parameters";
 
 function App() {
@@ -24,8 +33,9 @@ function App() {
   const [params, setParams] = useState<Parameter[]>([]);
   const [stackup, setStackup] = useState<StackupLayer[]>([]);
   const [footprints, setFootprints] = useState<Footprint[]>([]);
-  // NEW: State for Layout
   const [layout, setLayout] = useState<FootprintInstance[]>([]);
+  // NEW: State for Board Outline
+  const [boardOutline, setBoardOutline] = useState<BoardOutline>(DEFAULT_BOARD);
   
   const [activeTab, setActiveTab] = useState<Tab>("stackup");
 
@@ -35,7 +45,7 @@ function App() {
 
     const saveData = async () => {
       try {
-        const projectData: ProjectData = { params, stackup, footprints, layout };
+        const projectData: ProjectData = { params, stackup, footprints, layout, boardOutline };
         const content = JSON.stringify(projectData, null, 2);
         await writeTextFile(currentPath, content);
         console.log("Auto-saved to", currentPath);
@@ -46,7 +56,7 @@ function App() {
     
     const timer = setTimeout(saveData, 500);
     return () => clearTimeout(timer);
-  }, [params, stackup, footprints, layout, currentPath]);
+  }, [params, stackup, footprints, layout, boardOutline, currentPath]);
 
   // CREATE PROJECT
   async function createProject() {
@@ -56,12 +66,19 @@ function App() {
       });
 
       if (path) {
-        const initialData: ProjectData = { params: [], stackup: [], footprints: [], layout: [] };
+        const initialData: ProjectData = { 
+            params: [], 
+            stackup: [], 
+            footprints: [], 
+            layout: [],
+            boardOutline: DEFAULT_BOARD
+        };
         await writeTextFile(path, JSON.stringify(initialData));
         setParams([]);
         setStackup([]);
         setFootprints([]);
         setLayout([]);
+        setBoardOutline(DEFAULT_BOARD);
         setCurrentPath(path);
         setActiveTab("stackup");
       }
@@ -89,6 +106,7 @@ function App() {
         let rawStackup: any[] = [];
         let rawFootprints: any[] = [];
         let rawLayout: any[] = [];
+        let rawBoard: any = null;
 
         if (Array.isArray(rawData)) {
             rawParams = rawData;
@@ -98,7 +116,8 @@ function App() {
             rawStackup = rawData.stackup || [];
             rawFootprints = rawData.footprints || [];
             rawLayout = rawData.layout || [];
-            if (!rawData.params || !rawData.stackup || !rawData.footprints || !rawData.layout) needsUpgrade = true;
+            rawBoard = rawData.boardOutline;
+            if (!rawData.params || !rawData.stackup || !rawData.footprints || !rawData.layout || !rawData.boardOutline) needsUpgrade = true;
         }
 
         // Sanitize Parameters
@@ -162,6 +181,9 @@ function App() {
           };
         });
 
+        // Sanitize Board Outline
+        const newBoard: BoardOutline = rawBoard || DEFAULT_BOARD;
+
         if (needsUpgrade) {
           alert("This file was created with an older version of the editor. Some missing properties have been initialized to default values.");
         }
@@ -170,6 +192,7 @@ function App() {
         setStackup(newStackup);
         setFootprints(newFootprints);
         setLayout(newLayout);
+        setBoardOutline(newBoard);
         setCurrentPath(path as string);
         setActiveTab("stackup");
       }
@@ -185,6 +208,7 @@ function App() {
     setStackup([]);
     setFootprints([]);
     setLayout([]);
+    setBoardOutline(DEFAULT_BOARD);
   }
 
   if (!currentPath) {
@@ -235,6 +259,8 @@ function App() {
           <LayoutEditor 
             layout={layout}
             setLayout={setLayout}
+            boardOutline={boardOutline}
+            setBoardOutline={setBoardOutline}
             footprints={footprints}
             params={params}
             stackup={stackup}

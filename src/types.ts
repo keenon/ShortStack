@@ -62,9 +62,21 @@ export interface FootprintInstance {
   angle: string;       // Expression
 }
 
+// NEW: Board Outline types
+export interface Point {
+  id: string;
+  x: string;
+  y: string;
+}
+
+export interface BoardOutline {
+  points: Point[];
+}
+
 export interface ProjectData {
   params: Parameter[];
   stackup: StackupLayer[];
   footprints: Footprint[];
-  layout: FootprintInstance[]; // Added layout state
+  layout: FootprintInstance[];
+  boardOutline: BoardOutline; // Added Board Outline
 }
