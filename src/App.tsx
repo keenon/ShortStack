@@ -214,25 +214,28 @@ function App() {
       </nav>
 
       <main>
-        {activeTab === "stackup" && (
-            <StackupEditor 
-                stackup={stackup} 
-                setStackup={setStackup} 
-                params={params} 
-            />
-        )}
-        {activeTab === "footprint" && (
-            <FootprintLibrary 
-                footprints={footprints}
-                setFootprints={setFootprints}
-                params={params}
-                stackup={stackup}
-            />
-        )}
-        {activeTab === "layout" && <LayoutEditor />}
-        {activeTab === "parameters" && (
+        {/* We keep all tabs mounted but use display: none to hide inactive ones */}
+        <div className={`tab-pane ${activeTab === "stackup" ? "active" : ""}`}>
+          <StackupEditor 
+            stackup={stackup} 
+            setStackup={setStackup} 
+            params={params} 
+          />
+        </div>
+        <div className={`tab-pane ${activeTab === "footprint" ? "active" : ""}`}>
+          <FootprintLibrary 
+            footprints={footprints}
+            setFootprints={setFootprints}
+            params={params}
+            stackup={stackup}
+          />
+        </div>
+        <div className={`tab-pane ${activeTab === "layout" ? "active" : ""}`}>
+          <LayoutEditor />
+        </div>
+        <div className={`tab-pane ${activeTab === "parameters" ? "active" : ""}`}>
           <ParametersEditor params={params} setParams={setParams} />
-        )}
+        </div>
       </main>
     </div>
   );

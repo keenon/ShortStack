@@ -76,13 +76,28 @@
 
 /* Main Content */
 main {
-  padding: 0; /* Remove padding here, let children handle it */
-  overflow-y: auto;
+  padding: 0;
   flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* Children (tabs) handle their own scrolling */
+}
+
+/* Tab Pane Management */
+.tab-pane {
+  display: none;
+  height: 100%;
+  width: 100%;
+}
+
+.tab-pane.active {
+  display: block;
 }
 
 .editor-content {
   padding: 20px;
+  height: 100%;
+  overflow-y: auto;
 }
 
 /* Table Styling */
