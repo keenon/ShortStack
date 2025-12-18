@@ -1,6 +1,9 @@
 // src/components/LayoutEditor.tsx
 import { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point } from "../types";
+import makerjs from "makerjs"; // NEW: For DXF generation and boolean ops
+import { save } from "@tauri-apps/plugin-dialog"; // NEW: For saving files
+import { writeTextFile } from "@tauri-apps/plugin-fs"; // NEW: For writing files
+import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point, FootprintRect } from "../types";
 import { evaluateExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
 import Layout3DView, { Layout3DViewHandle } from "./Layout3DView";
@@ -25,10 +28,12 @@ const LayerVisibilityPanel = ({
   stackup,
   visibility,
   onToggle,
+  onExport, // NEW PROP
 }: {
   stackup: StackupLayer[];
   visibility: Record<string, boolean>;
   onToggle: (id: string) => void;
+  onExport: (id: string) => void; // NEW PROP
 }) => {
   return (
     <div className="layout-left-subpanel">
@@ -61,12 +66,25 @@ const LayerVisibilityPanel = ({
                     />
                     <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
                 </div>
-                <button 
-                    className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`}
-                    onClick={() => onToggle(layer.id)}
-                >
-                    {visibility[layer.id] !== false ? "Hide" : "Show"}
-                </button>
+                <div style={{ display: 'flex', gap: '5px' }}>
+                    {/* NEW: Export Button for Cut layers */}
+                    {layer.type === "Cut" && (
+                        <button
+                            className="vis-toggle-btn"
+                            style={{ backgroundColor: '#2f7f4f', color: 'white' }}
+                            onClick={() => onExport(layer.id)}
+                            title="Export DXF"
+                        >
+                            DXF
+                        </button>
+                    )}
+                    <button 
+                        className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`}
+                        onClick={() => onToggle(layer.id)}
+                    >
+                        {visibility[layer.id] !== false ? "Hide" : "Show"}
+                    </button>
+                </div>
              </div>
         ))}
         {stackup.length === 0 && <div className="empty-state-small">No stackup layers.</div>}
@@ -279,6 +297,103 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     }));
   };
 
+  // --- EXPORT DXF FUNCTION ---
+  const exportDXF = async (layerId: string) => {
+    try {
+        const layer = stackup.find(l => l.id === layerId);
+        if (!layer) return;
+
+        // 1. Create Board Outline Model
+        const boardPoints = boardOutline.points.map(p => [
+            evaluateExpression(p.x, params),
+            evaluateExpression(p.y, params)
+        ]);
+        const boardModel = new makerjs.models.ConnectTheDots(true, boardPoints);
+
+        // 2. Collect all cut shapes, transform, and Union them
+        let cutsModel: makerjs.IModel | null = null;
+
+        layout.forEach(inst => {
+            const fp = footprints.find(f => f.id === inst.footprintId);
+            if (!fp) return;
+
+            // Evaluate instance transforms
+            const instX = evaluateExpression(inst.x, params);
+            const instY = evaluateExpression(inst.y, params);
+            const instAngle = evaluateExpression(inst.angle, params);
+
+            fp.shapes.forEach(shape => {
+                // Check if shape is assigned to this layer
+                if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;
+
+                // Create MakerJS model for the shape
+                let shapeModel: makerjs.IModel;
+
+                if (shape.type === "circle") {
+                    const r = evaluateExpression(shape.diameter, params) / 2;
+                    // FIX: makerjs.models.Circle does not exist.
+                    // We create a model object manually containing the circle path.
+                    shapeModel = { paths: { "circle": new makerjs.paths.Circle(r) } };
+                } else {
+                    const w = evaluateExpression((shape as FootprintRect).width, params);
+                    const h = evaluateExpression((shape as FootprintRect).height, params);
+                    const sAngle = evaluateExpression((shape as FootprintRect).angle, params);
+                    
+                    shapeModel = new makerjs.models.Rectangle(w, h);
+                    makerjs.model.center(shapeModel); // Center at (0,0) to match FootprintRect definition
+                    if (sAngle !== 0) makerjs.model.rotate(shapeModel, sAngle);
+                }
+
+                // Transform: 
+                // 1. Position shape relative to footprint center
+                const sx = evaluateExpression(shape.x, params);
+                const sy = evaluateExpression(shape.y, params);
+                makerjs.model.move(shapeModel, [sx, sy]);
+
+                // 2. Rotate entire footprint instance (around its origin 0,0)
+                if (instAngle !== 0) makerjs.model.rotate(shapeModel, instAngle);
+
+                // 3. Move footprint instance to world position
+                makerjs.model.move(shapeModel, [instX, instY]);
+
+                // Union with accumulator
+                if (!cutsModel) {
+                    cutsModel = shapeModel;
+                } else {
+                    // Combine into union (handles overlapping rectangles)
+                    makerjs.model.combineUnion(cutsModel, shapeModel);
+                }
+            });
+        });
+
+        // 3. Combine Board Outline and Cuts
+        const finalModel = {
+            models: {
+                board: boardModel,
+                ...(cutsModel ? { cuts: cutsModel } : {})
+            }
+        };
+
+        // 4. Generate DXF
+        const dxfString = makerjs.exporter.toDXF(finalModel);
+
+        // 5. Save File
+        const path = await save({
+            defaultPath: `${layer.name.replace(/[^a-z0-9]/gi, '_')}.dxf`,
+            filters: [{ name: "DXF File", extensions: ["dxf"] }]
+        });
+
+        if (path) {
+            await writeTextFile(path, dxfString);
+            alert(`Successfully exported ${layer.name} to DXF!`);
+        }
+
+    } catch (e) {
+        console.error("Export Failed", e);
+        alert("Failed to export DXF. See console for details.");
+    }
+  };
+
   // --- HELPERS ---
 
   // Check if a shape should be visible based on its layer assignment and current global visibility
@@ -398,6 +513,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
             stackup={stackup}
             visibility={layerVisibility}
             onToggle={toggleLayerVisibility}
+            onExport={exportDXF} // Pass the export function
         />
 
         {/* Bottom Half: Layout Objects */}
