@@ -231,7 +231,8 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
         <group>
           {(() => {
             let currentZ = 0; // This tracks height (Y in 3D)
-            return stackup.map((layer) => {
+            // Reverse the stack order so the first item in list appears on top
+            return [...stackup].reverse().map((layer) => {
               const thickness = evaluate(layer.thicknessExpression, params);
               
               // NEW: Check visibility
