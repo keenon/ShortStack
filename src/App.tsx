@@ -4,7 +4,7 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -82,43 +82,89 @@ function App() {
         const content = await readTextFile(path as string);
         const rawData = JSON.parse(content);
 
+        let needsUpgrade = false;
+
         // Handle backward compatibility or raw arrays
-        let newParams: Parameter[] = [];
-        let newStackup: StackupLayer[] = [];
-        let newFootprints: Footprint[] = [];
+        let rawParams: any[] = [];
+        let rawStackup: any[] = [];
+        let rawFootprints: any[] = [];
 
         if (Array.isArray(rawData)) {
             // Very old legacy check
-            newParams = rawData;
+            rawParams = rawData;
+            needsUpgrade = true;
         } else {
-            newParams = rawData.params || [];
-            newStackup = rawData.stackup || [];
-            newFootprints = rawData.footprints || [];
+            rawParams = rawData.params || [];
+            rawStackup = rawData.stackup || [];
+            rawFootprints = rawData.footprints || [];
+            if (!rawData.params || !rawData.stackup || !rawData.footprints) needsUpgrade = true;
         }
 
-        // Sanitize IDs
-        newParams = newParams.map((item: any) => ({
-          ...item,
-          id: item.id || crypto.randomUUID(),
-          unit: item.unit || "mm",
-        }));
+        // Sanitize Parameters
+        const newParams: Parameter[] = rawParams.map((item: any) => {
+          if (!item.id || !item.unit) needsUpgrade = true;
+          return {
+            ...item,
+            id: item.id || crypto.randomUUID(),
+            unit: item.unit || "mm",
+          };
+        });
 
-        newStackup = newStackup.map((layer: any, index: number) => ({
-          ...layer,
-          id: layer.id || crypto.randomUUID(),
-          color: layer.color || TABLEAU_10[index % TABLEAU_10.length],
-          carveSide: layer.carveSide || "Top"
-        }));
+        // Sanitize Stackup
+        const newStackup: StackupLayer[] = rawStackup.map((layer: any, index: number) => {
+          if (!layer.id || !layer.color || !layer.carveSide) needsUpgrade = true;
+          return {
+            ...layer,
+            id: layer.id || crypto.randomUUID(),
+            color: layer.color || TABLEAU_10[index % TABLEAU_10.length],
+            carveSide: layer.carveSide || "Top"
+          };
+        });
 
-        // Sanitize Footprints
-        newFootprints = newFootprints.map((fp: any) => ({
-          ...fp,
-          id: fp.id || crypto.randomUUID(),
-          shapes: (fp.shapes || []).map((s: any) => ({
+        // Sanitize Footprints & Shapes (Backward Compatibility for 'angle', etc.)
+        const newFootprints: Footprint[] = rawFootprints.map((fp: any) => {
+          if (!fp.id || !fp.shapes) needsUpgrade = true;
+          
+          const sanitizedShapes = (fp.shapes || []).map((s: any) => {
+            // Check for missing core properties
+            if (!s.id || !s.assignedLayers || s.name === undefined) needsUpgrade = true;
+            
+            const baseShape = {
               ...s,
-              assignedLayers: s.assignedLayers || {}
-          }))
-        }));
+              id: s.id || crypto.randomUUID(),
+              name: s.name || "Unnamed Shape",
+              assignedLayers: s.assignedLayers || {},
+              x: s.x ?? "0",
+              y: s.y ?? "0",
+            };
+
+            if (s.type === "rect") {
+              // Specifically handle the new 'angle' property
+              if (s.angle === undefined) {
+                needsUpgrade = true;
+                baseShape.angle = "0";
+              }
+              if (s.width === undefined || s.height === undefined) needsUpgrade = true;
+              baseShape.width = s.width ?? "10";
+              baseShape.height = s.height ?? "10";
+            } else if (s.type === "circle") {
+              if (s.diameter === undefined) needsUpgrade = true;
+              baseShape.diameter = s.diameter ?? "10";
+            }
+
+            return baseShape as FootprintShape;
+          });
+
+          return {
+            ...fp,
+            id: fp.id || crypto.randomUUID(),
+            shapes: sanitizedShapes
+          };
+        });
+
+        if (needsUpgrade) {
+          alert("This file was created with an older version of the editor. Some missing properties have been initialized to default values.");
+        }
 
         setParams(newParams);
         setStackup(newStackup);
