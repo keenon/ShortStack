@@ -79,20 +79,32 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    flex-grow: 1;
 }
 
-.fp-name {
-    font-size: 0.9em;
+.instance-name-edit {
+    background: transparent;
+    border: none;
+    color: #fff;
     font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    margin-right: 8px;
+    padding: 2px 4px;
+    font-size: 0.9em;
+    min-width: 0;
+    width: 100%;
+}
+
+.instance-name-edit:focus {
+    background: #1a1a1a;
+    outline: 1px solid #555;
+    border-radius: 2px;
 }
 
 .inst-id-tag {
     font-size: 0.7em;
     color: #666;
     font-family: monospace;
+    padding-left: 4px;
 }
 
 /* CANVAS STYLES */

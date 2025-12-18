@@ -56,6 +56,7 @@ export interface Footprint {
 export interface FootprintInstance {
   id: string;
   footprintId: string; // References Footprint.id
+  name: string;        // Custom name for this instance
   x: string;           // Expression
   y: string;           // Expression
   angle: string;       // Expression

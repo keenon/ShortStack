@@ -1,5 +1,5 @@
 // src/components/LayoutEditor.tsx
-import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape } from "../types";
 import { evaluateExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
@@ -87,9 +87,11 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
   // --- ACTIONS ---
 
   const addInstance = (footprintId: string) => {
+    const fp = footprints.find(f => f.id === footprintId);
     const newInstance: FootprintInstance = {
         id: crypto.randomUUID(),
         footprintId: footprintId,
+        name: fp?.name || "New Instance",
         x: "0",
         y: "0",
         angle: "0"
@@ -225,8 +227,14 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
                     onClick={() => setSelectedInstanceId(inst.id)}
                   >
                       <div className="instance-info">
-                        <span className="fp-name">{fp?.name || 'Unknown Footprint'}</span>
-                        <span className="inst-id-tag">{inst.id.slice(0, 4)}</span>
+                        <input
+                          type="text"
+                          value={inst.name}
+                          onChange={(e) => updateInstance(inst.id, "name", e.target.value)}
+                          className="instance-name-edit"
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                        <span className="inst-id-tag">{fp?.name || 'Unknown Footprint'}</span>
                       </div>
                       <button 
                         className="icon-btn danger" 
@@ -274,8 +282,6 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
                         key={inst.id} 
                         transform={`translate(${evalX}, ${evalY}) rotate(${evalAngle})`}
                         style={{ cursor: 'pointer' }}
-                        // UPDATED: Removed stopPropagation so the SVG's handleMouseDown also triggers,
-                        // allowing the global mouseup listener to finish the selection click.
                         onMouseDown={() => { clickedInstanceId.current = inst.id; }}
                       >
                           {/* Invisible hit area for easier clicking if footprint is empty or thin */}
@@ -313,7 +319,16 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
         {selectedInstance ? (
           <div className="properties-editor">
             <div className="prop-group">
-                <label>Footprint</label>
+                <label>Name</label>
+                <input 
+                    type="text" 
+                    value={selectedInstance.name} 
+                    onChange={(e) => updateInstance(selectedInstance.id, "name", e.target.value)}
+                />
+            </div>
+
+            <div className="prop-group">
+                <label>Footprint Type</label>
                 <div className="prop-static-text">
                     {footprints.find(f => f.id === selectedInstance.footprintId)?.name || 'Unknown'}
                 </div>

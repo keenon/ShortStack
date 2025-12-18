@@ -149,11 +149,13 @@ function App() {
 
         // Sanitize Layout
         const newLayout: FootprintInstance[] = rawLayout.map((inst: any) => {
-          if (!inst.id || !inst.footprintId) needsUpgrade = true;
+          if (!inst.id || !inst.footprintId || inst.name === undefined) needsUpgrade = true;
+          const fp = newFootprints.find(f => f.id === inst.footprintId);
           return {
             ...inst,
             id: inst.id || crypto.randomUUID(),
             footprintId: inst.footprintId || "",
+            name: inst.name || fp?.name || "Unnamed Instance",
             x: inst.x ?? "0",
             y: inst.y ?? "0",
             angle: inst.angle ?? "0"
