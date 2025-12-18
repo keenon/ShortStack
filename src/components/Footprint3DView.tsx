@@ -1,7 +1,9 @@
 // src/components/Footprint3DView.tsx
 import React, { useMemo, forwardRef, useImperativeHandle, useRef } from "react";
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Grid, GizmoHelper, GizmoViewport, Center } from "@react-three/drei";
+import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
+// Note: Requires @react-three/csg and three-bvh-csg installed
+import { Geometry, Base, Subtraction } from "@react-three/csg";
 import * as THREE from "three";
 import * as math from "mathjs";
 import { Footprint, Parameter, StackupLayer, FootprintShape } from "../types";
@@ -16,7 +18,10 @@ export interface Footprint3DViewHandle {
     resetCamera: () => void;
 }
 
-// Helper to evaluate math expressions (duplicated from Editor to avoid circular deps)
+// ------------------------------------------------------------------
+// HELPERS
+// ------------------------------------------------------------------
+
 function evaluate(expression: string, params: Parameter[]): number {
   if (!expression || !expression.trim()) return 0;
   try {
@@ -33,93 +38,130 @@ function evaluate(expression: string, params: Parameter[]): number {
   }
 }
 
-// Individual Mesh Component for a Cut
-const CutMesh = ({
-  shape,
+// ------------------------------------------------------------------
+// COMPONENTS
+// ------------------------------------------------------------------
+
+/**
+ * Renders a single layer as a solid block with cuts subtracted (CSG).
+ */
+const LayerSolid = ({
   layer,
+  footprint,
+  params,
   bottomZ,
-  layerThickness,
-  params
+  thickness,
+  bounds
 }: {
-  shape: FootprintShape;
   layer: StackupLayer;
-  bottomZ: number;
-  layerThickness: number;
+  footprint: Footprint;
   params: Parameter[];
+  bottomZ: number;
+  thickness: number;
+  bounds: { minX: number; maxX: number; minY: number; maxY: number };
 }) => {
-  // 1. Calculate Cut Geometry (Height & Y-Position)
-  // ------------------------------------------------
-  let cutHeight = 0;
-  let cutCenterY = 0;
+  // Dimensions of the base plate
+  const width = bounds.maxX - bounds.minX;
+  const depth = bounds.maxY - bounds.minY; // 2D Y becomes 3D Depth (Z)
   
-  const layerTopZ = bottomZ + layerThickness;
+  // Center in 3D Space
+  const centerX = (bounds.minX + bounds.maxX) / 2;
+  const centerZ = (bounds.minY + bounds.maxY) / 2;
+  const centerY = bottomZ + thickness / 2;
 
-  if (layer.type === "Cut") {
-    // Through-hole: Full height
-    cutHeight = layerThickness;
-    cutCenterY = bottomZ + layerThickness / 2;
-  } else {
-    // Carved: specified depth
-    const depthExpr = shape.assignedLayers[layer.id] || "0";
-    let depth = evaluate(depthExpr, params);
-    
-    // Clamp depth to thickness
-    if (depth > layerThickness) depth = layerThickness;
-    if (depth < 0) depth = 0;
-    if (depth === 0) return null; // Nothing to render
+  // Identify shapes affecting this layer
+  const activeShapes = footprint.shapes.filter(s => 
+    s.assignedLayers && s.assignedLayers[layer.id] !== undefined
+  );
 
-    cutHeight = depth;
-
-    if (layer.carveSide === "Top") {
-      // Cutting down from top
-      cutCenterY = layerTopZ - depth / 2;
-    } else {
-      // Cutting up from bottom
-      cutCenterY = bottomZ + depth / 2;
-    }
-  }
-
-  // 2. Calculate 2D Shape Properties
-  // ------------------------------------------------
-  const x = evaluate(shape.x, params);
-  const y = evaluate(shape.y, params); // Mapped to Z in 3D
-
-  const color = layer.color;
-  const opacity = 0.6;
-
-  if (shape.type === "circle") {
-    const diameter = evaluate(shape.diameter, params);
-    const radius = diameter / 2;
+  // Optimization: If no cuts, just return a simple mesh
+  if (activeShapes.length === 0) {
     return (
-      <mesh position={[x, cutCenterY, y]}>
-        {/* Cylinder: TopRad, BotRad, Height, Segments */}
-        <cylinderGeometry args={[radius, radius, cutHeight, 32]} />
-        <meshStandardMaterial 
-            color={color} 
-            transparent 
-            opacity={opacity} 
-            side={THREE.DoubleSide} 
-        />
-      </mesh>
-    );
-  } else if (shape.type === "rect") {
-    const w = evaluate(shape.width, params);
-    const h = evaluate(shape.height, params); // This is 'height' in 2D, so 'depth' (Z) in 3D
-    return (
-      <mesh position={[x, cutCenterY, y]}>
-        {/* Box: Width(X), Height(Y), Depth(Z) */}
-        <boxGeometry args={[w, cutHeight, h]} />
-        <meshStandardMaterial 
-            color={color} 
-            transparent 
-            opacity={opacity} 
-            side={THREE.DoubleSide}
-        />
+      <mesh position={[centerX, centerY, centerZ]}>
+        <boxGeometry args={[width, thickness, depth]} />
+        <meshStandardMaterial color={layer.color} transparent opacity={0.9} />
       </mesh>
     );
   }
 
-  return null;
+  return (
+    <mesh position={[centerX, centerY, centerZ]}>
+      {/* 
+        CSG Geometry Wrapper 
+        The <Geometry> component creates a computed mesh from children 
+      */}
+      <Geometry>
+        {/* Base Positive Shape: Local position (0,0,0) corresponds to mesh position */}
+        <Base>
+          <boxGeometry args={[width, thickness, depth]} />
+        </Base>
+
+        {/* Subtractions */}
+        {activeShapes.map((shape) => {
+          // 1. Calculate Cut Dimensions
+          let cutDepth = 0;
+          let cutY = 0; // Local Y position relative to center of layer
+
+          if (layer.type === "Cut") {
+             // Through Cut
+             // Make it slightly taller than thickness to ensure clean boolean
+             cutDepth = thickness + 0.2; 
+             cutY = 0;
+          } else {
+             // Carved
+             const val = evaluate(shape.assignedLayers[layer.id], params);
+             const clampedVal = Math.max(0, Math.min(val, thickness));
+             
+             if (clampedVal <= 0) return null;
+
+             // Extra length for clean boolean
+             cutDepth = clampedVal + 0.1;
+
+             if (layer.carveSide === "Top") {
+                 // Cut from top (+thickness/2) down
+                 // Center of cut = Top - (clampedVal / 2)
+                 // Local Top is thickness/2
+                 // We add a small offset (0.05) to ensure it breaks the surface
+                 cutY = (thickness / 2) - (clampedVal / 2) + 0.05;
+             } else {
+                 // Cut from bottom (-thickness/2) up
+                 cutY = (-thickness / 2) + (clampedVal / 2) - 0.05;
+             }
+          }
+
+          // 2. Calculate 2D Position
+          const sx = evaluate(shape.x, params);
+          const sy = evaluate(shape.y, params);
+
+          // 3. Local Position Calculation
+          // The Base is at (0,0,0) inside this mesh, which corresponds to (centerX, centerY, centerZ) in world.
+          // Shape World Pos: (sx, ?, sy)
+          // Local Pos: (sx - centerX, cutY, sy - centerZ)
+          const localX = sx - centerX;
+          const localZ = sy - centerZ;
+
+          if (shape.type === "circle") {
+            const diameter = evaluate(shape.diameter, params);
+            return (
+              <Subtraction key={shape.id} position={[localX, cutY, localZ]}>
+                 <cylinderGeometry args={[diameter/2, diameter/2, cutDepth, 32]} />
+              </Subtraction>
+            );
+          } else if (shape.type === "rect") {
+            const w = evaluate(shape.width, params);
+            const h = evaluate(shape.height, params);
+            return (
+              <Subtraction key={shape.id} position={[localX, cutY, localZ]}>
+                <boxGeometry args={[w, cutDepth, h]} />
+              </Subtraction>
+            );
+          }
+          return null;
+        })}
+      </Geometry>
+      <meshStandardMaterial color={layer.color} transparent opacity={0.9} />
+    </mesh>
+  );
 };
 
 const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, params, stackup }, ref) => {
@@ -133,6 +175,51 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
     }
   }));
 
+  // 1. Calculate Bounding Box of all shapes + Padding
+  const bounds = useMemo(() => {
+    const PADDING = 10;
+    
+    if (!footprint.shapes || footprint.shapes.length === 0) {
+        return { minX: -PADDING, maxX: PADDING, minY: -PADDING, maxY: PADDING };
+    }
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity; // mapped to 2D Y
+    let maxY = -Infinity;
+
+    footprint.shapes.forEach(shape => {
+        const x = evaluate(shape.x, params);
+        const y = evaluate(shape.y, params);
+        
+        let dx = 0;
+        let dy = 0;
+
+        if (shape.type === "circle") {
+            const r = evaluate(shape.diameter, params) / 2;
+            dx = r;
+            dy = r;
+        } else if (shape.type === "rect") {
+            dx = evaluate(shape.width, params) / 2;
+            dy = evaluate(shape.height, params) / 2;
+        }
+
+        if (x - dx < minX) minX = x - dx;
+        if (x + dx > maxX) maxX = x + dx;
+        if (y - dy < minY) minY = y - dy;
+        if (y + dy > maxY) maxY = y + dy;
+    });
+
+    // Apply Padding
+    return {
+        minX: minX - PADDING,
+        maxX: maxX + PADDING,
+        minY: minY - PADDING,
+        maxY: maxY + PADDING
+    };
+
+  }, [footprint, params]);
+
   return (
     <div style={{ width: "100%", height: "100%", background: "#111" }}>
       <Canvas camera={{ position: [50, 50, 50], fov: 45 }}>
@@ -141,38 +228,27 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
         <pointLight position={[-10, -10, -10]} intensity={0.5} />
 
         <group>
-          {/* Render Shapes */}
           {(() => {
-            let currentZ = 0;
-            const meshes: React.ReactNode[] = [];
-
-            stackup.forEach((layer) => {
+            let currentZ = 0; // This tracks height (Y in 3D)
+            return stackup.map((layer) => {
               const thickness = evaluate(layer.thicknessExpression, params);
-              
-              footprint.shapes.forEach((shape) => {
-                // Check if shape is assigned to this layer
-                if (shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined) {
-                  meshes.push(
-                    <CutMesh 
-                      key={`${shape.id}-${layer.id}`}
-                      shape={shape}
-                      layer={layer}
-                      bottomZ={currentZ}
-                      layerThickness={thickness}
-                      params={params}
-                    />
-                  );
-                }
-              });
-
+              const node = (
+                <LayerSolid 
+                  key={layer.id}
+                  layer={layer}
+                  footprint={footprint}
+                  params={params}
+                  bottomZ={currentZ}
+                  thickness={thickness}
+                  bounds={bounds}
+                />
+              );
               currentZ += thickness;
+              return node;
             });
-
-            return meshes;
           })()}
         </group>
 
-        {/* Helpers */}
         <Grid 
             infiniteGrid 
             fadeDistance={200} 
