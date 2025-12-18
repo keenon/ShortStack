@@ -3,6 +3,7 @@ import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point } from "../types";
 import { evaluateExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
+import Layout3DView, { Layout3DViewHandle } from "./Layout3DView"; // NEW IMPORT
 import './LayoutEditor.css';
 
 interface Props {
@@ -63,7 +64,7 @@ const InstanceShapeRenderer = ({
 };
 
 /**
- * NEW: Component to edit Board Outline points
+ * Component to edit Board Outline points
  */
 const BoardOutlineProperties = ({ 
     boardOutline, 
@@ -173,6 +174,9 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   
   const wrapperRef = useRef<HTMLDivElement>(null);
   const viewBoxRef = useRef(viewBox);
+  
+  // NEW: Ref for 3D View to control camera
+  const layout3DRef = useRef<Layout3DViewHandle>(null);
 
   // Dragging State Refs for Canvas Pan
   const isDragging = useRef(false);
@@ -282,12 +286,16 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     clickedId.current = null;
   };
 
-  const resetView = () => {
-    if (!wrapperRef.current) return;
-    const { width, height } = wrapperRef.current.getBoundingClientRect();
-    const newWidth = 200;
-    const newHeight = newWidth * (height / width);
-    setViewBox({ x: -newWidth / 2, y: -newHeight / 2, width: newWidth, height: newHeight });
+  const handleHomeClick = () => {
+    if (viewMode === "2D") {
+        if (!wrapperRef.current) return;
+        const { width, height } = wrapperRef.current.getBoundingClientRect();
+        const newWidth = 200;
+        const newHeight = newWidth * (height / width);
+        setViewBox({ x: -newWidth / 2, y: -newHeight / 2, width: newWidth, height: newHeight });
+    } else {
+        layout3DRef.current?.resetCamera();
+    }
   };
 
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
@@ -378,7 +386,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
         </div>
 
         <div className="layout-canvas-wrapper" ref={wrapperRef}>
-          <button className="canvas-home-btn" onClick={resetView} title="Reset View">🏠</button>
+          <button className="canvas-home-btn" onClick={handleHomeClick} title="Reset View">🏠</button>
           
           {viewMode === "2D" ? (
             <svg className="layout-canvas" viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`} onMouseDown={handleMouseDown}>
@@ -450,11 +458,19 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
               })}
             </svg>
           ) : (
-            <div className="layout-3d-placeholder">
-              <p>3D World Preview coming soon...</p>
-            </div>
+            // NEW: 3D Preview
+            <Layout3DView 
+                ref={layout3DRef}
+                layout={layout}
+                boardOutline={boardOutline}
+                footprints={footprints}
+                params={params}
+                stackup={stackup}
+            />
           )}
-          <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
+          {viewMode === "2D" && (
+             <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
+          )}
         </div>
       </div>
 
