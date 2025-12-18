@@ -28,6 +28,73 @@
     overflow: hidden;
 }
 
+/* SIDEBAR COMPONENTS */
+.sidebar-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.sidebar-header-row h3 {
+    margin: 0;
+}
+
+.add-instance-control select {
+    width: 130px;
+    font-size: 0.85em;
+    padding: 4px 8px;
+    background: #646cff;
+    border: none;
+    color: white;
+}
+
+.layout-instance-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.instance-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    background: #2a2a2a;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid transparent;
+}
+
+.instance-item:hover {
+    background: #333;
+}
+
+.instance-item.selected {
+    border-color: #646cff;
+    background: #333;
+}
+
+.instance-info {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.fp-name {
+    font-size: 0.9em;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.inst-id-tag {
+    font-size: 0.7em;
+    color: #666;
+    font-family: monospace;
+}
+
 /* CANVAS STYLES */
 .layout-canvas-wrapper {
     flex-grow: 1;
@@ -51,6 +118,15 @@
     font-size: 1.2em;
 }
 
+/* PROPERTIES STYLES */
+.prop-static-text {
+    background: #1a1a1a;
+    padding: 8px;
+    border-radius: 4px;
+    border: 1px solid #333;
+    color: #888;
+}
+
 /* MISC UI */
 .layout-list-placeholder, .properties-placeholder {
     flex-grow: 1;
@@ -65,5 +141,3 @@
     font-style: italic;
     font-size: 0.9em;
 }
-
-/* Reuse existing button/nav styles from App.css and FootprintEditor.css as much as possible */

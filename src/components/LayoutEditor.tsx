@@ -1,6 +1,8 @@
 // src/components/LayoutEditor.tsx
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Footprint, FootprintInstance, Parameter, StackupLayer } from "../types";
+import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape } from "../types";
+import { evaluateExpression } from "./FootprintEditor";
+import ExpressionEditor from "./ExpressionEditor";
 import './LayoutEditor.css';
 
 interface Props {
@@ -11,24 +13,98 @@ interface Props {
   stackup: StackupLayer[];
 }
 
+// ------------------------------------------------------------------
+// SUB-COMPONENTS
+// ------------------------------------------------------------------
+
+const InstanceShapeRenderer = ({ 
+    shape, 
+    params 
+}: { 
+    shape: FootprintShape; 
+    params: Parameter[] 
+}) => {
+    const commonProps = {
+        fill: "rgba(255, 255, 255, 0.1)",
+        stroke: "#888",
+        strokeWidth: 1,
+        vectorEffect: "non-scaling-stroke" as const,
+    };
+
+    if (shape.type === "circle") {
+        const r = evaluateExpression(shape.diameter, params) / 2;
+        const cx = evaluateExpression(shape.x, params);
+        const cy = evaluateExpression(shape.y, params);
+        return <circle cx={cx} cy={cy} r={r} {...commonProps} />;
+    }
+
+    if (shape.type === "rect") {
+        const w = evaluateExpression(shape.width, params);
+        const h = evaluateExpression(shape.height, params);
+        const x = evaluateExpression(shape.x, params);
+        const y = evaluateExpression(shape.y, params);
+        const angle = evaluateExpression(shape.angle, params);
+        return (
+            <rect
+                x={x - w / 2}
+                y={y - h / 2}
+                width={w}
+                height={h}
+                transform={`rotate(${angle}, ${x}, ${y})`}
+                {...commonProps}
+            />
+        );
+    }
+    return null;
+};
+
+// ------------------------------------------------------------------
+// MAIN COMPONENT
+// ------------------------------------------------------------------
+
 export default function LayoutEditor({ layout, setLayout, footprints, params, stackup }: Props) {
-  // Viewport state for zooming/panning
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
   const [viewBox, setViewBox] = useState({ x: -100, y: -100, width: 200, height: 200 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
   
   const wrapperRef = useRef<HTMLDivElement>(null);
   const viewBoxRef = useRef(viewBox);
 
-  // Dragging State Refs
+  // Dragging State Refs for Canvas Pan
   const isDragging = useRef(false);
+  const hasMoved = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const dragStartViewBox = useRef({ x: 0, y: 0 });
+  const clickedInstanceId = useRef<string | null>(null);
 
   useEffect(() => {
     viewBoxRef.current = viewBox;
   }, [viewBox]);
 
-  // --- 2D CANVAS NAVIGATION LOGIC (Adapted from FootprintEditor) ---
+  // --- ACTIONS ---
+
+  const addInstance = (footprintId: string) => {
+    const newInstance: FootprintInstance = {
+        id: crypto.randomUUID(),
+        footprintId: footprintId,
+        x: "0",
+        y: "0",
+        angle: "0"
+    };
+    setLayout([...layout, newInstance]);
+    setSelectedInstanceId(newInstance.id);
+  };
+
+  const deleteInstance = (id: string) => {
+    setLayout(prev => prev.filter(inst => inst.id !== id));
+    if (selectedInstanceId === id) setSelectedInstanceId(null);
+  };
+
+  const updateInstance = (id: string, field: keyof FootprintInstance, value: string) => {
+    setLayout(prev => prev.map(inst => inst.id === id ? { ...inst, [field]: value } : inst));
+  };
+
+  // --- 2D CANVAS NAVIGATION LOGIC ---
   
   useLayoutEffect(() => {
     if (!wrapperRef.current || viewMode !== "2D") return;
@@ -72,6 +148,7 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
   const handleMouseDown = (e: React.MouseEvent) => {
     if (viewMode !== "2D" || e.button !== 0) return;
     isDragging.current = true;
+    hasMoved.current = false;
     dragStart.current = { x: e.clientX, y: e.clientY };
     dragStartViewBox.current = { x: viewBox.x, y: viewBox.y };
     window.addEventListener('mousemove', handleGlobalMouseMove);
@@ -82,6 +159,7 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
     if (!isDragging.current || !wrapperRef.current) return;
     const dx = e.clientX - dragStart.current.x;
     const dy = e.clientY - dragStart.current.y;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved.current = true;
     const rect = wrapperRef.current.getBoundingClientRect();
     const scaleX = viewBoxRef.current.width / rect.width;
     const scaleY = viewBoxRef.current.height / rect.height;
@@ -92,6 +170,10 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
     isDragging.current = false;
     window.removeEventListener('mousemove', handleGlobalMouseMove);
     window.removeEventListener('mouseup', handleGlobalMouseUp);
+    if (!hasMoved.current) {
+        setSelectedInstanceId(clickedInstanceId.current);
+    }
+    clickedInstanceId.current = null;
   };
 
   const resetView = () => {
@@ -104,14 +186,53 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
 
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
+  const selectedInstance = layout.find(inst => inst.id === selectedInstanceId);
+
   return (
     <div className="layout-editor-container">
       {/* 1. LEFT PANEL: FOOTPRINT INSTANCES */}
       <div className="layout-sidebar-left">
-        <h3>Footprints</h3>
-        <div className="layout-list-placeholder">
-          {/* List of placed footprints goes here */}
-          <p className="empty-hint">No footprints placed.</p>
+        <div className="sidebar-header-row">
+            <h3>Footprints</h3>
+            <div className="add-instance-control">
+                <select 
+                    defaultValue=""
+                    onChange={(e) => {
+                        if (e.target.value) {
+                            addInstance(e.target.value);
+                            e.target.value = "";
+                        }
+                    }}
+                >
+                    <option value="" disabled>+ Add Instance...</option>
+                    {footprints.map(fp => (
+                        <option key={fp.id} value={fp.id}>{fp.name}</option>
+                    ))}
+                </select>
+            </div>
+        </div>
+
+        <div className="layout-instance-list">
+          {layout.map((inst) => {
+              const fp = footprints.find(f => f.id === inst.footprintId);
+              return (
+                  <div 
+                    key={inst.id} 
+                    className={`instance-item ${inst.id === selectedInstanceId ? 'selected' : ''}`}
+                    onClick={() => setSelectedInstanceId(inst.id)}
+                  >
+                      <div className="instance-info">
+                        <span className="fp-name">{fp?.name || 'Unknown Footprint'}</span>
+                        <span className="inst-id-tag">{inst.id.slice(0, 4)}</span>
+                      </div>
+                      <button 
+                        className="icon-btn danger" 
+                        onClick={(e) => { e.stopPropagation(); deleteInstance(inst.id); }}
+                      >✕</button>
+                  </div>
+              );
+          })}
+          {layout.length === 0 && <p className="empty-hint">No footprints placed.</p>}
         </div>
       </div>
 
@@ -136,7 +257,38 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
               <line x1={viewBox.x} y1="0" x2={viewBox.x + viewBox.width} y2="0" stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
               <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
               
-              {/* Footprint instances will be rendered here */}
+              {layout.map((inst) => {
+                  const fp = footprints.find(f => f.id === inst.footprintId);
+                  if (!fp) return null;
+                  
+                  const evalX = evaluateExpression(inst.x, params);
+                  const evalY = evaluateExpression(inst.y, params);
+                  const evalAngle = evaluateExpression(inst.angle, params);
+                  const isSelected = inst.id === selectedInstanceId;
+
+                  return (
+                      <g 
+                        key={inst.id} 
+                        transform={`translate(${evalX}, ${evalY}) rotate(${evalAngle})`}
+                        style={{ cursor: 'pointer' }}
+                        onMouseDown={(e) => { e.stopPropagation(); clickedInstanceId.current = inst.id; }}
+                      >
+                          {/* Invisible hit area for easier clicking if footprint is empty or thin */}
+                          <circle r="5" fill="transparent" />
+                          
+                          {/* Render footprint shapes */}
+                          <g style={{ 
+                            stroke: isSelected ? "#646cff" : undefined, 
+                            strokeWidth: isSelected ? 2 : undefined,
+                            filter: isSelected ? 'drop-shadow(0 0 2px #646cff)' : undefined
+                          }}>
+                            {fp.shapes.map(shape => (
+                                <InstanceShapeRenderer key={shape.id} shape={shape} params={params} />
+                            ))}
+                          </g>
+                      </g>
+                  );
+              })}
             </svg>
           ) : (
             <div className="layout-3d-placeholder">
@@ -150,9 +302,56 @@ export default function LayoutEditor({ layout, setLayout, footprints, params, st
       {/* 3. RIGHT PANEL: PROPERTIES */}
       <div className="layout-sidebar-right">
         <h3>Properties</h3>
-        <div className="properties-placeholder">
-          <p className="empty-hint">Select a footprint to edit.</p>
-        </div>
+        {selectedInstance ? (
+          <div className="properties-editor">
+            <div className="prop-group">
+                <label>Footprint</label>
+                <div className="prop-static-text">
+                    {footprints.find(f => f.id === selectedInstance.footprintId)?.name || 'Unknown'}
+                </div>
+            </div>
+            
+            <div className="prop-group">
+                <label>X Position</label>
+                <ExpressionEditor 
+                    value={selectedInstance.x}
+                    onChange={(val) => updateInstance(selectedInstance.id, "x", val)}
+                    params={params}
+                    placeholder="0"
+                />
+            </div>
+
+            <div className="prop-group">
+                <label>Y Position</label>
+                <ExpressionEditor 
+                    value={selectedInstance.y}
+                    onChange={(val) => updateInstance(selectedInstance.id, "y", val)}
+                    params={params}
+                    placeholder="0"
+                />
+            </div>
+
+            <div className="prop-group">
+                <label>Rotation (deg)</label>
+                <ExpressionEditor 
+                    value={selectedInstance.angle}
+                    onChange={(val) => updateInstance(selectedInstance.id, "angle", val)}
+                    params={params}
+                    placeholder="0"
+                />
+            </div>
+
+            <div style={{ marginTop: '20px', borderTop: '1px solid #333', paddingTop: '20px' }}>
+                <button className="danger" style={{ width: '100%' }} onClick={() => deleteInstance(selectedInstance.id)}>
+                    Remove Footprint
+                </button>
+            </div>
+          </div>
+        ) : (
+          <div className="properties-placeholder">
+            <p className="empty-hint">Select a footprint to edit.</p>
+          </div>
+        )}
       </div>
     </div>
   );
