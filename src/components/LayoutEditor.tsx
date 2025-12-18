@@ -392,6 +392,17 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
               <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
               
               {/* Render Board Outline */}
+              {/* Hit Area for easier selection (transparent stroke) */}
+              <polygon 
+                points={boardPointsStr}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={12}
+                vectorEffect="non-scaling-stroke"
+                style={{ cursor: 'pointer' }}
+                onMouseDown={() => { clickedId.current = "BOARD_OUTLINE"; }}
+              />
+              {/* Visible Outline */}
               <polygon 
                 points={boardPointsStr}
                 fill="none"
@@ -399,8 +410,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                 strokeWidth={selectedId === "BOARD_OUTLINE" ? 3 : 2}
                 strokeDasharray={selectedId === "BOARD_OUTLINE" ? "0" : "5,5"}
                 vectorEffect="non-scaling-stroke"
-                style={{ cursor: 'pointer' }}
-                onMouseDown={() => { clickedId.current = "BOARD_OUTLINE"; }}
+                style={{ pointerEvents: 'none' }}
               />
 
               {layout.map((inst) => {
