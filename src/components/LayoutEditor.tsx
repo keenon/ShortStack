@@ -1,7 +1,7 @@
 // src/components/LayoutEditor.tsx
 import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point } from "../types";
-import { evaluateExpression } from "./FootprintEditor";
+import { evaluateExpression, modifyExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
 import Layout3DView, { Layout3DViewHandle } from "./Layout3DView";
 import './LayoutEditor.css';
@@ -251,6 +251,18 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   const dragStartViewBox = useRef({ x: 0, y: 0 });
   const clickedId = useRef<string | null>(null);
 
+  // Dragging State Refs for Instances
+  const isInstanceDragging = useRef(false);
+  const draggedInstanceId = useRef<string | null>(null);
+  const instanceDragStartPos = useRef({ x: 0, y: 0 });
+  const instanceDragStartExpr = useRef({ x: "0", y: "0" });
+
+  // Ref to access latest layout in event handlers
+  const layoutRef = useRef(layout);
+  useEffect(() => {
+    layoutRef.current = layout;
+  }, [layout]);
+
   useEffect(() => {
     viewBoxRef.current = viewBox;
   }, [viewBox]);
@@ -344,6 +356,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     return () => element.removeEventListener('wheel', onWheel);
   }, [viewMode]);
 
+  // --- PANNING HANDLERS ---
   const handleMouseDown = (e: React.MouseEvent) => {
     if (viewMode !== "2D" || e.button !== 0) return;
     isDragging.current = true;
@@ -373,6 +386,63 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
         setSelectedId(clickedId.current);
     }
     clickedId.current = null;
+  };
+
+  // --- INSTANCE DRAG HANDLERS ---
+  const handleInstanceMouseDown = (e: React.MouseEvent, id: string) => {
+    // Prevent Panning
+    e.stopPropagation();
+    e.preventDefault();
+
+    if (viewMode !== "2D") return;
+
+    // Select the instance
+    setSelectedId(id);
+
+    const inst = layout.find(i => i.id === id);
+    if (!inst) return;
+
+    isInstanceDragging.current = true;
+    draggedInstanceId.current = id;
+    instanceDragStartPos.current = { x: e.clientX, y: e.clientY };
+    instanceDragStartExpr.current = { x: inst.x, y: inst.y };
+
+    window.addEventListener('mousemove', handleInstanceMouseMove);
+    window.addEventListener('mouseup', handleInstanceMouseUp);
+  };
+
+  const handleInstanceMouseMove = (e: MouseEvent) => {
+    if (!isInstanceDragging.current || !wrapperRef.current || !draggedInstanceId.current) return;
+
+    const rect = wrapperRef.current.getBoundingClientRect();
+    const scaleX = viewBoxRef.current.width / rect.width;
+    const scaleY = viewBoxRef.current.height / rect.height;
+
+    const dxPx = e.clientX - instanceDragStartPos.current.x;
+    const dyPx = e.clientY - instanceDragStartPos.current.y;
+
+    const dxWorld = dxPx * scaleX;
+    const dyWorld = dyPx * scaleY;
+
+    const startExpr = instanceDragStartExpr.current;
+    
+    // Update Expressions
+    const newX = modifyExpression(startExpr.x, dxWorld);
+    const newY = modifyExpression(startExpr.y, dyWorld);
+
+    setLayout(prev => prev.map(inst => {
+        if (inst.id === draggedInstanceId.current) {
+            return { ...inst, x: newX, y: newY };
+        }
+        return inst;
+    }));
+  };
+
+  const handleInstanceMouseUp = (e: MouseEvent) => {
+    isInstanceDragging.current = false;
+    draggedInstanceId.current = null;
+    window.removeEventListener('mousemove', handleInstanceMouseMove);
+    window.removeEventListener('mouseup', handleInstanceMouseUp);
   };
 
   const handleHomeClick = () => {
@@ -507,7 +577,10 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                 strokeWidth={12}
                 vectorEffect="non-scaling-stroke"
                 style={{ cursor: 'pointer' }}
-                onMouseDown={() => { clickedId.current = "BOARD_OUTLINE"; }}
+                onMouseDown={(e) => {
+                     e.stopPropagation();
+                     setSelectedId("BOARD_OUTLINE");
+                }}
               />
               <polygon 
                 points={boardPointsStr}
@@ -532,8 +605,8 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                       <g 
                         key={inst.id} 
                         transform={`translate(${evalX}, ${evalY}) rotate(${evalAngle})`}
-                        style={{ cursor: 'pointer' }}
-                        onMouseDown={() => { clickedId.current = inst.id; }}
+                        style={{ cursor: 'grab' }}
+                        onMouseDown={(e) => handleInstanceMouseDown(e, inst.id)}
                       >
                           {/* Invisible hit area */}
                           <circle r="5" fill="transparent" />
