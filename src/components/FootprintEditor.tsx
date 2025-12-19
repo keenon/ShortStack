@@ -828,8 +828,8 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                     🏠
                 </button>
 
-            {viewMode === "2D" ? (
-                <>
+            {/* 2D View Container - Persist when hidden */}
+            <div style={{ display: viewMode === "2D" ? 'contents' : 'none' }}>
                 <svg 
                     ref={svgRef}
                     className="fp-canvas" 
@@ -888,9 +888,10 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                     })}
                 </svg>
                 <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
-                </>
-            ) : (
-                // 3D VIEW
+            </div>
+            
+            {/* 3D VIEW - Persist when hidden */}
+            <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
                 <Footprint3DView 
                     ref={footprint3DRef}
                     footprint={footprint}
@@ -898,7 +899,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                     stackup={stackup}
                     visibleLayers={layerVisibility} // Pass visibility
                 />
-            )}
+            </div>
             </div>
         </div>
 

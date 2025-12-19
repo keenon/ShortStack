@@ -618,7 +618,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
         <div className="layout-canvas-wrapper" ref={wrapperRef}>
           <button className="canvas-home-btn" onClick={handleHomeClick} title="Reset View">🏠</button>
           
-          {viewMode === "2D" ? (
+          <div style={{ display: viewMode === "2D" ? 'contents' : 'none' }}>
             <svg className="layout-canvas" viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`} onMouseDown={handleMouseDown}>
               <defs>
                 <pattern id="layout-grid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
@@ -713,8 +713,10 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                   );
               })}
             </svg>
-          ) : (
-            // 3D Preview
+            <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
+          </div>
+          
+          <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
             <Layout3DView 
                 ref={layout3DRef}
                 layout={layout}
@@ -724,10 +726,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                 stackup={stackup}
                 visibleLayers={layerVisibility} // PASS VISIBILITY
             />
-          )}
-          {viewMode === "2D" && (
-             <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
-          )}
+          </div>
         </div>
       </div>
 
