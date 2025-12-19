@@ -257,6 +257,12 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   const instanceDragStartPos = useRef({ x: 0, y: 0 });
   const instanceDragStartExpr = useRef({ x: "0", y: "0" });
 
+  // Dragging State Refs for Board Points
+  const isPointDragging = useRef(false);
+  const draggedPointId = useRef<string | null>(null);
+  const pointDragStartPos = useRef({ x: 0, y: 0 });
+  const pointDragStartExpr = useRef({ x: "0", y: "0" });
+
   // Ref to access latest layout in event handlers
   const layoutRef = useRef(layout);
   useEffect(() => {
@@ -445,6 +451,57 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     window.removeEventListener('mouseup', handleInstanceMouseUp);
   };
 
+  // --- BOARD POINT DRAG HANDLERS ---
+  const handlePointMouseDown = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (viewMode !== "2D") return;
+
+    setSelectedId("BOARD_OUTLINE"); 
+
+    const point = boardOutline.points.find(p => p.id === id);
+    if (!point) return;
+
+    isPointDragging.current = true;
+    draggedPointId.current = id;
+    pointDragStartPos.current = { x: e.clientX, y: e.clientY };
+    pointDragStartExpr.current = { x: point.x, y: point.y };
+
+    window.addEventListener('mousemove', handlePointMouseMove);
+    window.addEventListener('mouseup', handlePointMouseUp);
+  };
+
+  const handlePointMouseMove = (e: MouseEvent) => {
+    if (!isPointDragging.current || !wrapperRef.current || !draggedPointId.current) return;
+
+    const rect = wrapperRef.current.getBoundingClientRect();
+    const scaleX = viewBoxRef.current.width / rect.width;
+    const scaleY = viewBoxRef.current.height / rect.height;
+
+    const dxPx = e.clientX - pointDragStartPos.current.x;
+    const dyPx = e.clientY - pointDragStartPos.current.y;
+
+    const dxWorld = dxPx * scaleX;
+    const dyWorld = dyPx * scaleY;
+
+    const startExpr = pointDragStartExpr.current;
+
+    const newX = modifyExpression(startExpr.x, dxWorld);
+    const newY = modifyExpression(startExpr.y, dyWorld);
+
+    setBoardOutline(prev => ({
+        ...prev,
+        points: prev.points.map(p => p.id === draggedPointId.current ? { ...p, x: newX, y: newY } : p)
+    }));
+  };
+
+  const handlePointMouseUp = () => {
+    isPointDragging.current = false;
+    draggedPointId.current = null;
+    window.removeEventListener('mousemove', handlePointMouseMove);
+    window.removeEventListener('mouseup', handlePointMouseUp);
+  };
+
   const handleHomeClick = () => {
     if (viewMode === "2D") {
         if (!wrapperRef.current) return;
@@ -465,6 +522,9 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   const boardPointsStr = boardOutline.points
     .map(p => `${evaluateExpression(p.x, params)},${evaluateExpression(p.y, params)}`)
     .join(' ');
+
+  // Handle size relative to view
+  const handleSize = Math.max(viewBox.width / 80, 0.5);
 
   return (
     <div className="layout-editor-container">
@@ -591,6 +651,27 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                 vectorEffect="non-scaling-stroke"
                 style={{ pointerEvents: 'none' }}
               />
+
+              {/* Board Points Handles */}
+              {selectedId === "BOARD_OUTLINE" && boardOutline.points.map((p) => {
+                  const px = evaluateExpression(p.x, params);
+                  const py = evaluateExpression(p.y, params);
+                  return (
+                    <rect
+                        key={p.id}
+                        x={px - handleSize / 2}
+                        y={py - handleSize / 2}
+                        width={handleSize}
+                        height={handleSize}
+                        fill="#fff"
+                        stroke="#646cff"
+                        strokeWidth={handleSize / 5}
+                        style={{ cursor: 'grab' }}
+                        vectorEffect="non-scaling-stroke"
+                        onMouseDown={(e) => handlePointMouseDown(e, p.id)}
+                    />
+                  );
+              })}
 
               {layout.map((inst) => {
                   const fp = footprints.find(f => f.id === inst.footprintId);
