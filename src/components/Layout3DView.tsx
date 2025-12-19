@@ -98,7 +98,8 @@ const LayerVolume = ({
                          const rotY = sx * sinA + sy * cosA;
                          
                          const finalX = instX + rotX;
-                         const finalY = instY + rotY; // Maps to Local Y
+                         // Fix: Negate Y so that after -90X rotation, +Y in 2D maps to +Z in 3D
+                         const finalY = -(instY + rotY); 
                          
                          if (shape.type === "circle") {
                              const diameter = evaluateExpression(shape.diameter, params);
@@ -121,7 +122,8 @@ const LayerVolume = ({
                                  <Subtraction
                                     key={`${inst.id}-${shape.id}`}
                                     position={[finalX, finalY, cutZ]}
-                                    rotation={[0, 0, totalAngleRad]}
+                                    // Fix: Negate rotation angle to account for Y-axis flip
+                                    rotation={[0, 0, -totalAngleRad]}
                                  >
                                      <boxGeometry args={[w, h, cutDepth]} />
                                  </Subtraction>
@@ -150,11 +152,13 @@ const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutli
       const s = new THREE.Shape();
       if (boardOutline.points.length > 0) {
           const first = boardOutline.points[0];
-          s.moveTo(evaluateExpression(first.x, params), evaluateExpression(first.y, params));
+          // Fix: Negate Y to align with 3D View coordinates
+          s.moveTo(evaluateExpression(first.x, params), -evaluateExpression(first.y, params));
           
           for (let i = 1; i < boardOutline.points.length; i++) {
               const p = boardOutline.points[i];
-              s.lineTo(evaluateExpression(p.x, params), evaluateExpression(p.y, params));
+              // Fix: Negate Y
+              s.lineTo(evaluateExpression(p.x, params), -evaluateExpression(p.y, params));
           }
           s.closePath();
       }
