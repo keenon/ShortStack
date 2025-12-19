@@ -116,23 +116,6 @@ const PropertiesPanel = ({
           {stackup.map((layer) => {
             const isChecked = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
             
-            // Calculate values for display
-            let depthVal = 0;
-            let thicknessVal = 0;
-            let percentage = 0;
-
-            if (isChecked && layer.type === "Carved/Printed") {
-                const depthExpr = shape.assignedLayers[layer.id] || "0";
-                depthVal = evaluateExpression(depthExpr, params);
-                thicknessVal = evaluateExpression(layer.thicknessExpression, params);
-                if (thicknessVal !== 0) {
-                    percentage = (depthVal / thicknessVal) * 100;
-                    // Cap at 100% as requested ("up to 100%")
-                    if (percentage > 100) percentage = 100;
-                    if (percentage < 0) percentage = 0;
-                }
-            }
-
             return (
               <div key={layer.id} className="layer-assignment-row">
                   <input 
@@ -167,10 +150,7 @@ const PropertiesPanel = ({
                             params={params}
                             placeholder="Depth"
                         />
-                        <div className="depth-result-text">
-                           {/* UPDATED TEXT FORMAT */}
-                           = {depthVal.toFixed(1)}mm ({percentage.toFixed(1)}% of {thicknessVal.toFixed(1)}mm layer)
-                        </div>
+                        {/* Removed separate result text as ExpressionEditor now shows it internally */}
                     </div>
                 )}
               </div>
@@ -340,7 +320,7 @@ const ShapeListPanel = ({
             className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""} ${!visible ? "is-hidden" : ""}`}
             onClick={() => onSelect(shape.id)}
           >
-            {/* NEW: Colored squares for assigned layers */}
+            {/* Colored squares for assigned layers */}
             <div className="shape-layer-indicators">
               {stackup.map(layer => {
                  if (shape.assignedLayers?.[layer.id] !== undefined) {
@@ -642,7 +622,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       }
       
       // If assigned to layers, visible if NOT ALL of them are hidden.
-      // i.e., at least one assigned layer is visible (undefined or true)
       const allAssignedLayersHidden = assignedIds.every(id => layerVisibility[id] === false);
       return !allAssignedLayersHidden;
   };

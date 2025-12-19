@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, KeyboardEvent } from "react";
+import * as math from "mathjs";
 import { Parameter } from "../types";
 import "./ExpressionEditor.css";
 
@@ -7,7 +8,7 @@ interface Props {
   onChange: (val: string) => void;
   params: Parameter[];
   placeholder?: string;
-  hasError?: boolean;
+  hasError?: boolean; // Kept for backward compatibility or external errors, though internal logic takes precedence for display
 }
 
 export default function ExpressionEditor({
@@ -15,13 +16,55 @@ export default function ExpressionEditor({
   onChange,
   params,
   placeholder,
-  hasError,
+  hasError: externalError,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [filtered, setFiltered] = useState<Parameter[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [cursorOffset, setCursorOffset] = useState(0);
+
+  // Evaluation State
+  const [evalResult, setEvalResult] = useState<number | null>(null);
+  const [evalError, setEvalError] = useState<string | null>(null);
+
+  // Evaluate whenever value or params change
+  useEffect(() => {
+    if (!value || !value.trim()) {
+      setEvalResult(null);
+      setEvalError(null);
+      return;
+    }
+
+    try {
+      const scope: Record<string, any> = {};
+      params.forEach((p) => {
+        // Treat parameters as pure numbers in mm
+        const val = p.unit === "in" ? p.value * 25.4 : p.value;
+        scope[p.key] = val;
+      });
+
+      const result = math.evaluate(value, scope);
+      
+      let valInMm = 0;
+      if (typeof result === "number") {
+        valInMm = result;
+      } else if (result && typeof result.toNumber === "function") {
+        valInMm = result.toNumber("mm");
+      } else {
+         // If it's a unit object but we can't convert or it's unexpected
+         // Try to convert to number if possible, or just error if it's complex
+         // For this simple editor, we assume scalar or length
+         throw new Error("Invalid result type");
+      }
+
+      setEvalResult(valInMm);
+      setEvalError(null);
+    } catch (err: any) {
+      setEvalResult(null);
+      setEvalError("Invalid"); // Keep error message short
+    }
+  }, [value, params]);
 
   // Measure text width to position the dropdown
   function getCursorPixelPosition(textBeforeCursor: string): number {
@@ -128,19 +171,29 @@ export default function ExpressionEditor({
     setTimeout(() => setShowSuggestions(false), 200);
   };
 
+  const isError = externalError || evalError !== null;
+
   return (
     <div className="expression-editor-wrapper">
-      <input
-        ref={inputRef}
-        type="text"
-        className={`expression-input ${hasError ? "error" : ""}`}
-        value={value}
-        onChange={handleInputChange}
-        onKeyDown={handleKeyDown}
-        onBlur={handleBlur}
-        placeholder={placeholder}
-        autoComplete="off"
-      />
+      <div className="input-container">
+        <input
+            ref={inputRef}
+            type="text"
+            className={`expression-input ${isError ? "error" : ""}`}
+            value={value}
+            onChange={handleInputChange}
+            onKeyDown={handleKeyDown}
+            onBlur={handleBlur}
+            placeholder={placeholder}
+            autoComplete="off"
+        />
+        {/* Result Badge */}
+        {value && value.trim() && (
+            <div className={`expression-result-badge ${evalError ? "error" : "success"}`}>
+                {evalError ? "!" : `= ${evalResult?.toFixed(2)}`}
+            </div>
+        )}
+      </div>
 
       {showSuggestions && (
         <ul 

@@ -1,6 +1,6 @@
 // src/components/StackupEditor.tsx
 import React from "react";
-import * as math from "mathjs";
+// Removed mathjs import as it's now handled in ExpressionEditor
 import { Parameter, StackupLayer, ManufacturingType } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 
@@ -44,46 +44,19 @@ export default function StackupEditor({ stackup, setStackup, params }: Props) {
     setStackup((prev) => prev.filter((layer) => layer.id !== id));
   }
 
-  // 4. MOVE ROW (New Function)
+  // 4. MOVE ROW
   function moveRow(index: number, direction: -1 | 1) {
-    // Prevent moving out of bounds
     if (direction === -1 && index === 0) return;
     if (direction === 1 && index === stackup.length - 1) return;
 
     const newStackup = [...stackup];
     const targetIndex = index + direction;
 
-    // Swap the elements
     const temp = newStackup[index];
     newStackup[index] = newStackup[targetIndex];
     newStackup[targetIndex] = temp;
 
     setStackup(newStackup);
-  }
-
-  // 5. EVALUATE MATH HELPER
-  function evaluateThickness(expression: string) {
-    if (!expression.trim()) return { value: 0, error: null };
-    try {
-      const scope: Record<string, any> = {};
-      params.forEach((p) => {
-        // Normalize to mm numbers
-        const val = p.unit === "in" ? p.value * 25.4 : p.value;
-        scope[p.key] = val;
-      });
-      const result = math.evaluate(expression, scope);
-      let valInMm = 0;
-      if (typeof result === "number") {
-        valInMm = result;
-      } else if (result && typeof result.toNumber === "function") {
-        valInMm = result.toNumber("mm");
-      } else {
-        return { value: null, error: "Invalid Type" };
-      }
-      return { value: valInMm, error: null };
-    } catch (err: any) {
-      return { value: null, error: err.message };
-    }
   }
 
   return (
@@ -96,15 +69,11 @@ export default function StackupEditor({ stackup, setStackup, params }: Props) {
             <th style={{ width: "25%" }}>Name</th>
             <th style={{ width: "20%" }}>Manufacturing</th>
             <th style={{ width: "35%" }}>Thickness (Expression)</th>
-            {/* Increased width to fit buttons */}
             <th style={{ width: "120px" }}>Action</th>
           </tr>
         </thead>
         <tbody>
-          {/* Note: added 'index' to the map callback */}
           {stackup.map((layer, index) => {
-            const { value, error } = evaluateThickness(layer.thicknessExpression);
-            
             return (
               <tr key={layer.id}>
                  {/* COLOR PICKER */}
@@ -161,32 +130,23 @@ export default function StackupEditor({ stackup, setStackup, params }: Props) {
                 {/* EXPRESSION EDITOR */}
                 <td>
                   <div className="thickness-cell">
+                    {/* ExpressionEditor now handles evaluation display */}
                     <ExpressionEditor 
                         value={layer.thicknessExpression}
                         onChange={(val) => updateRow(layer.id, "thicknessExpression", val)}
                         params={params}
                         placeholder="e.g. Width / 2"
-                        hasError={!!error}
                     />
-                    <div className="math-result">
-                        {error ? (
-                            <span style={{ color: "#ff6b6b" }}>⚠ {error}</span>
-                        ) : (
-                            <span style={{ color: "#51cf66" }}>
-                                = {value?.toFixed(3)} mm
-                            </span>
-                        )}
-                    </div>
                   </div>
                 </td>
 
-                {/* ACTIONS: UP / DOWN / DELETE */}
+                {/* ACTIONS */}
                 <td style={{ verticalAlign: 'top' }}>
                   <div className="action-buttons">
                     <button 
                       className="icon-btn btn-up" 
                       onClick={() => moveRow(index, -1)}
-                      disabled={index === 0} // Disable if first item
+                      disabled={index === 0}
                       title="Move Up"
                     >
                       ↑
@@ -194,7 +154,7 @@ export default function StackupEditor({ stackup, setStackup, params }: Props) {
                     <button 
                       className="icon-btn btn-down" 
                       onClick={() => moveRow(index, 1)}
-                      disabled={index === stackup.length - 1} // Disable if last item
+                      disabled={index === stackup.length - 1}
                       title="Move Down"
                     >
                       ↓
