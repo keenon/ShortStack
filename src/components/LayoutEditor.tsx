@@ -1,5 +1,5 @@
 // src/components/LayoutEditor.tsx
-import { useState, useRef, useEffect, useLayoutEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, Fragment } from "react";
 import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point } from "../types";
 import { evaluateExpression, modifyExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
@@ -146,6 +146,35 @@ const BoardOutlineProperties = ({
         setBoardOutline(prev => ({ ...prev, points: [...prev.points, newPoint] }));
     };
 
+    const addMidpoint = (index: number) => {
+        const p1 = boardOutline.points[index];
+        const p2 = boardOutline.points[index + 1];
+        if (!p1 || !p2) return;
+
+        const isNumeric = (str: string) => {
+            const s = str.trim();
+            if (s === "") return false;
+            return !isNaN(Number(s));
+        };
+
+        const calcMid = (v1: string, v2: string) => {
+            if (isNumeric(v1) && isNumeric(v2)) {
+                return ((Number(v1) + Number(v2)) / 2).toString();
+            }
+            return `(${v1} + ${v2}) / 2`;
+        };
+
+        const newPoint: Point = {
+            id: crypto.randomUUID(),
+            x: calcMid(p1.x, p2.x),
+            y: calcMid(p1.y, p2.y)
+        };
+
+        const newPoints = [...boardOutline.points];
+        newPoints.splice(index + 1, 0, newPoint);
+        setBoardOutline(prev => ({ ...prev, points: newPoints }));
+    };
+
     const deletePoint = (id: string) => {
         if (boardOutline.points.length <= 3) return;
         setBoardOutline(prev => ({ ...prev, points: prev.points.filter(p => p.id !== id) }));
@@ -166,56 +195,78 @@ const BoardOutlineProperties = ({
             
             <div className="board-points-list">
                 {boardOutline.points.map((p, idx) => (
-                    <div key={p.id} className="board-point-card">
-                        <div className="point-header">
-                            <span>Point {idx + 1}</span>
+                    <Fragment key={p.id}>
+                        <div className="board-point-card">
+                            <div className="point-header">
+                                <span>Point {idx + 1}</span>
+                            </div>
+                            
+                            <div className="point-field-row">
+                                <label>X:</label>
+                                <div style={{ flexGrow: 1 }}>
+                                    <ExpressionEditor 
+                                        value={p.x} 
+                                        onChange={(v) => updatePoint(p.id, "x", v)} 
+                                        params={params} 
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="point-field-row">
+                                <label>Y:</label>
+                                <div style={{ flexGrow: 1 }}>
+                                    <ExpressionEditor 
+                                        value={p.y} 
+                                        onChange={(v) => updatePoint(p.id, "y", v)} 
+                                        params={params} 
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="point-actions-row">
+                                <div className="action-buttons">
+                                    <button 
+                                        className="icon-btn btn-up" 
+                                        onClick={() => movePoint(idx, -1)} 
+                                        disabled={idx === 0}
+                                        title="Move Up"
+                                    >↑</button>
+                                    <button 
+                                        className="icon-btn btn-down" 
+                                        onClick={() => movePoint(idx, 1)} 
+                                        disabled={idx === boardOutline.points.length - 1}
+                                        title="Move Down"
+                                    >↓</button>
+                                    <button 
+                                        className="icon-btn danger" 
+                                        onClick={() => deletePoint(p.id)}
+                                        disabled={boardOutline.points.length <= 3}
+                                        title="Delete Point"
+                                    >✕</button>
+                                </div>
+                            </div>
                         </div>
                         
-                        <div className="point-field-row">
-                            <label>X:</label>
-                            <div style={{ flexGrow: 1 }}>
-                                <ExpressionEditor 
-                                    value={p.x} 
-                                    onChange={(v) => updatePoint(p.id, "x", v)} 
-                                    params={params} 
-                                />
-                            </div>
-                        </div>
-
-                        <div className="point-field-row">
-                            <label>Y:</label>
-                            <div style={{ flexGrow: 1 }}>
-                                <ExpressionEditor 
-                                    value={p.y} 
-                                    onChange={(v) => updatePoint(p.id, "y", v)} 
-                                    params={params} 
-                                />
-                            </div>
-                        </div>
-
-                        <div className="point-actions-row">
-                            <div className="action-buttons">
+                        {idx < boardOutline.points.length - 1 && (
+                            <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
                                 <button 
-                                    className="icon-btn btn-up" 
-                                    onClick={() => movePoint(idx, -1)} 
-                                    disabled={idx === 0}
-                                    title="Move Up"
-                                >↑</button>
-                                <button 
-                                    className="icon-btn btn-down" 
-                                    onClick={() => movePoint(idx, 1)} 
-                                    disabled={idx === boardOutline.points.length - 1}
-                                    title="Move Down"
-                                >↓</button>
-                                <button 
-                                    className="icon-btn danger" 
-                                    onClick={() => deletePoint(p.id)}
-                                    disabled={boardOutline.points.length <= 3}
-                                    title="Delete Point"
-                                >✕</button>
+                                    onClick={() => addMidpoint(idx)}
+                                    style={{ 
+                                        cursor: "pointer", 
+                                        padding: "4px 8px", 
+                                        fontSize: "0.8rem", 
+                                        background: "#333", 
+                                        border: "1px solid #555", 
+                                        color: "#fff", 
+                                        borderRadius: "4px" 
+                                    }}
+                                    title="Insert Midpoint"
+                                >
+                                    + Midpoint
+                                </button>
                             </div>
-                        </div>
-                    </div>
+                        )}
+                    </Fragment>
                 ))}
             </div>
 
