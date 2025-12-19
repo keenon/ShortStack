@@ -18,6 +18,66 @@ interface Props {
 // HELPERS
 // ------------------------------------------------------------------
 
+export function modifyExpression(expression: string, delta: number): string {
+  if (delta === 0) return expression;
+  
+  let trimmed = expression ? expression.trim() : "0";
+  if (trimmed === "") trimmed = "0";
+
+  // Check for simple number (integer or float)
+  if (/^[-+]?[0-9]*\.?[0-9]+$/.test(trimmed)) {
+      const val = parseFloat(trimmed);
+      if (!isNaN(val)) {
+          return parseFloat((val + delta).toFixed(4)).toString();
+      }
+  }
+
+  // Check for ends with "+ number"
+  const plusMatch = trimmed.match(/^(.*)\+\s*([0-9]*\.?[0-9]+)$/);
+  if (plusMatch) {
+      const prefix = plusMatch[1];
+      const numStr = plusMatch[2];
+      const val = parseFloat(numStr);
+      if (!isNaN(val)) {
+          const newVal = val + delta;
+          if (newVal >= 0) {
+              return `${prefix}+ ${parseFloat(newVal.toFixed(4))}`;
+          } else {
+              return `${prefix}- ${parseFloat(Math.abs(newVal).toFixed(4))}`;
+          }
+      }
+  }
+
+  // Check for ends with "- number"
+  const minusMatch = trimmed.match(/^(.*)\-\s*([0-9]*\.?[0-9]+)$/);
+  if (minusMatch) {
+      const prefix = minusMatch[1];
+      const numStr = minusMatch[2];
+      const val = parseFloat(numStr);
+      if (!isNaN(val)) {
+          // Expression: prefix - val
+          // New: prefix - val + delta  => prefix - (val - delta)
+          const newVal = val - delta;
+          if (newVal >= 0) {
+               return `${prefix}- ${parseFloat(newVal.toFixed(4))}`;
+          } else {
+               // val - delta is negative (e.g. 5 - 10 = -5).
+               // prefix - (-5) => prefix + 5
+               return `${prefix}+ ${parseFloat(Math.abs(newVal).toFixed(4))}`;
+          }
+      }
+  }
+
+  // Fallback: Append + delta
+  const absDelta = Math.abs(delta);
+  const fmtDelta = parseFloat(absDelta.toFixed(4));
+  if (delta >= 0) {
+      return `${trimmed} + ${fmtDelta}`;
+  } else {
+      return `${trimmed} - ${fmtDelta}`;
+  }
+}
+
 // Evaluate math expressions to numbers (for visualization only)
 export function evaluateExpression(expression: string, params: Parameter[]): number {
   if (!expression || !expression.trim()) return 0;
@@ -368,6 +428,12 @@ const ShapeListPanel = ({
 export default function FootprintEditor({ footprint, onUpdate, onClose, params, stackup }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   
+  // Keep a ref to the latest footprint to access it inside event listeners without staleness
+  const footprintRef = useRef(footprint);
+  useEffect(() => {
+    footprintRef.current = footprint;
+  }, [footprint]);
+
   // Layer Visibility State: undefined/true = visible, false = hidden
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
 
@@ -382,12 +448,18 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   // Ref for 3D View to control camera
   const footprint3DRef = useRef<Footprint3DViewHandle>(null);
 
-  // Dragging State Refs
+  // Dragging State Refs (Canvas Pan)
   const isDragging = useRef(false);
   const hasMoved = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const dragStartViewBox = useRef({ x: 0, y: 0 });
   const clickedShapeId = useRef<string | null>(null);
+
+  // Shape Dragging State Refs (Moving Components)
+  const isShapeDragging = useRef(false);
+  const shapeDragStartPos = useRef({ x: 0, y: 0 });
+  const shapeDragStartExpr = useRef({ x: "0", y: "0" });
+  const draggedShapeId = useRef<string | null>(null);
 
   // Sync ref with state
   useEffect(() => {
@@ -472,7 +544,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     };
   }, [viewMode]);
 
-  // --- PAN / SELECT HANDLERS ---
+  // --- PAN HANDLERS ---
   
   const handleMouseDown = (e: React.MouseEvent) => {
     if (viewMode !== "2D") return;
@@ -526,8 +598,67 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     clickedShapeId.current = null;
   };
 
+  // --- SHAPE DRAG HANDLERS ---
+
   const handleShapeMouseDown = (e: React.MouseEvent, id: string) => {
-      clickedShapeId.current = id;
+      // Stop propagation to prevent Panning from starting
+      e.stopPropagation(); 
+      e.preventDefault();
+
+      if (viewMode !== "2D") return;
+
+      // Select the shape
+      setSelectedShapeId(id);
+      
+      const shape = footprint.shapes.find(s => s.id === id);
+      if (!shape) return;
+
+      // Initialize Drag State
+      isShapeDragging.current = true;
+      draggedShapeId.current = id;
+      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+      shapeDragStartExpr.current = { x: shape.x, y: shape.y };
+
+      // Attach Global Listeners for Dragging
+      window.addEventListener('mousemove', handleShapeMouseMove);
+      window.addEventListener('mouseup', handleShapeMouseUp);
+  };
+
+  const handleShapeMouseMove = (e: MouseEvent) => {
+      if (!isShapeDragging.current || !wrapperRef.current || !draggedShapeId.current) return;
+
+      const rect = wrapperRef.current.getBoundingClientRect();
+      const scaleX = viewBoxRef.current.width / rect.width;
+      const scaleY = viewBoxRef.current.height / rect.height;
+
+      const dxPx = e.clientX - shapeDragStartPos.current.x;
+      const dyPx = e.clientY - shapeDragStartPos.current.y;
+
+      const dxWorld = dxPx * scaleX;
+      const dyWorld = dyPx * scaleY;
+
+      const currentFP = footprintRef.current;
+      const targetId = draggedShapeId.current;
+      const startExpr = shapeDragStartExpr.current;
+
+      const newX = modifyExpression(startExpr.x, dxWorld);
+      const newY = modifyExpression(startExpr.y, dyWorld);
+
+      const updatedShapes = currentFP.shapes.map(s => {
+          if (s.id === targetId) {
+              return { ...s, x: newX, y: newY };
+          }
+          return s;
+      });
+
+      onUpdate({ ...currentFP, shapes: updatedShapes });
+  };
+
+  const handleShapeMouseUp = (e: MouseEvent) => {
+      isShapeDragging.current = false;
+      draggedShapeId.current = null;
+      window.removeEventListener('mousemove', handleShapeMouseMove);
+      window.removeEventListener('mouseup', handleShapeMouseUp);
   };
 
   // --- ACTIONS ---
