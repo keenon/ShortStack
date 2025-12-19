@@ -8,6 +8,8 @@ use geo::bounding_rect::BoundingRect;
 use svg::Document;
 use svg::node::element::Path;
 use svg::node::element::path::Data;
+use std::fs::File;
+use std::io::Write;
 
 #[derive(Debug, serde::Deserialize)]
 struct ExportPoint {
@@ -30,7 +32,7 @@ struct ExportShape {
 #[derive(Debug, serde::Deserialize)]
 struct ExportRequest {
     filepath: String,
-    file_type: String, // "SVG", "STEP", "STL"
+    file_type: String, // "SVG", "DXF", "STEP", "STL"
     outline: Vec<ExportPoint>,
     shapes: Vec<ExportShape>,
     layer_thickness: f64,
@@ -55,17 +57,23 @@ fn export_layer_files(request: ExportRequest) {
         } else {
             println!("SVG export successful.");
         }
+    } else if request.file_type == "DXF" {
+        if let Err(e) = generate_dxf(&request) {
+            eprintln!("Error generating DXF: {}", e);
+        } else {
+            println!("DXF export successful.");
+        }
     }
 }
 
-fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
+fn get_geometry(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f64>)> {
     // 1. Convert Board Outline to Polygon
     let outline_coords: Vec<Coord<f64>> = request.outline.iter()
         .map(|p| Coord { x: p.x, y: p.y })
         .collect();
 
     if outline_coords.is_empty() {
-        return Ok(());
+        return None;
     }
 
     let outline_ls = LineString::new(outline_coords);
@@ -84,6 +92,15 @@ fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
             }
         }
     }
+    
+    Some((board_poly, united_shapes))
+}
+
+fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
+    let (board_poly, united_shapes) = match get_geometry(request) {
+        Some(g) => g,
+        None => return Ok(()),
+    };
 
     // 3. Setup SVG Document
     // Calculate bounding box of the board outline for the viewbox
@@ -129,6 +146,64 @@ fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
     // 6. Save File
     svg::save(&request.filepath, &document)?;
 
+    Ok(())
+}
+
+fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
+    let (board_poly, united_shapes) = match get_geometry(request) {
+        Some(g) => g,
+        None => return Ok(()),
+    };
+
+    let mut file = File::create(&request.filepath)?;
+
+    // Minimal DXF Header
+    writeln!(file, "  0\nSECTION\n  2\nHEADER\n  0\nENDSEC")?;
+    
+    // Entities Section
+    writeln!(file, "  0\nSECTION\n  2\nENTITIES")?;
+
+    // Outline: Layer OUTLINE, Color 7 (Black/White)
+    write_dxf_polygon(&mut file, &board_poly, "OUTLINE", 7)?;
+
+    // Shapes: Layer CUTS, Color 1 (Red)
+    for poly in &united_shapes.0 {
+        write_dxf_polygon(&mut file, poly, "CUTS", 1)?;
+    }
+
+    writeln!(file, "  0\nENDSEC\n  0\nEOF")?;
+
+    Ok(())
+}
+
+fn write_dxf_polygon(file: &mut File, poly: &Polygon<f64>, layer: &str, color: i32) -> std::io::Result<()> {
+    write_dxf_polyline(file, poly.exterior(), layer, color)?;
+    for interior in poly.interiors() {
+        write_dxf_polyline(file, interior, layer, color)?;
+    }
+    Ok(())
+}
+
+fn write_dxf_polyline(file: &mut File, ls: &LineString<f64>, layer: &str, color: i32) -> std::io::Result<()> {
+    let mut coords = &ls.0[..];
+    if coords.is_empty() {
+        return Ok(());
+    }
+    // For LWPOLYLINE with closed flag (70=1), if the last point duplicates the first, we can skip it.
+    if coords.len() > 1 && coords.first() == coords.last() {
+        coords = &coords[..coords.len() - 1];
+    }
+
+    writeln!(file, "  0\nLWPOLYLINE")?;
+    writeln!(file, "  8\n{}", layer)?; // Layer Name
+    writeln!(file, " 62\n{}", color)?; // Color Number
+    writeln!(file, " 90\n{}", coords.len())?; // Number of vertices
+    writeln!(file, " 70\n1")?; // Flag 1 = Closed
+    
+    for coord in coords {
+        writeln!(file, " 10\n{:.4}", coord.x)?;
+        writeln!(file, " 20\n{:.4}", coord.y)?;
+    }
     Ok(())
 }
 
