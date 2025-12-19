@@ -20,11 +20,13 @@ interface Props {
 
 // Evaluate math expressions to numbers (for visualization only)
 export function evaluateExpression(expression: string, params: Parameter[]): number {
-  if (!expression.trim()) return 0;
+  if (!expression || !expression.trim()) return 0;
   try {
     const scope: Record<string, any> = {};
     params.forEach((p) => {
-      scope[p.key] = math.unit(p.value, p.unit);
+      // Treat parameters as pure numbers in mm to allow mixed arithmetic (e.g. "Width + 5")
+      const val = p.unit === "in" ? p.value * 25.4 : p.value;
+      scope[p.key] = val;
     });
     const result = math.evaluate(expression, scope);
     if (typeof result === "number") return result;

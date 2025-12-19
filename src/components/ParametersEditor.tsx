@@ -56,9 +56,9 @@ export default function ParametersEditor({ params, setParams }: Props) {
                 <input
                   type="text"
                   value={item.key}
-                  // UPDATED: Replace spaces with underscores on change
+                  // UPDATED: Replace any non-word character with underscore to ensure valid variable names
                   onChange={(e) => 
-                    updateRow(item.id, "key", e.target.value.replace(/ /g, "_"))
+                    updateRow(item.id, "key", e.target.value.replace(/[^a-zA-Z0-9_]/g, "_"))
                   }
                 />
               </td>

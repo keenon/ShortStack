@@ -1,3 +1,4 @@
+// src/components/StackupEditor.tsx
 import React from "react";
 import * as math from "mathjs";
 import { Parameter, StackupLayer, ManufacturingType } from "../types";
@@ -66,7 +67,9 @@ export default function StackupEditor({ stackup, setStackup, params }: Props) {
     try {
       const scope: Record<string, any> = {};
       params.forEach((p) => {
-        scope[p.key] = math.unit(p.value, p.unit);
+        // Normalize to mm numbers
+        const val = p.unit === "in" ? p.value * 25.4 : p.value;
+        scope[p.key] = val;
       });
       const result = math.evaluate(expression, scope);
       let valInMm = 0;
