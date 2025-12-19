@@ -1,6 +1,8 @@
 // src/components/LayoutEditor.tsx
 import { useState, useRef, useEffect, useLayoutEffect, Fragment } from "react";
-import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point } from "../types";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point, FootprintRect, FootprintCircle } from "../types";
 import { evaluateExpression, modifyExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
 import Layout3DView, { Layout3DViewHandle } from "./Layout3DView";
@@ -25,10 +27,12 @@ const LayerVisibilityPanel = ({
   stackup,
   visibility,
   onToggle,
+  onExport
 }: {
   stackup: StackupLayer[];
   visibility: Record<string, boolean>;
   onToggle: (id: string) => void;
+  onExport: (id: string, type: "DXF" | "STEP" | "STL") => void;
 }) => {
   return (
     <div className="layout-left-subpanel">
@@ -53,20 +57,51 @@ const LayerVisibilityPanel = ({
 
         {/* Stackup Layers */}
         {stackup.map((layer) => (
-             <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`}>
-                <div className="layer-vis-info">
+             <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`} style={{flexWrap: 'wrap'}}>
+                <div className="layer-vis-info" style={{ width: '100%', marginBottom: '5px' }}>
                     <div 
                         className="layer-color-square"
                         style={{ backgroundColor: layer.color }}
                     />
                     <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
                 </div>
-                <button 
-                    className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`}
-                    onClick={() => onToggle(layer.id)}
-                >
-                    {visibility[layer.id] !== false ? "Hide" : "Show"}
-                </button>
+                
+                <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-end' }}>
+                    <button 
+                        className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`}
+                        onClick={() => onToggle(layer.id)}
+                        style={{ marginRight: 'auto' }}
+                    >
+                        {visibility[layer.id] !== false ? "Hide" : "Show"}
+                    </button>
+
+                    {layer.type === "Cut" ? (
+                        <button 
+                            className="vis-toggle-btn"
+                            onClick={() => onExport(layer.id, "DXF")}
+                            title="Export DXF"
+                        >
+                            DXF
+                        </button>
+                    ) : (
+                        <>
+                            <button 
+                                className="vis-toggle-btn"
+                                onClick={() => onExport(layer.id, "STEP")}
+                                title="Export STEP"
+                            >
+                                STEP
+                            </button>
+                            <button 
+                                className="vis-toggle-btn"
+                                onClick={() => onExport(layer.id, "STL")}
+                                title="Export STL"
+                            >
+                                STL
+                            </button>
+                        </>
+                    )}
+                </div>
              </div>
         ))}
         {stackup.length === 0 && <div className="empty-state-small">No stackup layers.</div>}
@@ -356,6 +391,115 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     }));
   };
 
+  // --- EXPORT HANDLER ---
+  const handleExport = async (layerId: string, format: "DXF" | "STEP" | "STL") => {
+    const layer = stackup.find(l => l.id === layerId);
+    if (!layer) return;
+
+    // 1. Open Save Dialog
+    const path = await save({
+        defaultPath: `${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_${format.toLowerCase()}.${format.toLowerCase()}`,
+        filters: [{
+            name: `${format} File`,
+            extensions: [format.toLowerCase()]
+        }]
+    });
+
+    if (!path) return;
+
+    // 2. Prepare Data
+    // Evaluate Layer Thickness
+    const layerThickness = evaluateExpression(layer.thicknessExpression, params);
+
+    // Evaluate Board Outline
+    const outline = boardOutline.points.map(p => ({
+        x: evaluateExpression(p.x, params),
+        y: evaluateExpression(p.y, params)
+    }));
+
+    // Gather Shapes
+    const shapes: any[] = [];
+
+    layout.forEach(inst => {
+        const fp = footprints.find(f => f.id === inst.footprintId);
+        if (!fp) return;
+
+        // Instance Transforms
+        const instX = evaluateExpression(inst.x, params);
+        const instY = evaluateExpression(inst.y, params);
+        const instAngle = evaluateExpression(inst.angle, params);
+        const instAngleRad = (instAngle * Math.PI) / 180;
+        const cosA = Math.cos(instAngleRad);
+        const sinA = Math.sin(instAngleRad);
+
+        fp.shapes.forEach(s => {
+            // Check if shape is assigned to this layer
+            if (!s.assignedLayers || s.assignedLayers[layer.id] === undefined) return;
+
+            // Calculate Depth
+            let depth = 0;
+            if (layer.type === "Cut") {
+                // For cut layers, depth is usually full thickness
+                depth = layerThickness; 
+            } else {
+                // For carved layers, depth is defined in the footprint assignment
+                const val = evaluateExpression(s.assignedLayers[layer.id], params);
+                depth = Math.max(0, val);
+            }
+            if (depth <= 0) return;
+
+            // Transform Shape Center to Absolute World Coordinates
+            const sx = evaluateExpression(s.x, params);
+            const sy = evaluateExpression(s.y, params);
+
+            // Rotate shape position relative to instance origin
+            const rx = sx * cosA - sy * sinA;
+            const ry = sx * sinA + sy * cosA;
+
+            const finalX = instX + rx;
+            const finalY = instY + ry;
+
+            if (s.type === "circle") {
+                shapes.push({
+                    shape_type: "circle",
+                    x: finalX,
+                    y: finalY,
+                    diameter: evaluateExpression((s as FootprintCircle).diameter, params),
+                    depth: depth
+                });
+            } else if (s.type === "rect") {
+                const sAngle = evaluateExpression((s as FootprintRect).angle, params);
+                shapes.push({
+                    shape_type: "rect",
+                    x: finalX,
+                    y: finalY,
+                    width: evaluateExpression((s as FootprintRect).width, params),
+                    height: evaluateExpression((s as FootprintRect).height, params),
+                    angle: instAngle + sAngle, // Sum angles
+                    depth: depth
+                });
+            }
+        });
+    });
+
+    // 3. Send to Rust
+    try {
+        await invoke("export_layer_files", {
+            request: {
+                filepath: path,
+                file_type: format,
+                outline,
+                shapes,
+                layer_thickness: layerThickness
+            }
+        });
+        alert(`Export initiated for ${path}`);
+    } catch (e) {
+        console.error("Export failed", e);
+        alert("Export failed: " + e);
+    }
+  };
+
   // --- HELPERS ---
 
   // Check if a shape should be visible based on its layer assignment and current global visibility
@@ -587,6 +731,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
             stackup={stackup}
             visibility={layerVisibility}
             onToggle={toggleLayerVisibility}
+            onExport={handleExport}
         />
 
         {/* Bottom Half: Layout Objects */}
