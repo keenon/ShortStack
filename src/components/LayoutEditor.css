@@ -232,27 +232,50 @@
     color: #888;
 }
 
-.points-table {
-    width: 100%;
-    margin-bottom: 15px;
-    font-size: 0.9em;
+/* Board Outline Points List (Replacing Table) */
+.board-points-list {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    margin-bottom: 20px;
 }
 
-.points-table th {
-    padding: 5px;
-    font-size: 0.8em;
+.board-point-card {
+    background: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 10px;
+}
+
+.point-header {
+    font-size: 0.85em;
+    font-weight: bold;
     color: #888;
-}
-
-.points-table td {
-    padding: 3px;
+    margin-bottom: 8px;
     border-bottom: 1px solid #333;
-    vertical-align: middle;
+    padding-bottom: 4px;
 }
 
-.points-table .expression-input {
-    padding: 4px 6px;
-    font-size: 12px;
+.point-field-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.point-field-row label {
+    width: 20px;
+    font-weight: bold;
+    color: #aaa;
+    text-align: right;
+}
+
+.point-actions-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 5px;
+    border-top: 1px dashed #333;
+    padding-top: 8px;
 }
 
 /* MISC UI */

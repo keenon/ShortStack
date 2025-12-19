@@ -163,54 +163,62 @@ const BoardOutlineProperties = ({
     return (
         <div className="properties-editor">
             <h3>Board Outline Points</h3>
-            <table className="points-table">
-                <thead>
-                    <tr>
-                        <th>X</th>
-                        <th>Y</th>
-                        <th style={{ width: "90px" }}>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {boardOutline.points.map((p, idx) => (
-                        <tr key={p.id}>
-                            <td>
+            
+            <div className="board-points-list">
+                {boardOutline.points.map((p, idx) => (
+                    <div key={p.id} className="board-point-card">
+                        <div className="point-header">
+                            <span>Point {idx + 1}</span>
+                        </div>
+                        
+                        <div className="point-field-row">
+                            <label>X:</label>
+                            <div style={{ flexGrow: 1 }}>
                                 <ExpressionEditor 
                                     value={p.x} 
                                     onChange={(v) => updatePoint(p.id, "x", v)} 
                                     params={params} 
                                 />
-                            </td>
-                            <td>
+                            </div>
+                        </div>
+
+                        <div className="point-field-row">
+                            <label>Y:</label>
+                            <div style={{ flexGrow: 1 }}>
                                 <ExpressionEditor 
                                     value={p.y} 
                                     onChange={(v) => updatePoint(p.id, "y", v)} 
                                     params={params} 
                                 />
-                            </td>
-                            <td>
-                                <div className="action-buttons">
-                                    <button 
-                                        className="icon-btn btn-up" 
-                                        onClick={() => movePoint(idx, -1)} 
-                                        disabled={idx === 0}
-                                    >↑</button>
-                                    <button 
-                                        className="icon-btn btn-down" 
-                                        onClick={() => movePoint(idx, 1)} 
-                                        disabled={idx === boardOutline.points.length - 1}
-                                    >↓</button>
-                                    <button 
-                                        className="icon-btn danger" 
-                                        onClick={() => deletePoint(p.id)}
-                                        disabled={boardOutline.points.length <= 3}
-                                    >✕</button>
-                                </div>
-                            </td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
+                            </div>
+                        </div>
+
+                        <div className="point-actions-row">
+                            <div className="action-buttons">
+                                <button 
+                                    className="icon-btn btn-up" 
+                                    onClick={() => movePoint(idx, -1)} 
+                                    disabled={idx === 0}
+                                    title="Move Up"
+                                >↑</button>
+                                <button 
+                                    className="icon-btn btn-down" 
+                                    onClick={() => movePoint(idx, 1)} 
+                                    disabled={idx === boardOutline.points.length - 1}
+                                    title="Move Down"
+                                >↓</button>
+                                <button 
+                                    className="icon-btn danger" 
+                                    onClick={() => deletePoint(p.id)}
+                                    disabled={boardOutline.points.length <= 3}
+                                    title="Delete Point"
+                                >✕</button>
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
             <button className="add-btn" onClick={addPoint}>+ Add Point</button>
         </div>
     );
