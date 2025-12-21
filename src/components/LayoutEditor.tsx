@@ -140,7 +140,8 @@ const InstanceShapeRenderer = ({
         const r = evaluateExpression(shape.diameter, params) / 2;
         const cx = evaluateExpression(shape.x, params);
         const cy = evaluateExpression(shape.y, params);
-        return <circle cx={cx} cy={cy} r={r} {...commonProps} />;
+        // Y-axis flip: -cy
+        return <circle cx={cx} cy={-cy} r={r} {...commonProps} />;
     }
 
     if (shape.type === "rect") {
@@ -149,13 +150,14 @@ const InstanceShapeRenderer = ({
         const x = evaluateExpression(shape.x, params);
         const y = evaluateExpression(shape.y, params);
         const angle = evaluateExpression(shape.angle, params);
+        // Y-axis flip: (x, -y). Top-Left: (x - w/2, -y - h/2). Angle: -angle.
         return (
             <rect
                 x={x - w / 2}
-                y={y - h / 2}
+                y={-y - h / 2}
                 width={w}
                 height={h}
-                transform={`rotate(${angle}, ${x}, ${y})`}
+                transform={`rotate(${-angle}, ${x}, ${-y})`}
                 {...commonProps}
             />
         );
@@ -632,7 +634,8 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     const dyPx = e.clientY - instanceDragStartPos.current.y;
 
     const dxWorld = dxPx * scaleX;
-    const dyWorld = dyPx * scaleY;
+    // Y-axis flip: Mouse down = negative world Y direction
+    const dyWorld = -dyPx * scaleY;
 
     const startExpr = instanceDragStartExpr.current;
     
@@ -686,7 +689,8 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     const dyPx = e.clientY - pointDragStartPos.current.y;
 
     const dxWorld = dxPx * scaleX;
-    const dyWorld = dyPx * scaleY;
+    // Y-axis flip
+    const dyWorld = -dyPx * scaleY;
 
     const startExpr = pointDragStartExpr.current;
 
@@ -723,8 +727,9 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   const selectedInstance = layout.find(inst => inst.id === selectedId);
 
   // Construct SVG polygon points string
+  // Y-axis flip for points
   const boardPointsStr = boardOutline.points
-    .map(p => `${evaluateExpression(p.x, params)},${evaluateExpression(p.y, params)}`)
+    .map(p => `${evaluateExpression(p.x, params)},${-evaluateExpression(p.y, params)}`)
     .join(' ');
 
   // Handle size relative to view
@@ -861,11 +866,12 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
               {selectedId === "BOARD_OUTLINE" && boardOutline.points.map((p) => {
                   const px = evaluateExpression(p.x, params);
                   const py = evaluateExpression(p.y, params);
+                  // Y-axis flip: -py
                   return (
                     <rect
                         key={p.id}
                         x={px - handleSize / 2}
-                        y={py - handleSize / 2}
+                        y={-py - handleSize / 2}
                         width={handleSize}
                         height={handleSize}
                         fill="#fff"
@@ -887,10 +893,11 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                   const evalAngle = evaluateExpression(inst.angle, params);
                   const isSelected = inst.id === selectedId;
 
+                  // Y-axis flip: translate(x, -y). Rotate(-angle).
                   return (
                       <g 
                         key={inst.id} 
-                        transform={`translate(${evalX}, ${evalY}) rotate(${evalAngle})`}
+                        transform={`translate(${evalX}, ${-evalY}) rotate(${-evalAngle})`}
                         style={{ cursor: 'grab' }}
                         onMouseDown={(e) => handleInstanceMouseDown(e, inst.id)}
                       >

@@ -128,7 +128,8 @@ const ShapeRenderer = ({
     const r = evaluateExpression(shape.diameter, params) / 2;
     const cx = evaluateExpression(shape.x, params);
     const cy = evaluateExpression(shape.y, params);
-    return <circle cx={cx} cy={cy} r={r} {...commonProps} />;
+    // Y-axis flip: Negate cy to render Y-up in SVG
+    return <circle cx={cx} cy={-cy} r={r} {...commonProps} />;
   }
 
   if (shape.type === "rect") {
@@ -137,13 +138,20 @@ const ShapeRenderer = ({
     const x = evaluateExpression(shape.x, params);
     const y = evaluateExpression(shape.y, params);
     const angle = evaluateExpression(shape.angle, params);
+    
+    // Y-axis flip:
+    // Center is (x, -y).
+    // SVG Rect (x, y) is top-left.
+    // In Y-up: Top-Left is (x - w/2, y + h/2).
+    // Converted to SVG (negated Y): (x - w/2, -(y + h/2)) = (x - w/2, -y - h/2).
+    // Rotation: Negate angle (CCW becomes CW in SVG coord system, so -angle restores CCW visual)
     return (
       <rect
         x={x - w / 2}
-        y={y - h / 2}
+        y={-y - h / 2}
         width={w}
         height={h}
-        transform={`rotate(${angle}, ${x}, ${y})`}
+        transform={`rotate(${-angle}, ${x}, ${-y})`}
         {...commonProps}
       />
     );
@@ -635,7 +643,8 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       const dyPx = e.clientY - shapeDragStartPos.current.y;
 
       const dxWorld = dxPx * scaleX;
-      const dyWorld = dyPx * scaleY;
+      // In Y-up mode, moving mouse down (dyPx > 0) means moving "down" in world Y (negative direction)
+      const dyWorld = -dyPx * scaleY;
 
       const currentFP = footprintRef.current;
       const targetId = draggedShapeId.current;

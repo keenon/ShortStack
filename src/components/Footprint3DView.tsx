@@ -139,9 +139,13 @@ const LayerSolid = ({
           // 3. Local Position Calculation
           // The Base is at (0,0,0) inside this mesh, which corresponds to (centerX, centerY, centerZ) in world.
           // Shape World Pos: (sx, ?, sy)
-          // Local Pos: (sx - centerX, cutY, sy - centerZ)
+          // UN-MIRRORING: 
+          // 2D Y-Up maps to 3D -Z (Top-Down view: Up on screen is -Z).
+          // centerZ is computed from bounds (which are Y bounds).
+          // If we map Y -> -Z.
+          // localZ should be (centerZ - sy).
           const localX = sx - centerX;
-          const localZ = sy - centerZ;
+          const localZ = centerZ - sy; 
 
           if (shape.type === "circle") {
             const diameter = evaluate(shape.diameter, params);
@@ -154,7 +158,6 @@ const LayerSolid = ({
             const w = evaluate(shape.width, params);
             const h = evaluate(shape.height, params);
             // Convert degrees to radians for Three.js
-            // SVG rotation is CW, so we use negative for standard Y-up rotation
             const angleDeg = evaluate((shape as FootprintRect).angle, params);
             const angleRad = (angleDeg * Math.PI) / 180;
 
@@ -162,7 +165,8 @@ const LayerSolid = ({
               <Subtraction 
                 key={shape.id} 
                 position={[localX, cutY, localZ]}
-                rotation={[0, -angleRad, 0]} 
+                // Positive rotation around Y matches 2D CCW rotation in this Y->-Z mapping
+                rotation={[0, angleRad, 0]} 
               >
                 <boxGeometry args={[w, cutDepth, h]} />
               </Subtraction>
