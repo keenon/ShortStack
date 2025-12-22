@@ -565,6 +565,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
             request: {
                 filepath: path,
                 file_type: format,
+                machining_type: layer.type, // NEW: Passing the manufacturing type
                 outline,
                 shapes,
                 layer_thickness: layerThickness

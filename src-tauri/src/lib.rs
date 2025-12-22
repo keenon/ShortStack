@@ -33,6 +33,7 @@ struct ExportShape {
 struct ExportRequest {
     filepath: String,
     file_type: String, // "SVG", "DXF", "STEP", "STL"
+    machining_type: String, // "Cut" or "Carved/Printed"
     outline: Vec<ExportPoint>,
     shapes: Vec<ExportShape>,
     layer_thickness: f64,
@@ -43,6 +44,7 @@ fn export_layer_files(request: ExportRequest) {
     println!("--- EXPORT REQUEST RECEIVED ---");
     println!("Target Path: {}", request.filepath);
     println!("Format: {}", request.file_type);
+    println!("Machining Type: {}", request.machining_type);
     println!("Layer Thickness: {}", request.layer_thickness);
     println!("Board Outline Points: {}", request.outline.len());
     println!("Cut/Carve Shapes: {}", request.shapes.len());
