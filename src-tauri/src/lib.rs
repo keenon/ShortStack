@@ -5,6 +5,7 @@ use std::f64::consts::PI;
 use geo::{Coord, LineString, MultiPolygon, Polygon};
 use geo::BooleanOps;
 use geo::bounding_rect::BoundingRect;
+use geo::MapCoords;
 use svg::Document;
 use svg::node::element::Path;
 use svg::node::element::path::Data;
@@ -99,13 +100,19 @@ fn get_geometry(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f
 }
 
 fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
-    let (board_poly, united_shapes) = match get_geometry(request) {
+    let (board_poly_raw, united_shapes_raw) = match get_geometry(request) {
         Some(g) => g,
         None => return Ok(()),
     };
 
+    // Flip Y coordinates for SVG to match the UI's "Positive Y is UP" convention.
+    // SVG standard is "Positive Y is DOWN", so we negate Y.
+    let board_poly = board_poly_raw.map_coords(|c| Coord { x: c.x, y: -c.y });
+    let united_shapes = united_shapes_raw.map_coords(|c| Coord { x: c.x, y: -c.y });
+
     // 3. Setup SVG Document
     // Calculate bounding box of the board outline for the viewbox
+    // NOTE: This now uses the flipped coordinates, ensuring the viewbox is correct.
     let bounds = board_poly.bounding_rect().unwrap_or_else(|| {
         geo::Rect::new(Coord { x: 0.0, y: 0.0 }, Coord { x: 100.0, y: 100.0 })
     });
@@ -152,6 +159,7 @@ fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
 }
 
 fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
+    // DXF typically uses Y-Up (Cartesian), so we do NOT flip Y here.
     let (board_poly, united_shapes) = match get_geometry(request) {
         Some(g) => g,
         None => return Ok(()),
