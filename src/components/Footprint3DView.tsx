@@ -74,18 +74,6 @@ const LayerSolid = ({
 
   // Identify shapes affecting this layer.
   // We need to process shapes from Bottom of stack to Top of stack.
-  // The 'footprint.shapes' array has the Top shape at index 0 (if rendered last in 2D by reverse map) 
-  // or logic dictates index 0 is Top. Based on Editor logic, rendering is usually ordered.
-  // We assume footprint.shapes is ordered such that the last drawn shape (Top) is effectively highest priority.
-  // The editor renders `[...shapes].reverse()`, drawing index N-1 first (Bottom) and index 0 last (Top).
-  // So index 0 is Top.
-  // To apply "Top shape dictates depth", we use a "Cut and Replace" strategy:
-  // 1. Start with Base.
-  // 2. Iterate Bottom -> Top.
-  // 3. For each shape: Cut a FULL HOLE, then Add back material to the desired depth.
-  // This ensures the last shape processed (Top) overwrites the column of material.
-  //
-  // Order: Reverse of `shapes` array gives [Bottom ... Top].
   const orderedShapes = useMemo(() => {
     return [...footprint.shapes].reverse().filter(s => 
       s.assignedLayers && s.assignedLayers[layer.id] !== undefined
@@ -143,13 +131,9 @@ const LayerSolid = ({
           if (shouldFill) {
               if (layer.carveSide === "Top") {
                   // Carving from Top: Material remains at the Bottom.
-                  // Range: [-T/2, T/2 - depth]
-                  // Center: (T/2 - depth - T/2) / 2 = -depth / 2
                   fillY = -actualDepth / 2;
               } else {
                   // Carving from Bottom: Material remains at the Top.
-                  // Range: [-T/2 + depth, T/2]
-                  // Center: (-T/2 + depth + T/2) / 2 = depth / 2
                   fillY = actualDepth / 2;
               }
           }
@@ -186,6 +170,9 @@ const LayerSolid = ({
 
           if (!type) return null;
 
+          // FIX: Small epsilon expansion for fill operations to prevent coincident face errors (Z-fighting/narrow triangles)
+          const CSG_EPSILON = 0.01;
+
           return (
              <React.Fragment key={shape.id}>
                 {/* Step A: Always subtract FULL THICKNESS to clear the column */}
@@ -201,9 +188,11 @@ const LayerSolid = ({
                 {shouldFill && (
                     <Addition position={[localX, fillY, localZ]} rotation={rotation}>
                         {type === "cylinder" ? (
-                            <cylinderGeometry args={[args[0], args[1], fillHeight, args[3]]} />
+                            // Expand radius by EPSILON to overlap with base material
+                            <cylinderGeometry args={[args[0] + CSG_EPSILON, args[1] + CSG_EPSILON, fillHeight, args[3]]} />
                         ) : (
-                            <boxGeometry args={[args[0], fillHeight, args[2]]} />
+                            // Expand width/depth by EPSILON
+                            <boxGeometry args={[args[0] + CSG_EPSILON, fillHeight, args[2] + CSG_EPSILON]} />
                         )}
                     </Addition>
                 )}
@@ -254,8 +243,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
         } else if (shape.type === "rect") {
             const w = evaluate(shape.width, params);
             const h = evaluate(shape.height, params);
-            // Calculate a bounding radius to account for rotation 
-            // (The diagonal is the furthest any point can be from center)
             const radius = Math.sqrt(Math.pow(w / 2, 2) + Math.pow(h / 2, 2));
             dx = radius;
             dy = radius;
@@ -267,7 +254,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
         if (y + dy > maxY) maxY = y + dy;
     });
 
-    // Apply Padding
     return {
         minX: minX - PADDING,
         maxX: maxX + PADDING,
@@ -287,11 +273,9 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
         <group>
           {(() => {
             let currentZ = 0; // This tracks height (Y in 3D)
-            // Reverse the stack order so the first item in list appears on top
             return [...stackup].reverse().map((layer) => {
               const thickness = evaluate(layer.thicknessExpression, params);
               
-              // NEW: Check visibility
               const isVisible = visibleLayers ? visibleLayers[layer.id] !== false : true;
               
               const node = isVisible ? (
