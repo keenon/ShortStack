@@ -4,6 +4,13 @@
   box-sizing: border-box;
 }
 
+/* FIX: Reset body margin and padding to prevent scroll */
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
 :root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 14px;
