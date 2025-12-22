@@ -97,6 +97,29 @@ export function evaluateExpression(expression: string, params: Parameter[]): num
   }
 }
 
+function interpolateColor(hex: string, ratio: number): string {
+  const r = Math.max(0, Math.min(1, ratio));
+  // If full depth, plain black
+  if (r === 1) return "black";
+  // If 0 depth, pure layer color
+  if (r === 0) return hex;
+
+  let c = hex.trim();
+  if (c.startsWith("#")) c = c.substring(1);
+  if (c.length === 3) c = c.split("").map(char => char + char).join("");
+  // Fallback
+  if (c.length !== 6) return "black";
+
+  const num = parseInt(c, 16);
+  const red = (num >> 16) & 0xff;
+  const green = (num >> 8) & 0xff;
+  const blue = num & 0xff;
+
+  // Mix with black (0,0,0) -> target = color * (1-r)
+  const f = 1 - r;
+  return `rgb(${Math.round(red * f)}, ${Math.round(green * f)}, ${Math.round(blue * f)})`;
+}
+
 // ------------------------------------------------------------------
 // SUB-COMPONENTS
 // ------------------------------------------------------------------
@@ -106,21 +129,53 @@ const ShapeRenderer = ({
   shape,
   isSelected,
   params,
+  stackup,
   onShapeDown,
 }: {
   shape: FootprintShape;
   isSelected: boolean;
   params: Parameter[];
+  stackup: StackupLayer[];
   onShapeDown: (e: React.MouseEvent, id: string) => void;
 }) => {
+  // Default styles (unassigned)
+  let fill = isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)";
+  let stroke = isSelected ? "#646cff" : "#888";
+  let strokeWidth = isSelected ? 2 : 1;
+  const vectorEffect = "non-scaling-stroke";
+
+  // Calculate Color based on highest layer
+  const assigned = shape.assignedLayers || {};
+  // Find highest layer (first in stackup list) that is assigned
+  const highestLayer = stackup.find(l => assigned[l.id] !== undefined);
+
+  if (highestLayer) {
+      stroke = highestLayer.color;
+      // Make selection bolder since we use layer color for stroke
+      strokeWidth = isSelected ? 3 : 2;
+
+      if (highestLayer.type === "Cut") {
+          // Cut Layer: Solid black with outline in layer color
+          fill = "black";
+      } else {
+          // Carved/Printed Layer: Outline in layer color, center fades to black based on depth
+          const depthVal = evaluateExpression(assigned[highestLayer.id], params);
+          const thickVal = evaluateExpression(highestLayer.thicknessExpression, params);
+          // Avoid divide by zero
+          const ratio = (thickVal > 0.0001) ? (depthVal / thickVal) : 0;
+          
+          fill = interpolateColor(highestLayer.color, ratio);
+      }
+  }
+
   const commonProps = {
     onMouseDown: (e: React.MouseEvent) => {
       onShapeDown(e, shape.id);
     },
-    fill: isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)",
-    stroke: isSelected ? "#646cff" : "#888",
-    strokeWidth: isSelected ? 2 : 1,
-    vectorEffect: "non-scaling-stroke",
+    fill,
+    stroke,
+    strokeWidth,
+    vectorEffect,
     style: { cursor: "pointer" },
   };
 
@@ -925,6 +980,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                                 shape={shape}
                                 isSelected={shape.id === selectedShapeId}
                                 params={params}
+                                stackup={stackup}
                                 onShapeDown={handleShapeMouseDown}
                             />
                         );
