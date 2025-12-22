@@ -3,7 +3,7 @@ import React, { useMemo, forwardRef, useImperativeHandle, useRef } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
 // Note: Requires @react-three/csg and three-bvh-csg installed
-import { Geometry, Base, Subtraction } from "@react-three/csg";
+import { Geometry, Base, Subtraction, Addition } from "@react-three/csg";
 import * as THREE from "three";
 import * as math from "mathjs";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect } from "../types";
@@ -72,13 +72,28 @@ const LayerSolid = ({
   const centerZ = (bounds.minY + bounds.maxY) / 2;
   const centerY = bottomZ + thickness / 2;
 
-  // Identify shapes affecting this layer
-  const activeShapes = footprint.shapes.filter(s => 
-    s.assignedLayers && s.assignedLayers[layer.id] !== undefined
-  );
+  // Identify shapes affecting this layer.
+  // We need to process shapes from Bottom of stack to Top of stack.
+  // The 'footprint.shapes' array has the Top shape at index 0 (if rendered last in 2D by reverse map) 
+  // or logic dictates index 0 is Top. Based on Editor logic, rendering is usually ordered.
+  // We assume footprint.shapes is ordered such that the last drawn shape (Top) is effectively highest priority.
+  // The editor renders `[...shapes].reverse()`, drawing index N-1 first (Bottom) and index 0 last (Top).
+  // So index 0 is Top.
+  // To apply "Top shape dictates depth", we use a "Cut and Replace" strategy:
+  // 1. Start with Base.
+  // 2. Iterate Bottom -> Top.
+  // 3. For each shape: Cut a FULL HOLE, then Add back material to the desired depth.
+  // This ensures the last shape processed (Top) overwrites the column of material.
+  //
+  // Order: Reverse of `shapes` array gives [Bottom ... Top].
+  const orderedShapes = useMemo(() => {
+    return [...footprint.shapes].reverse().filter(s => 
+      s.assignedLayers && s.assignedLayers[layer.id] !== undefined
+    );
+  }, [footprint.shapes, layer.id]);
 
   // Optimization: If no cuts, just return a simple mesh
-  if (activeShapes.length === 0) {
+  if (orderedShapes.length === 0) {
     return (
       <mesh position={[centerX, centerY, centerZ]}>
         <boxGeometry args={[width, thickness, depth]} />
@@ -99,80 +114,101 @@ const LayerSolid = ({
           <boxGeometry args={[width, thickness, depth]} />
         </Base>
 
-        {/* Subtractions */}
-        {activeShapes.map((shape) => {
-          // 1. Calculate Cut Dimensions
-          let cutDepth = 0;
-          let cutY = 0; // Local Y position relative to center of layer
+        {/* Operations */}
+        {orderedShapes.map((shape) => {
+          // 1. Calculate Target Depth
+          let actualDepth = thickness;
 
           if (layer.type === "Cut") {
              // Through Cut
-             // Make it slightly taller than thickness to ensure clean boolean
-             cutDepth = thickness + 0.2; 
-             cutY = 0;
+             actualDepth = thickness; 
           } else {
              // Carved
              const val = evaluate(shape.assignedLayers[layer.id], params);
-             const clampedVal = Math.max(0, Math.min(val, thickness));
-             
-             if (clampedVal <= 0) return null;
-
-             // Extra length for clean boolean
-             cutDepth = clampedVal + 0.1;
-
-             if (layer.carveSide === "Top") {
-                 // Cut from top (+thickness/2) down
-                 // Center of cut = Top - (clampedVal / 2)
-                 // Local Top is thickness/2
-                 // We add a small offset (0.05) to ensure it breaks the surface
-                 cutY = (thickness / 2) - (clampedVal / 2) + 0.05;
-             } else {
-                 // Cut from bottom (-thickness/2) up
-                 cutY = (-thickness / 2) + (clampedVal / 2) - 0.05;
-             }
+             actualDepth = Math.max(0, Math.min(val, thickness));
           }
 
-          // 2. Calculate 2D Position
+          // 2. Calculate Cut & Fill Geometries
+          
+          // A. Through Cut (Removes all material in the shape's footprint)
+          const throughHeight = thickness + 0.2; 
+          const throughY = 0; // Centered
+
+          // B. Fill (Add material back if depth < thickness)
+          // We want the resulting surface to be at `actualDepth` from the reference side.
+          const fillHeight = thickness - actualDepth;
+          let fillY = 0;
+          const shouldFill = fillHeight > 0.001;
+
+          if (shouldFill) {
+              if (layer.carveSide === "Top") {
+                  // Carving from Top: Material remains at the Bottom.
+                  // Range: [-T/2, T/2 - depth]
+                  // Center: (T/2 - depth - T/2) / 2 = -depth / 2
+                  fillY = -actualDepth / 2;
+              } else {
+                  // Carving from Bottom: Material remains at the Top.
+                  // Range: [-T/2 + depth, T/2]
+                  // Center: (-T/2 + depth + T/2) / 2 = depth / 2
+                  fillY = actualDepth / 2;
+              }
+          }
+
+          // 3. Calculate 2D Position
           const sx = evaluate(shape.x, params);
           const sy = evaluate(shape.y, params);
 
-          // 3. Local Position Calculation
-          // The Base is at (0,0,0) inside this mesh, which corresponds to (centerX, centerY, centerZ) in world.
-          // Shape World Pos: (sx, ?, sy)
-          // UN-MIRRORING: 
-          // 2D Y-Up maps to 3D -Z (Top-Down view: Up on screen is -Z).
-          // centerZ is computed from bounds (which are Y bounds).
-          // If we map Y -> -Z.
-          // localZ should be (centerZ - sy).
+          // 4. Local Position Calculation
+          // UN-MIRRORING Y -> -Z
           const localX = sx - centerX;
           const localZ = centerZ - sy; 
 
+          // 5. Geometry Args
+          let args: any[] = [];
+          let rotation: [number, number, number] = [0, 0, 0];
+          let type: "cylinder" | "box" | null = null;
+
           if (shape.type === "circle") {
             const diameter = evaluate(shape.diameter, params);
-            return (
-              <Subtraction key={shape.id} position={[localX, cutY, localZ]}>
-                 <cylinderGeometry args={[diameter/2, diameter/2, cutDepth, 32]} />
-              </Subtraction>
-            );
+            // Cylinder: [radiusTop, radiusBottom, height, segments]
+            args = [diameter/2, diameter/2, 0, 32];
+            type = "cylinder";
           } else if (shape.type === "rect") {
             const w = evaluate(shape.width, params);
             const h = evaluate(shape.height, params);
-            // Convert degrees to radians for Three.js
             const angleDeg = evaluate((shape as FootprintRect).angle, params);
             const angleRad = (angleDeg * Math.PI) / 180;
-
-            return (
-              <Subtraction 
-                key={shape.id} 
-                position={[localX, cutY, localZ]}
-                // Positive rotation around Y matches 2D CCW rotation in this Y->-Z mapping
-                rotation={[0, angleRad, 0]} 
-              >
-                <boxGeometry args={[w, cutDepth, h]} />
-              </Subtraction>
-            );
+            // Box: [width, height, depth]
+            args = [w, 0, h]; 
+            rotation = [0, angleRad, 0];
+            type = "box";
           }
-          return null;
+
+          if (!type) return null;
+
+          return (
+             <React.Fragment key={shape.id}>
+                {/* Step A: Always subtract FULL THICKNESS to clear the column */}
+                <Subtraction position={[localX, throughY, localZ]} rotation={rotation}>
+                    {type === "cylinder" ? (
+                        <cylinderGeometry args={[args[0], args[1], throughHeight, args[3]]} />
+                    ) : (
+                        <boxGeometry args={[args[0], throughHeight, args[2]]} />
+                    )}
+                </Subtraction>
+
+                {/* Step B: Add back material if needed */}
+                {shouldFill && (
+                    <Addition position={[localX, fillY, localZ]} rotation={rotation}>
+                        {type === "cylinder" ? (
+                            <cylinderGeometry args={[args[0], args[1], fillHeight, args[3]]} />
+                        ) : (
+                            <boxGeometry args={[args[0], fillHeight, args[2]]} />
+                        )}
+                    </Addition>
+                )}
+             </React.Fragment>
+          );
         })}
       </Geometry>
       <meshStandardMaterial color={layer.color} transparent opacity={0.9} />
