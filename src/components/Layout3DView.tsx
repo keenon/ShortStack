@@ -2,7 +2,7 @@
 import React, { useMemo, useRef, forwardRef, useImperativeHandle } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
-import { Geometry, Base, Subtraction } from "@react-three/csg";
+import { Geometry, Base, Subtraction, Addition } from "@react-three/csg";
 import * as THREE from "three";
 import { Footprint, Parameter, StackupLayer, FootprintInstance, BoardOutline, FootprintRect } from "../types";
 import { evaluateExpression } from "./FootprintEditor";
@@ -65,28 +65,66 @@ const LayerVolume = ({
                     const cosA = Math.cos(instAngleRad);
                     const sinA = Math.sin(instAngleRad);
 
-                    return fp.shapes.map(shape => {
+                    // Reverse shapes to match "Top overwrites Bottom" logic
+                    // The last CSG operation (Addition/Subtraction) wins.
+                    // Index 0 is "Top", so it should be processed last (or first in this reversed list?)
+                    // In Footprint3DView, we reversed the list.
+                    // If A overwrites B, A must happen AFTER B.
+                    // If Index 0 is Top (A) and Index 1 is Bottom (B).
+                    // We want [B, A] execution order.
+                    // fp.shapes is [A, B].
+                    // fp.shapes.reverse() is [B, A].
+                    // So we iterate the reversed array.
+                    const orderedShapes = [...fp.shapes].reverse();
+
+                    return orderedShapes.map(shape => {
                          // Check layer assignment
                          if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return null;
 
-                         // Calculate Cut Depth / Position (Local Z)
-                         let cutDepth = 0;
-                         let cutZ = 0;
+                         // Calculate Target Depth
+                         let actualDepth = thickness;
 
                          if (layer.type === "Cut") {
-                             cutDepth = thickness + 1.0; 
-                             cutZ = thickness / 2;
+                             // Through Cut
+                             actualDepth = thickness; 
                          } else {
-                             const rawDepth = evaluateExpression(shape.assignedLayers[layer.id], params);
-                             const val = Math.max(0, Math.min(rawDepth, thickness));
-                             if (val <= 0) return null;
-                             
-                             cutDepth = val + 0.1;
-                             
+                             // Carved
+                             const val = evaluateExpression(shape.assignedLayers[layer.id], params);
+                             actualDepth = Math.max(0, Math.min(val, thickness));
+                         }
+
+                         // 2. Calculate Cut & Fill Geometries
+                         
+                         // A. Through Cut (Removes all material in the shape's footprint)
+                         const throughHeight = thickness + 0.2; 
+                         // Center of the board in Local Z (which is 0..thickness)
+                         // Actually extrusion starts at 0 and goes to `depth` (thickness).
+                         // So 0 is bottom (in local coords) or top?
+                         // extrudeGeometry with depth > 0 extrudes along +Z.
+                         // So Z=0 is one face, Z=thickness is the other.
+                         // We position the board at `bottomZ`.
+                         // Local Z=0 corresponds to World Y = bottomZ.
+                         // Local Z=thickness corresponds to World Y = bottomZ + thickness (Top).
+                         
+                         const throughZ = thickness / 2; // Center of cut box
+
+                         // B. Fill (Add material back if depth < thickness)
+                         // We want the resulting surface to be at `actualDepth` from the reference side.
+                         const fillHeight = thickness - actualDepth;
+                         const shouldFill = fillHeight > 0.001;
+                         let fillZ = 0;
+
+                         if (shouldFill) {
                              if (layer.carveSide === "Top") {
-                                 cutZ = thickness - (val / 2) + 0.05;
+                                 // Carving from Top (Local Z = thickness).
+                                 // Material remains at Bottom (Local Z = 0).
+                                 // Fill center = fillHeight / 2.
+                                 fillZ = fillHeight / 2;
                              } else {
-                                 cutZ = (val / 2) - 0.05;
+                                 // Carving from Bottom (Local Z = 0).
+                                 // Material remains at Top (Local Z = thickness).
+                                 // Fill center = thickness - (fillHeight / 2).
+                                 fillZ = thickness - (fillHeight / 2);
                              }
                          }
 
@@ -101,16 +139,27 @@ const LayerVolume = ({
                          // UN-MIRRORING: Use positive Y (Y-Up in 2D matches logic now)
                          const finalY = (instY + rotY); 
                          
+                         const CSG_EPSILON = 0.01;
+
                          if (shape.type === "circle") {
                              const diameter = evaluateExpression(shape.diameter, params);
                              return (
-                                 <Subtraction 
-                                    key={`${inst.id}-${shape.id}`}
-                                    position={[finalX, finalY, cutZ]}
-                                    rotation={[Math.PI/2, 0, 0]}
-                                 >
-                                     <cylinderGeometry args={[diameter/2, diameter/2, cutDepth, 32]} />
-                                 </Subtraction>
+                                 <React.Fragment key={`${inst.id}-${shape.id}`}>
+                                    <Subtraction 
+                                        position={[finalX, finalY, throughZ]}
+                                        rotation={[Math.PI/2, 0, 0]}
+                                    >
+                                        <cylinderGeometry args={[diameter/2, diameter/2, throughHeight, 32]} />
+                                    </Subtraction>
+                                    {shouldFill && (
+                                        <Addition
+                                            position={[finalX, finalY, fillZ]}
+                                            rotation={[Math.PI/2, 0, 0]}
+                                        >
+                                            <cylinderGeometry args={[diameter/2 + CSG_EPSILON, diameter/2 + CSG_EPSILON, fillHeight, 32]} />
+                                        </Addition>
+                                    )}
+                                 </React.Fragment>
                              );
                          } else {
                              const w = evaluateExpression((shape as FootprintRect).width, params);
@@ -119,14 +168,23 @@ const LayerVolume = ({
                              const totalAngleRad = instAngleRad + (sAngle * Math.PI) / 180;
                              
                              return (
-                                 <Subtraction
-                                    key={`${inst.id}-${shape.id}`}
-                                    position={[finalX, finalY, cutZ]}
-                                    // UN-MIRRORING: Use positive angle
-                                    rotation={[0, 0, totalAngleRad]}
-                                 >
-                                     <boxGeometry args={[w, h, cutDepth]} />
-                                 </Subtraction>
+                                 <React.Fragment key={`${inst.id}-${shape.id}`}>
+                                     <Subtraction
+                                        position={[finalX, finalY, throughZ]}
+                                        // UN-MIRRORING: Use positive angle
+                                        rotation={[0, 0, totalAngleRad]}
+                                     >
+                                         <boxGeometry args={[w, h, throughHeight]} />
+                                     </Subtraction>
+                                     {shouldFill && (
+                                         <Addition
+                                            position={[finalX, finalY, fillZ]}
+                                            rotation={[0, 0, totalAngleRad]}
+                                         >
+                                             <boxGeometry args={[w + CSG_EPSILON, h + CSG_EPSILON, fillHeight]} />
+                                         </Addition>
+                                     )}
+                                 </React.Fragment>
                              );
                          }
                     });

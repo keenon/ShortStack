@@ -19,6 +19,33 @@ interface Props {
 }
 
 // ------------------------------------------------------------------
+// HELPERS
+// ------------------------------------------------------------------
+
+function interpolateColor(hex: string, ratio: number): string {
+  const r = Math.max(0, Math.min(1, ratio));
+  // If full depth, plain black
+  if (r === 1) return "black";
+  // If 0 depth, pure layer color
+  if (r === 0) return hex;
+
+  let c = hex.trim();
+  if (c.startsWith("#")) c = c.substring(1);
+  if (c.length === 3) c = c.split("").map(char => char + char).join("");
+  // Fallback
+  if (c.length !== 6) return "black";
+
+  const num = parseInt(c, 16);
+  const red = (num >> 16) & 0xff;
+  const green = (num >> 8) & 0xff;
+  const blue = num & 0xff;
+
+  // Mix with black (0,0,0) -> target = color * (1-r)
+  const f = 1 - r;
+  return `rgb(${Math.round(red * f)}, ${Math.round(green * f)}, ${Math.round(blue * f)})`;
+}
+
+// ------------------------------------------------------------------
 // SUB-COMPONENTS
 // ------------------------------------------------------------------
 
@@ -123,16 +150,48 @@ const LayerVisibilityPanel = ({
 const InstanceShapeRenderer = ({ 
     shape, 
     params,
-    isSelected 
+    isSelected,
+    stackup
 }: { 
     shape: FootprintShape; 
     params: Parameter[];
-    isSelected: boolean; 
+    isSelected: boolean;
+    stackup: StackupLayer[];
 }) => {
+    // Default styles (unassigned)
+    let fill = isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)";
+    let stroke = isSelected ? "#646cff" : "#888";
+    let strokeWidth = isSelected ? 2 : 1;
+    const vectorEffect = "non-scaling-stroke";
+
+    // Calculate Color based on highest layer
+    const assigned = shape.assignedLayers || {};
+    // Find highest layer (first in stackup list) that is assigned
+    const highestLayer = stackup.find(l => assigned[l.id] !== undefined);
+
+    if (highestLayer) {
+        stroke = highestLayer.color;
+        // Make selection bolder since we use layer color for stroke
+        strokeWidth = isSelected ? 3 : 2;
+
+        if (highestLayer.type === "Cut") {
+            // Cut Layer: Solid black
+            fill = "black";
+        } else {
+            // Carved/Printed Layer: Outline in layer color, center fades to black based on depth
+            const depthVal = evaluateExpression(assigned[highestLayer.id], params);
+            const thickVal = evaluateExpression(highestLayer.thicknessExpression, params);
+            // Avoid divide by zero
+            const ratio = (thickVal > 0.0001) ? (depthVal / thickVal) : 0;
+            
+            fill = interpolateColor(highestLayer.color, ratio);
+        }
+    }
+
     const commonProps = {
-        fill: isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)",
-        stroke: isSelected ? "#646cff" : "#888",
-        strokeWidth: isSelected ? 2 : 1,
+        fill,
+        stroke,
+        strokeWidth,
         vectorEffect: "non-scaling-stroke" as const,
     };
 
@@ -907,7 +966,8 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                           <g style={{ 
                             filter: isSelected ? 'drop-shadow(0 0 2px #646cff)' : undefined
                           }}>
-                            {fp.shapes.map(shape => {
+                            {/* Reverse shapes so Index 0 (Top) is rendered last */}
+                            {[...fp.shapes].reverse().map(shape => {
                                 // 2D VISIBILITY CHECK
                                 if (!isShapeVisible(shape)) return null;
 
@@ -916,7 +976,8 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                                         key={shape.id} 
                                         shape={shape} 
                                         params={params} 
-                                        isSelected={isSelected} 
+                                        isSelected={isSelected}
+                                        stackup={stackup}
                                     />
                                 );
                             })}
