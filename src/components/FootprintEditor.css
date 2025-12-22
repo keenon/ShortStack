@@ -37,7 +37,7 @@
 
 /* LEFT PANEL (Main container for subpanels) */
 .fp-left-panel {
-    width: 250px;
+    width: 300px; /* UPDATED: Widened from 250px */
     background: #222;
     border-right: 1px solid #333;
     display: flex;

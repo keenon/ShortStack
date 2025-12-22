@@ -365,6 +365,7 @@ const ShapeListPanel = ({
   onSelect,
   onDelete,
   onRename,
+  onMove,
   stackup,
   isShapeVisible,
 }: {
@@ -373,6 +374,7 @@ const ShapeListPanel = ({
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
+  onMove: (index: number, direction: -1 | 1) => void;
   stackup: StackupLayer[];
   isShapeVisible: (shape: FootprintShape) => boolean;
 }) => {
@@ -380,7 +382,7 @@ const ShapeListPanel = ({
     <div className="fp-left-subpanel">
       <h3 style={{ marginTop: 0 }}>Shapes</h3>
       <div className="shape-list-container">
-        {shapes.map((shape) => {
+        {shapes.map((shape, index) => {
           const visible = isShapeVisible(shape);
           return (
           <div
@@ -411,16 +413,34 @@ const ShapeListPanel = ({
               onChange={(e) => onRename(shape.id, e.target.value)}
               className="shape-name-edit"
             />
-            <button
-              className="icon-btn danger"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(shape.id);
-              }}
-              title="Delete"
-            >
-              ✕
-            </button>
+            
+            <div className="shape-actions" style={{ display: 'flex', gap: '2px' }}>
+                <button 
+                    className="icon-btn btn-up" 
+                    onClick={(e) => { e.stopPropagation(); onMove(index, -1); }}
+                    disabled={index === 0}
+                    style={{ width: '24px', height: '24px', fontSize: '0.9em' }}
+                    title="Move Up"
+                >↑</button>
+                <button 
+                    className="icon-btn btn-down" 
+                    onClick={(e) => { e.stopPropagation(); onMove(index, 1); }}
+                    disabled={index === shapes.length - 1}
+                    style={{ width: '24px', height: '24px', fontSize: '0.9em' }}
+                    title="Move Down"
+                >↓</button>
+                <button
+                  className="icon-btn danger"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(shape.id);
+                  }}
+                  style={{ width: '24px', height: '24px', fontSize: '0.9em' }}
+                  title="Delete"
+                >
+                  ✕
+                </button>
+            </div>
           </div>
         )})}
         {shapes.length === 0 && <div className="empty-state-small">No shapes added.</div>}
@@ -711,6 +731,19 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
      setSelectedShapeId(null);
   };
 
+  const moveShape = (index: number, direction: -1 | 1) => {
+    if (direction === -1 && index === 0) return;
+    if (direction === 1 && index === footprint.shapes.length - 1) return;
+
+    const newShapes = [...footprint.shapes];
+    const targetIndex = index + direction;
+    
+    // Swap
+    [newShapes[index], newShapes[targetIndex]] = [newShapes[targetIndex], newShapes[index]];
+    
+    onUpdate({ ...footprint, shapes: newShapes });
+  };
+
   const updateFootprintName = (name: string) => {
     onUpdate({ ...footprint, name });
   };
@@ -801,6 +834,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                 onSelect={setSelectedShapeId}
                 onDelete={deleteShape}
                 onRename={(id, name) => updateShape(id, "name", name)}
+                onMove={moveShape}
                 stackup={stackup}
                 isShapeVisible={isShapeVisible}
             />
@@ -883,7 +917,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                         vectorEffect="non-scaling-stroke" 
                     />
 
-                    {footprint.shapes.map((shape) => {
+                    {[...footprint.shapes].reverse().map((shape) => {
                         if (!isShapeVisible(shape)) return null;
                         return (
                             <ShapeRenderer
