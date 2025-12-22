@@ -135,6 +135,13 @@ const LayerVisibilityPanel = ({
                             >
                                 STL
                             </button>
+                            <button 
+                                className="vis-toggle-btn"
+                                onClick={() => onExport(layer.id, "SVG")}
+                                title="Export SVG"
+                            >
+                                SVG
+                            </button>
                         </>
                     )}
                 </div>

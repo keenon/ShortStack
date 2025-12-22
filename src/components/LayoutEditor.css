@@ -8,7 +8,7 @@
 
 /* PANELS */
 .layout-sidebar-left {
-    width: 250px;
+    width: 300px;
     background: #222;
     border-right: 1px solid #333;
     /* CHANGED: Removed padding to allow sub-panels to stretch */
