@@ -35,6 +35,7 @@ struct ExportRequest {
     filepath: String,
     file_type: String, // "SVG", "DXF", "STEP", "STL"
     machining_type: String, // "Cut" or "Carved/Printed"
+    cut_direction: String, // "Top" or "Bottom"
     outline: Vec<ExportPoint>,
     shapes: Vec<ExportShape>,
     layer_thickness: f64,
@@ -46,6 +47,7 @@ fn export_layer_files(request: ExportRequest) {
     println!("Target Path: {}", request.filepath);
     println!("Format: {}", request.file_type);
     println!("Machining Type: {}", request.machining_type);
+    println!("Cut Direction: {}", request.cut_direction);
     println!("Layer Thickness: {}", request.layer_thickness);
     println!("Board Outline Points: {}", request.outline.len());
     println!("Cut/Carve Shapes: {}", request.shapes.len());
@@ -105,14 +107,23 @@ fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
         None => return Ok(()),
     };
 
-    // Flip Y coordinates for SVG to match the UI's "Positive Y is UP" convention.
-    // SVG standard is "Positive Y is DOWN", so we negate Y.
-    let board_poly = board_poly_raw.map_coords(|c| Coord { x: c.x, y: -c.y });
-    let united_shapes = united_shapes_raw.map_coords(|c| Coord { x: c.x, y: -c.y });
+    // Check conditions for flipping X:
+    // We flip along the Y-axis (negate X) if we are Carving/Printing from the "Bottom".
+    let mirror_x = request.machining_type == "Carved/Printed" && request.cut_direction == "Bottom";
+
+    // Transform logic:
+    // 1. SVG coordinate system has Y pointing DOWN. Our CAD uses Y pointing UP. We negate Y (-c.y).
+    // 2. If mirror_x is true, we negate X (-c.x) to flip horizontally.
+    let transform = |c: Coord<f64>| Coord { 
+        x: if mirror_x { -c.x } else { c.x }, 
+        y: -c.y 
+    };
+
+    let board_poly = board_poly_raw.map_coords(transform);
+    let united_shapes = united_shapes_raw.map_coords(transform);
 
     // 3. Setup SVG Document
-    // Calculate bounding box of the board outline for the viewbox
-    // NOTE: This now uses the flipped coordinates, ensuring the viewbox is correct.
+    // Calculate bounding box of the transformed geometry for the viewbox
     let bounds = board_poly.bounding_rect().unwrap_or_else(|| {
         geo::Rect::new(Coord { x: 0.0, y: 0.0 }, Coord { x: 100.0, y: 100.0 })
     });
@@ -159,7 +170,9 @@ fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
 }
 
 fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
-    // DXF typically uses Y-Up (Cartesian), so we do NOT flip Y here.
+    // DXF typically uses Y-Up (Cartesian), so we do NOT flip Y here (unlike SVG).
+    // Note: If you wanted the "Bottom" flip logic applied to DXF as well, you would apply 
+    // the mirror_x transformation here similar to generate_svg, but keep Y positive.
     let (board_poly, united_shapes) = match get_geometry(request) {
         Some(g) => g,
         None => return Ok(()),
