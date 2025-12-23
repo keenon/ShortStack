@@ -325,7 +325,25 @@ fn generate_step(request: &ExportRequest) -> Result<(), Box<dyn std::error::Erro
 
     if request.machining_type == "Carved/Printed" {
         // Carved mode: Export Board as Solid + Cuts as overlapping Solids
-        if let Some((board_poly, shapes)) = get_board_and_shapes_raw(request) {
+        if let Some((board_poly_raw, shapes_raw)) = get_board_and_shapes_raw(request) {
+            
+            // Mirror logic to match SVG Depth Map behavior (Flip X if Bottom Cut)
+            let mirror = request.cut_direction == "Bottom";
+            let (board_poly, shapes) = if mirror {
+                // When mirroring, we must also reverse winding to preserve CCW exterior for STEP
+                let transform_poly = |p: &Polygon<f64>| -> Polygon<f64> {
+                    let mut mp = p.map_coords(|c| Coord { x: -c.x, y: c.y });
+                    mp.exterior_mut(|ls| ls.0.reverse());
+                    mp.interiors_mut(|ins| for i in ins { i.0.reverse(); });
+                    mp
+                };
+                let new_board = transform_poly(&board_poly_raw);
+                let new_shapes = shapes_raw.into_iter().map(|(p, d)| (transform_poly(&p), d)).collect();
+                (new_board, new_shapes)
+            } else {
+                (board_poly_raw, shapes_raw)
+            };
+
             // 1. Board Solid (0 to thickness)
             let board_id = writer.write_extrusion(&board_poly, 0.0, request.layer_thickness, "Board")?;
             solids.push(board_id);
@@ -546,9 +564,9 @@ impl StepWriter {
     }
 
     fn write_product_structure(&mut self, shape_ids: Vec<usize>) -> std::io::Result<()> {
-        // Basic Context
+        // Basic Context - Fixed: GEOMETRIC_REPRESENTATION_CONTEXT requires 3 arguments
         let ctx_id = self.get_id();
-        writeln!(self.file, "#{}=GEOMETRIC_REPRESENTATION_CONTEXT(3);", ctx_id)?;
+        writeln!(self.file, "#{}=GEOMETRIC_REPRESENTATION_CONTEXT('Default','Model',3);", ctx_id)?;
 
         // Shape Representation containing all solids
         let rep_id = self.get_id();
@@ -559,27 +577,33 @@ impl StepWriter {
         }
         writeln!(self.file, "),#{});", ctx_id)?;
 
-        // Product Definition Structure (Minimal)
-        let product_id = self.get_id();
-        writeln!(self.file, "#{}=PRODUCT('Product','Product','',(#{}));", product_id, ctx_id)?; // Simplified
+        // Product Definition Structure
+        // Fixed order and relationships to produce valid STEP AP203
         
-        let app_proto = self.get_id();
-        writeln!(self.file, "#{}=APPLICATION_PROTOCOL_DEFINITION('international standard','config_control_design',2003,#0);", app_proto)?;
-        
-        let p_def_context = self.get_id();
+        let p_def_context = self.get_id(); // APPLICATION_CONTEXT
         writeln!(self.file, "#{}=APPLICATION_CONTEXT('automotive_design');", p_def_context)?; 
+
+        let app_proto = self.get_id();
+        // Fixed: Points to APPLICATION_CONTEXT, not #0
+        writeln!(self.file, "#{}=APPLICATION_PROTOCOL_DEFINITION('international standard','config_control_design',2003,#{});", app_proto, p_def_context)?;
         
-        let p_context = self.get_id();
+        let p_context = self.get_id(); // PRODUCT_CONTEXT
         writeln!(self.file, "#{}=PRODUCT_CONTEXT('',#{},'mechanical');", p_context, p_def_context)?;
         
         let product = self.get_id();
+        // Fixed: PRODUCT now correctly points to PRODUCT_CONTEXT
         writeln!(self.file, "#{}=PRODUCT('Part','Part','Part',(#{}));", product, p_context)?;
         
         let p_def_formation = self.get_id();
         writeln!(self.file, "#{}=PRODUCT_DEFINITION_FORMATION('','',#{});", p_def_formation, product)?;
         
+        let p_def_def_context = self.get_id();
+        // Fixed: PRODUCT_DEFINITION_CONTEXT requires 3 arguments (name, frame, stage)
+        writeln!(self.file, "#{}=PRODUCT_DEFINITION_CONTEXT('part definition',#{1},'design');", p_def_def_context, p_def_context)?;
+
         let p_def = self.get_id();
-        writeln!(self.file, "#{}=PRODUCT_DEFINITION('design','',#{},#{});", p_def, p_def_formation, p_context)?;
+        // Fixed: PRODUCT_DEFINITION points to PRODUCT_DEFINITION_CONTEXT
+        writeln!(self.file, "#{}=PRODUCT_DEFINITION('design','',#{},#{});", p_def, p_def_formation, p_def_def_context)?;
         
         let p_def_shape = self.get_id();
         writeln!(self.file, "#{}=PRODUCT_DEFINITION_SHAPE('','',#{});", p_def_shape, p_def)?;
