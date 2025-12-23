@@ -509,7 +509,9 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
         const cosA = Math.cos(instAngleRad);
         const sinA = Math.sin(instAngleRad);
 
-        fp.shapes.forEach(s => {
+        // Process shapes in REVERSE order to match the visual stack (last is top)
+        // because the visual editor uses [...fp.shapes].reverse()
+        [...fp.shapes].reverse().forEach(s => {
             // Check if shape is assigned to this layer
             if (!s.assignedLayers || s.assignedLayers[layer.id] === undefined) return;
 

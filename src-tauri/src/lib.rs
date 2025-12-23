@@ -7,7 +7,7 @@ use geo::BooleanOps;
 use geo::bounding_rect::BoundingRect;
 use geo::MapCoords;
 use svg::Document;
-use svg::node::element::Path;
+use svg::node::element::{Path, Rectangle};
 use svg::node::element::path::Data;
 use std::fs::File;
 use std::io::Write;
@@ -57,10 +57,20 @@ fn export_layer_files(request: ExportRequest) {
     println!("-------------------------------");
 
     if request.file_type == "SVG" {
-        if let Err(e) = generate_svg(&request) {
-            eprintln!("Error generating SVG: {}", e);
+        if request.machining_type == "Carved/Printed" {
+            // New logic for depth map export
+            if let Err(e) = generate_depth_map_svg(&request) {
+                eprintln!("Error generating Depth Map SVG: {}", e);
+            } else {
+                println!("Depth Map SVG export successful.");
+            }
         } else {
-            println!("SVG export successful.");
+            // Original logic for profile cut export
+            if let Err(e) = generate_profile_svg(&request) {
+                eprintln!("Error generating Profile SVG: {}", e);
+            } else {
+                println!("Profile SVG export successful.");
+            }
         }
     } else if request.file_type == "DXF" {
         if let Err(e) = generate_dxf(&request) {
@@ -71,7 +81,8 @@ fn export_layer_files(request: ExportRequest) {
     }
 }
 
-fn get_geometry(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f64>)> {
+// Helper to get unioned geometry for profile cuts
+fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f64>)> {
     // 1. Convert Board Outline to Polygon
     let outline_coords: Vec<Coord<f64>> = request.outline.iter()
         .map(|p| Coord { x: p.x, y: p.y })
@@ -101,29 +112,45 @@ fn get_geometry(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f
     Some((board_poly, united_shapes))
 }
 
-fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
-    let (board_poly_raw, united_shapes_raw) = match get_geometry(request) {
+// Helper to get raw polygon list for depth maps (no union)
+fn get_board_and_shapes_raw(request: &ExportRequest) -> Option<(Polygon<f64>, Vec<(Polygon<f64>, f64)>)> {
+    // 1. Convert Board Outline to Polygon
+    let outline_coords: Vec<Coord<f64>> = request.outline.iter()
+        .map(|p| Coord { x: p.x, y: p.y })
+        .collect();
+
+    if outline_coords.is_empty() {
+        return None;
+    }
+
+    let outline_ls = LineString::new(outline_coords);
+    let board_poly = Polygon::new(outline_ls, vec![]);
+
+    // 2. Convert Shapes to List of (Polygon, Depth)
+    let mut shape_list = Vec::new();
+
+    for shape in &request.shapes {
+        if let Some(poly) = shape_to_polygon(shape) {
+            shape_list.push((poly, shape.depth));
+        }
+    }
+
+    Some((board_poly, shape_list))
+}
+
+fn generate_profile_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
+    let (board_poly_raw, united_shapes_raw) = match get_geometry_unioned(request) {
         Some(g) => g,
         None => return Ok(()),
     };
 
-    // Check conditions for flipping X:
-    // We flip along the Y-axis (negate X) if we are Carving/Printing from the "Bottom".
-    let mirror_x = request.machining_type == "Carved/Printed" && request.cut_direction == "Bottom";
-
-    // Transform logic:
-    // 1. SVG coordinate system has Y pointing DOWN. Our CAD uses Y pointing UP. We negate Y (-c.y).
-    // 2. If mirror_x is true, we negate X (-c.x) to flip horizontally.
-    let transform = |c: Coord<f64>| Coord { 
-        x: if mirror_x { -c.x } else { c.x }, 
-        y: -c.y 
-    };
+    // Transform logic (Standard SVG Y-Down flip)
+    let transform = |c: Coord<f64>| Coord { x: c.x, y: -c.y };
 
     let board_poly = board_poly_raw.map_coords(transform);
     let united_shapes = united_shapes_raw.map_coords(transform);
 
-    // 3. Setup SVG Document
-    // Calculate bounding box of the transformed geometry for the viewbox
+    // Setup SVG Document
     let bounds = board_poly.bounding_rect().unwrap_or_else(|| {
         geo::Rect::new(Coord { x: 0.0, y: 0.0 }, Coord { x: 100.0, y: 100.0 })
     });
@@ -139,7 +166,7 @@ fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
         .set("height", format!("{}mm", height))
         .set("xmlns", "http://www.w3.org/2000/svg");
 
-    // 4. Add Board Outline Path (Black)
+    // Board Outline Path (Black)
     let outline_data = polygon_to_path_data(&board_poly);
     let outline_path = Path::new()
         .set("fill", "none")
@@ -148,7 +175,7 @@ fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
         .set("d", outline_data);
     document = document.add(outline_path);
 
-    // 5. Add United Shapes Path (Red)
+    // United Shapes Path (Red)
     if !united_shapes.0.is_empty() {
         let mut shapes_data = Data::new();
         for poly in &united_shapes.0 {
@@ -163,17 +190,102 @@ fn generate_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
         document = document.add(shapes_path);
     }
 
-    // 6. Save File
+    svg::save(&request.filepath, &document)?;
+
+    Ok(())
+}
+
+fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
+    let (board_poly_raw, shapes_raw) = match get_board_and_shapes_raw(request) {
+        Some(g) => g,
+        None => return Ok(()),
+    };
+
+    // Check conditions for flipping X:
+    // We flip along the Y-axis (negate X) if we are Carving/Printing from the "Bottom".
+    let mirror_x = request.cut_direction == "Bottom";
+
+    // Transform logic:
+    // 1. SVG coordinate system has Y pointing DOWN. Our CAD uses Y pointing UP. We negate Y (-c.y).
+    // 2. If mirror_x is true, we negate X (-c.x) to flip horizontally.
+    let transform = |c: Coord<f64>| Coord { 
+        x: if mirror_x { -c.x } else { c.x }, 
+        y: -c.y 
+    };
+
+    let board_poly = board_poly_raw.map_coords(transform);
+    
+    // Bounds calculation based on board
+    let bounds = board_poly.bounding_rect().unwrap_or_else(|| {
+        geo::Rect::new(Coord { x: 0.0, y: 0.0 }, Coord { x: 100.0, y: 100.0 })
+    });
+    
+    // Expand bounds slightly if shapes go outside? Usually board defines material. 
+    // We stick to board bounds for the viewbox to align with material.
+    
+    let min_x = bounds.min().x;
+    let min_y = bounds.min().y;
+    let width = bounds.width();
+    let height = bounds.height();
+
+    let mut document = Document::new()
+        .set("viewBox", format!("{} {} {} {}", min_x, min_y, width, height))
+        .set("width", format!("{}mm", width))
+        .set("height", format!("{}mm", height))
+        .set("xmlns", "http://www.w3.org/2000/svg")
+        .set("style", "background-color: black"); // Explicit CSS background just in case
+
+    // 1. Background Black Rectangle (100% Cut / Empty Space)
+    // We make it cover the entire ViewBox area.
+    let bg_rect = Rectangle::new()
+        .set("x", min_x)
+        .set("y", min_y)
+        .set("width", width)
+        .set("height", height)
+        .set("fill", "black");
+    document = document.add(bg_rect);
+
+    // 2. Board Solid White (0% Cut / Material Surface)
+    // The board outline defines where material exists.
+    let board_data = polygon_to_path_data(&board_poly);
+    let board_path = Path::new()
+        .set("fill", "white")
+        .set("stroke", "none") 
+        .set("d", board_data);
+    document = document.add(board_path);
+
+    // 3. Individual Shapes (Grayscale Depth)
+    // Shapes are already ordered by the frontend to match visual stack.
+    // We iterate and draw them.
+    for (poly_raw, depth) in shapes_raw {
+        let poly = poly_raw.map_coords(transform);
+        let path_data = polygon_to_path_data(&poly);
+        
+        // Calculate Color
+        // Ratio = depth / thickness
+        // 0% Depth = White (255)
+        // 100% Depth = Black (0)
+        let mut ratio = depth / request.layer_thickness;
+        if ratio < 0.0 { ratio = 0.0; }
+        if ratio > 1.0 { ratio = 1.0; }
+
+        let val = (255.0 * (1.0 - ratio)).round() as u8;
+        let color = format!("rgb({},{},{})", val, val, val);
+
+        let shape_path = Path::new()
+            .set("fill", color)
+            .set("stroke", "none")
+            .set("d", path_data);
+        document = document.add(shape_path);
+    }
+
     svg::save(&request.filepath, &document)?;
 
     Ok(())
 }
 
 fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
-    // DXF typically uses Y-Up (Cartesian), so we do NOT flip Y here (unlike SVG).
-    // Note: If you wanted the "Bottom" flip logic applied to DXF as well, you would apply 
-    // the mirror_x transformation here similar to generate_svg, but keep Y positive.
-    let (board_poly, united_shapes) = match get_geometry(request) {
+    let (board_poly, united_shapes) = match get_geometry_unioned(request) {
         Some(g) => g,
         None => return Ok(()),
     };
