@@ -59,7 +59,7 @@ const LayerVisibilityPanel = ({
   stackup: StackupLayer[];
   visibility: Record<string, boolean>;
   onToggle: (id: string) => void;
-  onExport: (id: string, type: "SVG" | "DXF" | "STEP" | "STL") => void;
+  onExport: (id: string, type: "SVG" | "DXF" | "STL") => void;
 }) => {
   return (
     <div className="layout-left-subpanel">
@@ -121,13 +121,6 @@ const LayerVisibilityPanel = ({
                         </>
                     ) : (
                         <>
-                            <button 
-                                className="vis-toggle-btn"
-                                onClick={() => onExport(layer.id, "STEP")}
-                                title="Export STEP"
-                            >
-                                STEP
-                            </button>
                             <button 
                                 className="vis-toggle-btn"
                                 onClick={() => onExport(layer.id, "STL")}
@@ -469,7 +462,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   };
 
   // --- EXPORT HANDLER ---
-  const handleExport = async (layerId: string, format: "SVG" | "STEP" | "STL") => {
+  const handleExport = async (layerId: string, format: "SVG" | "DXF" | "STL") => {
     const layer = stackup.find(l => l.id === layerId);
     if (!layer) return;
 
