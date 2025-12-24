@@ -258,6 +258,11 @@ const LayerSolid = ({
           
           // For line, we generate the Shape object
           let generatedShape: THREE.Shape | null = null;
+          
+          // Extrude geometries (lines) originate at Z=0. 
+          // We need offsets to center them to match Box/Cylinder logic.
+          let extrudeOffsetSub = 0;
+          let extrudeOffsetAdd = 0;
 
           if (shape.type === "circle") {
             const diameter = evaluate(shape.diameter, params);
@@ -280,6 +285,10 @@ const LayerSolid = ({
                   // Rotate to align Extrude Z with World Y, and Shape Y with World -Z
                   rotation = [-Math.PI / 2, 0, 0];
                   type = "extrude";
+                  
+                  // Fix: Center the extrusion geometry
+                  extrudeOffsetSub = -throughHeight / 2;
+                  extrudeOffsetAdd = -fillHeight / 2;
               }
           }
 
@@ -291,7 +300,7 @@ const LayerSolid = ({
           return (
              <React.Fragment key={shape.id}>
                 {/* Step A: Always subtract FULL THICKNESS to clear the column */}
-                <Subtraction position={[localX, throughY, localZ]} rotation={rotation}>
+                <Subtraction position={[localX, throughY + extrudeOffsetSub, localZ]} rotation={rotation}>
                     {type === "cylinder" ? (
                         <cylinderGeometry args={[args[0], args[1], throughHeight, args[3]]} />
                     ) : type === "box" ? (
@@ -303,7 +312,7 @@ const LayerSolid = ({
 
                 {/* Step B: Add back material if needed */}
                 {shouldFill && (
-                    <Addition position={[localX, fillY, localZ]} rotation={rotation}>
+                    <Addition position={[localX, fillY + extrudeOffsetAdd, localZ]} rotation={rotation}>
                         {(() => {
                             if (type === "cylinder") {
                                 return <cylinderGeometry args={[args[0] + CSG_EPSILON, args[1] + CSG_EPSILON, fillHeight, args[3]]} />;
