@@ -10,7 +10,7 @@ use svg::node::element::path::Data;
 use std::fs::File;
 use std::io::Write;
 use csgrs::sketch::Sketch;
-use csgrs::mesh::Mesh; 
+// use csgrs::mesh::Mesh; // Removed unused import
 use csgrs::traits::CSG; 
 
 #[derive(Debug, serde::Deserialize)]
@@ -262,9 +262,6 @@ fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::er
         geo::Rect::new(Coord { x: 0.0, y: 0.0 }, Coord { x: 100.0, y: 100.0 })
     });
     
-    // Expand bounds slightly if shapes go outside? Usually board defines material. 
-    // We stick to board bounds for the viewbox to align with material.
-    
     let min_x = bounds.min().x;
     let min_y = bounds.min().y;
     let width = bounds.width();
@@ -275,10 +272,9 @@ fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::er
         .set("width", format!("{}mm", width))
         .set("height", format!("{}mm", height))
         .set("xmlns", "http://www.w3.org/2000/svg")
-        .set("style", "background-color: black"); // Explicit CSS background just in case
+        .set("style", "background-color: black");
 
     // 1. Background Black Rectangle (100% Cut / Empty Space)
-    // We make it cover the entire ViewBox area.
     let bg_rect = Rectangle::new()
         .set("x", min_x)
         .set("y", min_y)
@@ -288,7 +284,6 @@ fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::er
     document = document.add(bg_rect);
 
     // 2. Board Solid White (0% Cut / Material Surface)
-    // The board outline defines where material exists.
     let board_data = polygon_to_path_data(&board_poly);
     let board_path = Path::new()
         .set("fill", "white")
@@ -296,29 +291,133 @@ fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::er
         .set("d", board_data);
     document = document.add(board_path);
 
-    // 3. Individual Shapes (Grayscale Depth)
-    // Shapes are already ordered by the frontend to match visual stack.
-    // We iterate and draw them.
+    // 3. Process Shapes Logic
+    // `shapes_raw` is ordered Bottom -> Top.
+    
+    struct Layer {
+        sketch: Sketch<()>,
+        depth: f64,
+    }
+
+    // A. Merge adjacent shapes with same depth
+    let mut layers: Vec<Layer> = Vec::new();
     for (poly_raw, depth) in shapes_raw {
         let poly = poly_raw.map_coords(transform);
-        let path_data = polygon_to_path_data(&poly);
+        let geom = geo::Geometry::Polygon(poly);
+        let sketch = Sketch::from_geo(geom.into(), None);
+
+        if let Some(last) = layers.last_mut() {
+             if (last.depth - depth).abs() < 1e-6 {
+                 last.sketch = last.sketch.union(&sketch);
+                 continue;
+             }
+        }
+        layers.push(Layer { sketch, depth });
+    }
+
+    // B. Compute Visible Regions
+    // We iterate from Top (end) to Bottom (start).
+    // A layer is visible except where it is obscured by *higher* layers.
+    // Optimization: Only subtract higher layers if they have a *different* depth.
+    // If they have the same depth, they merge naturally in the final step.
+    
+    let mut visible_parts: Vec<(f64, Sketch<()>)> = Vec::new();
+    
+    // Store union of shapes for each depth encountered so far (from Top)
+    // Used to subtract only shapes of *different* depth.
+    let mut processed_masks_by_depth: Vec<(f64, Sketch<()>)> = Vec::new();
+
+    for layer in layers.iter().rev() {
+        let mut visible = layer.sketch.clone();
+
+        // Subtract overlapping shapes from higher layers (processed_masks)
+        // BUT only if depths differ.
+        let mut subtraction_mask: Option<Sketch<()>> = None;
         
-        // Calculate Color
-        // Ratio = depth / thickness
-        // 0% Depth = White (255)
-        // 100% Depth = Black (0)
-        let mut ratio = depth / request.layer_thickness;
-        if ratio < 0.0 { ratio = 0.0; }
-        if ratio > 1.0 { ratio = 1.0; }
+        for (d, mask_sketch) in &processed_masks_by_depth {
+            if (d - layer.depth).abs() > 1e-6 {
+                if let Some(curr) = subtraction_mask {
+                    subtraction_mask = Some(curr.union(mask_sketch));
+                } else {
+                    subtraction_mask = Some(mask_sketch.clone());
+                }
+            }
+        }
 
-        let val = (255.0 * (1.0 - ratio)).round() as u8;
-        let color = format!("rgb({},{},{})", val, val, val);
+        if let Some(mask) = subtraction_mask {
+            visible = visible.difference(&mask);
+        }
 
-        let shape_path = Path::new()
-            .set("fill", color)
-            .set("stroke", "none")
-            .set("d", path_data);
-        document = document.add(shape_path);
+        if !visible.geometry.is_empty() {
+             visible_parts.push((layer.depth, visible));
+        }
+
+        // Add CURRENT layer (full shape) to the masks for future (lower) layers
+        let mut found = false;
+        for (d, mask_sketch) in &mut processed_masks_by_depth {
+            if (*d - layer.depth).abs() < 1e-6 {
+                *mask_sketch = mask_sketch.union(&layer.sketch);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            processed_masks_by_depth.push((layer.depth, layer.sketch.clone()));
+        }
+    }
+
+    // C. Group visible parts by Depth and Union them
+    // This merges split parts back together if they have the same depth
+    let mut final_depth_groups: Vec<(f64, Sketch<()>)> = Vec::new();
+
+    for (depth, sketch) in visible_parts {
+        let mut found = false;
+        for (d, group_sketch) in &mut final_depth_groups {
+            if (*d - depth).abs() < 1e-6 {
+                *group_sketch = group_sketch.union(&sketch);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            final_depth_groups.push((depth, sketch));
+        }
+    }
+    
+    // Sort by depth so deep cuts are drawn last (optional if they don't overlap, but good for safety)
+    final_depth_groups.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // D. Generate SVG
+    for (depth, sketch) in final_depth_groups {
+        let mut p_list = Vec::new();
+        for geom in sketch.geometry {
+            match geom {
+                geo::Geometry::Polygon(p) => p_list.push(p),
+                geo::Geometry::MultiPolygon(mp) => p_list.extend(mp.0),
+                _ => {}
+            }
+        }
+        let final_multipoly = MultiPolygon::new(p_list);
+
+        if !final_multipoly.0.is_empty() {
+            let mut shapes_data = Data::new();
+            for poly in &final_multipoly.0 {
+                shapes_data = append_polygon_to_data(shapes_data, poly);
+            }
+            
+            let mut ratio = depth / request.layer_thickness;
+            if ratio < 0.0 { ratio = 0.0; }
+            if ratio > 1.0 { ratio = 1.0; }
+
+            let val = (255.0 * (1.0 - ratio)).round() as u8;
+            let color = format!("rgb({},{},{})", val, val, val);
+
+            let shape_path = Path::new()
+                .set("fill", color)
+                .set("stroke", "none")
+                .set("d", shapes_data);
+            document = document.add(shape_path);
+        }
     }
 
     svg::save(&request.filepath, &document)?;
