@@ -6,7 +6,7 @@ import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/dr
 import { Geometry, Base, Subtraction, Addition } from "@react-three/csg";
 import * as THREE from "three";
 import * as math from "mathjs";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine } from "../types";
 
 interface Props {
   footprint: Footprint;
@@ -39,6 +39,110 @@ function evaluate(expression: string, params: Parameter[]): number {
   } catch (e) {
     return 0;
   }
+}
+
+/**
+ * Generates a 2D THREE.Shape representing the outline of the thick line.
+ * Handles Bezier curves and thickness.
+ */
+function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOverride?: number): THREE.Shape | null {
+  const points = shape.points;
+  if (points.length < 2) return null;
+
+  const thickVal = thicknessOverride !== undefined ? thicknessOverride : evaluate(shape.thickness, params);
+  const halfThick = thickVal / 2;
+
+  // 1. Sample the path into a dense polyline of Vector2
+  const pathPoints: THREE.Vector2[] = [];
+
+  for (let i = 0; i < points.length - 1; i++) {
+      const curr = points[i];
+      const next = points[i+1];
+      
+      const x1 = evaluate(curr.x, params);
+      const y1 = evaluate(curr.y, params);
+      const x2 = evaluate(next.x, params);
+      const y2 = evaluate(next.y, params);
+
+      // Check for handles to determine if this segment is a curve
+      // HandleIn is for the 'next' point (approaching it), HandleOut is for 'curr' point (leaving it)
+      const hasCurve = (curr.handleOut || next.handleIn);
+
+      if (hasCurve) {
+          const cp1x = x1 + (curr.handleOut ? evaluate(curr.handleOut.x, params) : 0);
+          const cp1y = y1 + (curr.handleOut ? evaluate(curr.handleOut.y, params) : 0);
+          const cp2x = x2 + (next.handleIn ? evaluate(next.handleIn.x, params) : 0);
+          const cp2y = y2 + (next.handleIn ? evaluate(next.handleIn.y, params) : 0);
+
+          const curve = new THREE.CubicBezierCurve(
+              new THREE.Vector2(x1, y1),
+              new THREE.Vector2(cp1x, cp1y),
+              new THREE.Vector2(cp2x, cp2y),
+              new THREE.Vector2(x2, y2)
+          );
+
+          // Sample points
+          const divisions = 24; 
+          const sp = curve.getPoints(divisions);
+          
+          // If not the first segment, remove the first point to avoid duplicate
+          if (pathPoints.length > 0) sp.shift();
+          sp.forEach(p => pathPoints.push(p));
+      } else {
+          // Straight Line
+          if (pathPoints.length === 0) pathPoints.push(new THREE.Vector2(x1, y1));
+          pathPoints.push(new THREE.Vector2(x2, y2));
+      }
+  }
+
+  if (pathPoints.length < 2) return null;
+
+  // 2. Compute Offset Polygon (Outline)
+  const leftPts: THREE.Vector2[] = [];
+  const rightPts: THREE.Vector2[] = [];
+
+  for (let i = 0; i < pathPoints.length; i++) {
+      const p = pathPoints[i];
+
+      // Calculate tangent/normal
+      let tangent: THREE.Vector2;
+      
+      if (i === 0) {
+          const next = pathPoints[i+1];
+          tangent = new THREE.Vector2().subVectors(next, p).normalize();
+      } else if (i === pathPoints.length - 1) {
+          const prev = pathPoints[i-1];
+          tangent = new THREE.Vector2().subVectors(p, prev).normalize();
+      } else {
+          // Miter-ish average
+          const prev = pathPoints[i-1];
+          const next = pathPoints[i+1];
+          const t1 = new THREE.Vector2().subVectors(p, prev).normalize();
+          const t2 = new THREE.Vector2().subVectors(next, p).normalize();
+          tangent = new THREE.Vector2().addVectors(t1, t2).normalize();
+      }
+
+      const normal = new THREE.Vector2(-tangent.y, tangent.x);
+
+      // Simple normal offset (could be improved with true miter join logic)
+      leftPts.push(new THREE.Vector2(p.x + normal.x * halfThick, p.y + normal.y * halfThick));
+      rightPts.push(new THREE.Vector2(p.x - normal.x * halfThick, p.y - normal.y * halfThick));
+  }
+
+  // 3. Build THREE.Shape
+  const shape2D = new THREE.Shape();
+  // Forward along Left
+  shape2D.moveTo(leftPts[0].x, leftPts[0].y);
+  for (let i = 1; i < leftPts.length; i++) {
+      shape2D.lineTo(leftPts[i].x, leftPts[i].y);
+  }
+  // Backward along Right
+  for (let i = rightPts.length - 1; i >= 0; i--) {
+      shape2D.lineTo(rightPts[i].x, rightPts[i].y);
+  }
+  shape2D.closePath();
+
+  return shape2D;
 }
 
 // ------------------------------------------------------------------
@@ -150,7 +254,10 @@ const LayerSolid = ({
           // 5. Geometry Args
           let args: any[] = [];
           let rotation: [number, number, number] = [0, 0, 0];
-          let type: "cylinder" | "box" | null = null;
+          let type: "cylinder" | "box" | "extrude" | null = null;
+          
+          // For line, we generate the Shape object
+          let generatedShape: THREE.Shape | null = null;
 
           if (shape.type === "circle") {
             const diameter = evaluate(shape.diameter, params);
@@ -166,6 +273,14 @@ const LayerSolid = ({
             args = [w, 0, h]; 
             rotation = [0, angleRad, 0];
             type = "box";
+          } else if (shape.type === "line") {
+              generatedShape = createLineShape(shape as FootprintLine, params);
+              if (generatedShape) {
+                  args = [generatedShape, { depth: throughHeight, bevelEnabled: false }];
+                  // Rotate to align Extrude Z with World Y, and Shape Y with World -Z
+                  rotation = [-Math.PI / 2, 0, 0];
+                  type = "extrude";
+              }
           }
 
           if (!type) return null;
@@ -179,21 +294,33 @@ const LayerSolid = ({
                 <Subtraction position={[localX, throughY, localZ]} rotation={rotation}>
                     {type === "cylinder" ? (
                         <cylinderGeometry args={[args[0], args[1], throughHeight, args[3]]} />
-                    ) : (
+                    ) : type === "box" ? (
                         <boxGeometry args={[args[0], throughHeight, args[2]]} />
+                    ) : (
+                        <extrudeGeometry args={args} />
                     )}
                 </Subtraction>
 
                 {/* Step B: Add back material if needed */}
                 {shouldFill && (
                     <Addition position={[localX, fillY, localZ]} rotation={rotation}>
-                        {type === "cylinder" ? (
-                            // Expand radius by EPSILON to overlap with base material
-                            <cylinderGeometry args={[args[0] + CSG_EPSILON, args[1] + CSG_EPSILON, fillHeight, args[3]]} />
-                        ) : (
-                            // Expand width/depth by EPSILON
-                            <boxGeometry args={[args[0] + CSG_EPSILON, fillHeight, args[2] + CSG_EPSILON]} />
-                        )}
+                        {(() => {
+                            if (type === "cylinder") {
+                                return <cylinderGeometry args={[args[0] + CSG_EPSILON, args[1] + CSG_EPSILON, fillHeight, args[3]]} />;
+                            }
+                            if (type === "box") {
+                                return <boxGeometry args={[args[0] + CSG_EPSILON, fillHeight, args[2] + CSG_EPSILON]} />;
+                            }
+                            if (type === "extrude") {
+                                // For lines, we need to regenerate the shape with slightly larger thickness for the fill
+                                // to ensure it bonds correctly to the walls.
+                                const baseThick = evaluate((shape as FootprintLine).thickness, params);
+                                const thickShape = createLineShape(shape as FootprintLine, params, baseThick + CSG_EPSILON);
+                                if (!thickShape) return null;
+                                return <extrudeGeometry args={[thickShape, { depth: fillHeight, bevelEnabled: false }]} />;
+                            }
+                            return null;
+                        })()}
                     </Addition>
                 )}
              </React.Fragment>
@@ -246,6 +373,29 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
             const radius = Math.sqrt(Math.pow(w / 2, 2) + Math.pow(h / 2, 2));
             dx = radius;
             dy = radius;
+        } else if (shape.type === "line") {
+            // Rough bounds for line
+            const thick = evaluate(shape.thickness, params);
+            const pts = (shape as FootprintLine).points;
+            let lxMin = Infinity, lxMax = -Infinity, lyMin = Infinity, lyMax = -Infinity;
+            pts.forEach(p => {
+                const px = evaluate(p.x, params);
+                const py = evaluate(p.y, params);
+                if (px < lxMin) lxMin = px;
+                if (px > lxMax) lxMax = px;
+                if (py < lyMin) lyMin = py;
+                if (py > lyMax) lyMax = py;
+            });
+            // Update global bounds directly with the line points + thickness
+            // Since line points are absolute, we don't add x/y (which are usually 0 for lines)
+            // But if x/y are set, we should respect them.
+            if (lxMin < Infinity) {
+                if (lxMin + x - thick < minX) minX = lxMin + x - thick;
+                if (lxMax + x + thick > maxX) maxX = lxMax + x + thick;
+                if (lyMin + y - thick < minY) minY = lyMin + y - thick;
+                if (lyMax + y + thick > maxY) maxY = lyMax + y + thick;
+            }
+            return; // Continue to next shape
         }
 
         if (x - dx < minX) minX = x - dx;
