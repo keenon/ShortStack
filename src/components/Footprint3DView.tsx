@@ -250,6 +250,8 @@ const LayerSolid = ({
     );
   }
 
+  const CSG_EPSILON = 0.01;
+
   return (
     <mesh position={[centerX, centerY, centerZ]}>
       <Geometry>
@@ -330,20 +332,26 @@ const LayerSolid = ({
           // Geometry Generation Logic
           // ----------------------------------------
 
-          const getShapeObj = (): THREE.Shape | null => {
+          const getShapeObj = (extraOffset: number = 0): THREE.Shape | null => {
               if (shape.type === "circle") {
                   const d = evaluate(shape.diameter, params);
                   if (d <= 0) return null;
                   const s = new THREE.Shape();
-                  s.absarc(0, 0, d/2, 0, Math.PI*2, true);
+                  // Apply offset to radius (matching Addition logic which used radius + epsilon)
+                  s.absarc(0, 0, d/2 + extraOffset, 0, Math.PI*2, true);
                   return s;
               } else if (shape.type === "rect") {
                   const w = evaluate(shape.width, params);
                   const h = evaluate(shape.height, params);
                   const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
-                  return createRoundedRectShape(w, h, crRaw);
+                  const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                  // Apply offset to dimensions (matching Addition logic)
+                  return createRoundedRectShape(w + extraOffset, h + extraOffset, cr + extraOffset/2);
               } else if (shape.type === "line") {
-                  return createLineShape(shape as FootprintLine, params);
+                  const t = evaluate(shape.thickness, params);
+                  const validT = t > 0 ? t : 0.01;
+                  // Apply offset to thickness (matching Addition logic)
+                  return createLineShape(shape as FootprintLine, params, validT + extraOffset);
               }
               return null;
           };
@@ -391,7 +399,8 @@ const LayerSolid = ({
 
           // --- Rounded Cut Geometry (If Needed) ---
           if (shouldRound) {
-             const s = getShapeObj();
+             // Use CSG_EPSILON offset to ensure we cut through the expanded "Addition" plug
+             const s = getShapeObj(CSG_EPSILON);
              if (s) {
                  const options: THREE.ExtrudeGeometryOptions = {
                      depth: throughHeight, 
@@ -437,8 +446,6 @@ const LayerSolid = ({
                  }
              }
           }
-
-          const CSG_EPSILON = 0.01;
 
           return (
              <React.Fragment key={shape.id}>
