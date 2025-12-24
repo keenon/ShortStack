@@ -348,7 +348,10 @@ const CSGLayerGeometry = memo(({
                             const s = createRoundedRectShape(w, h, cr);
                             argsThrough = [s, { depth: throughHeight, bevelEnabled: false }];
                             typeThrough = "extrude";
-                            rotThrough = [-Math.PI/2, -rad, 0];
+                            // For extruded shape (XY plane), rotate X -90 puts it on XZ plane.
+                            // The local Z axis then points along World -Y.
+                            // To rotate the shape on the floor (XZ), we must rotate around local Z.
+                            rotThrough = [-Math.PI/2, 0, rad];
                         } else {
                             argsThrough = [w, throughHeight, h];
                             typeThrough = "box";
@@ -387,7 +390,7 @@ const CSGLayerGeometry = memo(({
                         let angleRad = 0;
                         if (shape.type === "rect") angleRad = (evaluate((shape as FootprintRect).angle, params) * Math.PI) / 180;
 
-                        roundedCutRot = [-Math.PI/2, -angleRad, 0];
+                        roundedCutRot = [-Math.PI/2, 0, angleRad];
 
                         if (layer.carveSide === "Top") {
                             const floorY = (thickness / 2) - actualDepth;
