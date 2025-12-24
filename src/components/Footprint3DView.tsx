@@ -225,7 +225,6 @@ const LayerSolid = ({
   const centerY = bottomZ + thickness / 2;
 
   // Identify shapes affecting this layer.
-  // We need to process shapes from Bottom of stack to Top of stack.
   const orderedShapes = useMemo(() => {
     return [...footprint.shapes].reverse().filter(s => 
       s.assignedLayers && s.assignedLayers[layer.id] !== undefined
@@ -244,172 +243,296 @@ const LayerSolid = ({
 
   return (
     <mesh position={[centerX, centerY, centerZ]}>
-      {/* 
-        CSG Geometry Wrapper 
-        The <Geometry> component creates a computed mesh from children 
-      */}
       <Geometry>
-        {/* Base Positive Shape: Local position (0,0,0) corresponds to mesh position */}
+        {/* Base Positive Shape */}
         <Base>
           <boxGeometry args={[width, thickness, depth]} />
         </Base>
 
         {/* Operations */}
         {orderedShapes.map((shape) => {
-          // 1. Calculate Target Depth
+          // 1. Calculate Target Depth & Radius
           let actualDepth = thickness;
+          let endmillRadius = 0;
 
           if (layer.type === "Cut") {
-             // Through Cut
              actualDepth = thickness; 
           } else {
-             // Carved
-             const val = evaluate(shape.assignedLayers[layer.id], params);
+             const assignment = shape.assignedLayers[layer.id];
+             // Handle both legacy string and object assignment
+             const valExpr = (typeof assignment === 'object') ? assignment.depth : (assignment as string);
+             const radiusExpr = (typeof assignment === 'object') ? assignment.endmillRadius : "0";
+
+             const val = evaluate(valExpr, params);
+             endmillRadius = evaluate(radiusExpr, params);
              actualDepth = Math.max(0, Math.min(val, thickness));
           }
 
-          // 2. Calculate Cut & Fill Geometries
-          
-          // A. Through Cut (Removes all material in the shape's footprint)
-          const throughHeight = thickness + 0.2; 
-          const throughY = 0; // Centered
+          const isPartialCut = actualDepth < thickness - 0.001;
+          const hasRadius = endmillRadius > 0.001;
+          const shouldRound = isPartialCut && hasRadius;
 
-          // B. Fill (Add material back if depth < thickness)
-          // We want the resulting surface to be at `actualDepth` from the reference side.
-          const fillHeight = thickness - actualDepth;
+          // 2. Calculate Geometry Parameters
+          const throughHeight = thickness + 0.2; 
+          const throughY = 0; 
+
+          // Fill (Addition)
+          // If rounding, we add extra material to allow the ball nose to "carve" the fillet
+          let fillHeight = thickness - actualDepth;
+          if (shouldRound) {
+              fillHeight += endmillRadius;
+          }
+
           let fillY = 0;
           const shouldFill = fillHeight > 0.001;
 
+          // Align Fill Block
           if (shouldFill) {
+              // We need to calculate the center Y of the fill block such that it sits at the correct floor.
+              // Local Local Coords: -thickness/2 is Bottom, +thickness/2 is Top.
+              
               if (layer.carveSide === "Top") {
-                  // Carving from Top: Material remains at the Bottom.
-                  fillY = -actualDepth / 2;
+                  // Material at Bottom.
+                  // Fill starts at -thickness/2. Height is fillHeight.
+                  // Center = -thickness/2 + fillHeight/2.
+                  fillY = -thickness / 2 + fillHeight / 2;
               } else {
-                  // Carving from Bottom: Material remains at the Top.
-                  fillY = actualDepth / 2;
+                  // Material at Top.
+                  // Fill starts at +thickness/2 downwards? No, fill sits at Top.
+                  // Bottom of fill = thickness/2 - fillHeight.
+                  // Center = thickness/2 - fillHeight/2.
+                  fillY = thickness / 2 - fillHeight / 2;
               }
           }
 
-          // 3. Calculate 2D Position
+          // 3. Local Position
           const sx = evaluate(shape.x, params);
           const sy = evaluate(shape.y, params);
-
-          // 4. Local Position Calculation
-          // UN-MIRRORING Y -> -Z
           const localX = sx - centerX;
           const localZ = centerZ - sy; 
 
-          // 5. Geometry Args
-          let args: any[] = [];
-          let rotation: [number, number, number] = [0, 0, 0];
-          let type: "cylinder" | "box" | "extrude" | null = null;
+          // 4. Generate Shapes / Args
+          let argsThrough: any[] = [];
+          let typeThrough: "cylinder" | "box" | "extrude" | null = null;
+          let rotThrough: [number, number, number] = [0, 0, 0];
           
-          // For line, we generate the Shape object
-          let generatedShape: THREE.Shape | null = null;
-          
-          // Extrude geometries (lines) originate at Z=0. 
-          // We need offsets to center them to match Box/Cylinder logic.
-          let extrudeOffsetSub = 0;
-          let extrudeOffsetAdd = 0;
+          let roundedCutArgs: any[] = [];
+          let roundedCutRot: [number, number, number] = [0, 0, 0];
+          let roundedCutPos: [number, number, number] = [0, 0, 0];
 
-          if (shape.type === "circle") {
-            const diameter = evaluate(shape.diameter, params);
-            // Cylinder: [radiusTop, radiusBottom, height, segments]
-            args = [diameter/2, diameter/2, 0, 32];
-            type = "cylinder";
-          } else if (shape.type === "rect") {
-            const w = evaluate(shape.width, params);
-            const h = evaluate(shape.height, params);
-            const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
-            const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
-            const angleDeg = evaluate((shape as FootprintRect).angle, params);
-            const angleRad = (angleDeg * Math.PI) / 180;
-            
-            if (cr > 0.001) {
-                const rrShape = createRoundedRectShape(w, h, cr);
-                args = [rrShape, { depth: throughHeight, bevelEnabled: false }];
-                // Orient Extrude (XY plane -> Z up) to World (Vertical Y up)
-                // Rotate X -90 makes Z->Y.
-                // Rotate Y angleRad (around world vertical).
-                // Note on angle sign: FootprintEditor uses `rotate(${-angle})` for SVG (CW).
-                // Here we use `angleRad` (CCW in standard math).
-                rotation = [-Math.PI / 2, -angleRad, 0]; 
-                type = "extrude";
-                extrudeOffsetSub = -throughHeight / 2;
-                extrudeOffsetAdd = -fillHeight / 2;
-            } else {
-                // Standard Box
-                // Box: [width, height, depth]
-                args = [w, 0, h]; 
-                rotation = [0, angleRad, 0];
-                type = "box";
-            }
-          } else if (shape.type === "line") {
-              generatedShape = createLineShape(shape as FootprintLine, params);
-              if (generatedShape) {
-                  args = [generatedShape, { depth: throughHeight, bevelEnabled: false }];
-                  // Rotate to align Extrude Z with World Y, and Shape Y with World -Z
-                  rotation = [-Math.PI / 2, 0, 0];
-                  type = "extrude";
-                  
-                  // Fix: Center the extrusion geometry
-                  extrudeOffsetSub = -throughHeight / 2;
-                  extrudeOffsetAdd = -fillHeight / 2;
+          // ----------------------------------------
+          // Geometry Generation Logic
+          // ----------------------------------------
+
+          // Helper to create the Shape object (for extrusions)
+          const getShapeObj = (): THREE.Shape | null => {
+              if (shape.type === "circle") {
+                  const d = evaluate(shape.diameter, params);
+                  const s = new THREE.Shape();
+                  s.absarc(0, 0, d/2, 0, Math.PI*2, true);
+                  return s;
+              } else if (shape.type === "rect") {
+                  const w = evaluate(shape.width, params);
+                  const h = evaluate(shape.height, params);
+                  const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+                  const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                  return createRoundedRectShape(w, h, cr);
+              } else if (shape.type === "line") {
+                  return createLineShape(shape as FootprintLine, params);
               }
+              return null;
+          };
+
+          // --- Through Cut Geometry (Standard) ---
+          if (shape.type === "circle") {
+             const d = evaluate(shape.diameter, params);
+             argsThrough = [d/2, d/2, throughHeight, 32];
+             typeThrough = "cylinder";
+          } else if (shape.type === "rect") {
+             const w = evaluate(shape.width, params);
+             const h = evaluate(shape.height, params);
+             const angle = evaluate((shape as FootprintRect).angle, params);
+             const rad = (angle * Math.PI) / 180;
+             const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+             const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+
+             if (cr > 0.001) {
+                 const s = createRoundedRectShape(w, h, cr);
+                 argsThrough = [s, { depth: throughHeight, bevelEnabled: false }];
+                 typeThrough = "extrude";
+                 rotThrough = [-Math.PI/2, -rad, 0];
+             } else {
+                 argsThrough = [w, throughHeight, h];
+                 typeThrough = "box";
+                 rotThrough = [0, rad, 0];
+             }
+          } else if (shape.type === "line") {
+             const s = createLineShape(shape as FootprintLine, params);
+             if (s) {
+                 argsThrough = [s, { depth: throughHeight, bevelEnabled: false }];
+                 typeThrough = "extrude";
+                 rotThrough = [-Math.PI/2, 0, 0];
+             }
           }
 
-          if (!type) return null;
+          // Offset adjustments for "Through Cut" extrusions to center them
+          const extrudeCenterOffset = -throughHeight / 2;
 
-          // FIX: Small epsilon expansion for fill operations to prevent coincident face errors (Z-fighting/narrow triangles)
+          // --- Rounded Cut Geometry (If Needed) ---
+          if (shouldRound) {
+             const s = getShapeObj();
+             if (s) {
+                 // Ball Nose Configuration
+                 // We want to effectively 'fillet' the bottom of the pocket.
+                 // We do this by creating a cutter that is the full shape, but with a bevel at the bottom
+                 // that shrinks inwards (bevelSize = -R).
+                 // bevelOffset = -R starts the bevel inside the shape.
+                 // bevelSize = R expands it back to the outline?
+                 // User requested: bevelThickness: R, bevelSize: R, bevelOffset: -R.
+                 // This combo creates a transition from [Offset -R] to [Offset 0].
+                 // i.e. From "Inward Contracted" to "Full Shape".
+                 
+                 const options: THREE.ExtrudeGeometryOptions = {
+                     depth: throughHeight, // Large enough to clear the top
+                     bevelEnabled: true,
+                     bevelThickness: endmillRadius,
+                     bevelSize: endmillRadius,
+                     bevelOffset: -endmillRadius,
+                     bevelSegments: 10,
+                     curveSegments: 32 // smooth curves
+                 };
+                 
+                 roundedCutArgs = [s, options];
+
+                 // Orientation & Position
+                 // We need the "Bevel Tip" (the contracted end) to align with the Floor.
+                 // We use the "Back" bevel of the extrusion (at Z = depth + bevelThickness).
+                 // We align Z+ with the direction towards the floor.
+                 
+                 let angleRad = 0;
+                 if (shape.type === "rect") angleRad = (evaluate((shape as FootprintRect).angle, params) * Math.PI) / 180;
+
+                 if (layer.carveSide === "Top") {
+                     // Cut from Top. Floor is at: Top - Depth.
+                     // Local Y of Floor: (thickness/2) - actualDepth.
+                     const floorY = (thickness / 2) - actualDepth;
+                     
+                     // We want extrusion Z+ to point Down (World -Y).
+                     // Rot: [PI/2, ...].
+                     // Tip (at local Z = depth + thickness) should be at floorY.
+                     // World Y = OriginY - (depth + thickness).
+                     // OriginY = floorY + depth + thickness.
+                     
+                     roundedCutRot = [Math.PI/2, 0, angleRad]; // angleRad on Z rotates around local Z (World -Y) which is correct for top-down? 
+                     // Actually for Rect rotation, if we rotate X 90, Z becomes -Y. Y becomes Z.
+                     // Original Shape is in XY plane.
+                     // We want Shape X -> World X. Shape Y -> World Z.
+                     // Rotation X=90: (x, y, z) -> (x, -z, y). No.
+                     // Rotation X=-90: (x, z, -y). (Shape Y maps to World -Z).
+                     // But here we want Z axis to point DOWN.
+                     // Rotation X=90: (x, -z, y). Shape Y maps to World Z (Depth).
+                     // This matches our scene (Y is up).
+                     // But we want Shape to be Flat on XZ plane.
+                     
+                     // Let's stick to standard orientation:
+                     // Shape defined in XY.
+                     // Extrude in Z.
+                     // Rotate X=90 -> Shape in XZ, Extrude in -Y.
+                     roundedCutRot = [Math.PI/2, angleRad, 0]; // Z -> -Y.
+
+                     // Position:
+                     // OriginY needs to be set so that Tip is at floorY.
+                     // Tip is at Z = options.depth + options.bevelThickness (The far end).
+                     // Y_tip = OriginY - (Tip_Z).
+                     // OriginY = floorY + (options.depth + options.bevelThickness).
+                     roundedCutPos = [localX, floorY + throughHeight + endmillRadius, localZ];
+                 
+                 } else {
+                     // Cut from Bottom. Floor is at: Bottom + Depth.
+                     // Local Y of Floor: (-thickness/2) + actualDepth.
+                     const floorY = (-thickness / 2) + actualDepth;
+
+                     // We want extrusion Z+ to point Up (World +Y).
+                     // Rot: [-PI/2, ...].
+                     // Tip (at local Z = depth + thickness) should be at floorY.
+                     // World Y = OriginY + (Tip_Z).
+                     // OriginY = floorY - (Tip_Z).
+                     
+                     roundedCutRot = [-Math.PI/2, -angleRad, 0]; // Z -> +Y.
+                     roundedCutPos = [localX, floorY - (throughHeight + endmillRadius), localZ];
+                 }
+             }
+          }
+
           const CSG_EPSILON = 0.01;
 
           return (
              <React.Fragment key={shape.id}>
-                {/* Step A: Always subtract FULL THICKNESS to clear the column */}
-                <Subtraction position={[localX, throughY + extrudeOffsetSub, localZ]} rotation={rotation}>
-                    {type === "cylinder" ? (
-                        <cylinderGeometry args={[args[0], args[1], throughHeight, args[3]]} />
-                    ) : type === "box" ? (
-                        <boxGeometry args={[args[0], throughHeight, args[2]]} />
+                {/* 1. THROUGH CUT (Clears the column) */}
+                <Subtraction 
+                    position={[localX, throughY + (typeThrough === 'extrude' ? extrudeCenterOffset : 0), localZ]} 
+                    rotation={rotThrough}
+                >
+                    {typeThrough === "cylinder" ? (
+                        <cylinderGeometry args={argsThrough as any} />
+                    ) : typeThrough === "box" ? (
+                        <boxGeometry args={argsThrough as any} />
                     ) : (
-                        <extrudeGeometry args={args as [THREE.Shape, THREE.ExtrudeGeometryOptions]} />
+                        <extrudeGeometry args={argsThrough as any} />
                     )}
                 </Subtraction>
 
-                {/* Step B: Add back material if needed */}
+                {/* 2. ADD BACK MATERIAL (Floor) */}
                 {shouldFill && (
-                    <Addition position={[localX, fillY + extrudeOffsetAdd, localZ]} rotation={rotation}>
+                    <Addition position={[localX, fillY, localZ]} rotation={rotThrough}>
                         {(() => {
-                            if (type === "cylinder") {
-                                return <cylinderGeometry args={[args[0] + CSG_EPSILON, args[1] + CSG_EPSILON, fillHeight, args[3]]} />;
+                            // Re-calculate basic shapes slightly expanded for robustness
+                            if (typeThrough === "cylinder") {
+                                const [rt, rb, h, s] = argsThrough;
+                                return <cylinderGeometry args={[rt + CSG_EPSILON, rb + CSG_EPSILON, fillHeight, s]} />;
                             }
-                            if (type === "box") {
-                                return <boxGeometry args={[args[0] + CSG_EPSILON, fillHeight, args[2] + CSG_EPSILON]} />;
+                            if (typeThrough === "box") {
+                                const [w, h, d] = argsThrough;
+                                return <boxGeometry args={[w + CSG_EPSILON, fillHeight, d + CSG_EPSILON]} />;
                             }
-                            if (type === "extrude") {
-                                // For lines/rounded rects, we need to regenerate the shape with slightly larger thickness for the fill
-                                // to ensure it bonds correctly to the walls.
+                            if (typeThrough === "extrude") {
+                                // Re-generate extruded shape with expansion
+                                // Note: We use the existing logic but override thickness or radius
                                 if (shape.type === "line") {
                                     const baseThick = evaluate((shape as FootprintLine).thickness, params);
                                     const thickShape = createLineShape(shape as FootprintLine, params, baseThick + CSG_EPSILON);
                                     if (!thickShape) return null;
-                                    return <extrudeGeometry args={[thickShape, { depth: fillHeight, bevelEnabled: false }]} />;
+                                    // We need to re-center the extrusion locally since fillY handles global Z
+                                    return (
+                                        <group position={[0, -fillHeight/2, 0]}>
+                                            <extrudeGeometry args={[thickShape, { depth: fillHeight, bevelEnabled: false }]} />
+                                        </group>
+                                    );
                                 } 
                                 else if (shape.type === "rect") {
-                                    // For rounded rect, expanding is slightly more complex than line thickness.
-                                    // We just expand width/height/radius slightly.
                                     const w = evaluate((shape as FootprintRect).width, params);
                                     const h = evaluate((shape as FootprintRect).height, params);
                                     const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
                                     const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
                                     
                                     const expandedShape = createRoundedRectShape(w + CSG_EPSILON, h + CSG_EPSILON, cr + CSG_EPSILON/2);
-                                    return <extrudeGeometry args={[expandedShape, { depth: fillHeight, bevelEnabled: false }]} />;
+                                    return (
+                                        <group position={[0, -fillHeight/2, 0]}>
+                                            <extrudeGeometry args={[expandedShape, { depth: fillHeight, bevelEnabled: false }]} />
+                                        </group>
+                                    );
                                 }
                             }
                             return null;
                         })()}
                     </Addition>
+                )}
+
+                {/* 3. ROUNDED CUT (Fillet) */}
+                {shouldRound && roundedCutArgs.length > 0 && (
+                     <Subtraction position={roundedCutPos} rotation={roundedCutRot}>
+                         <extrudeGeometry args={roundedCutArgs as any} />
+                     </Subtraction>
                 )}
              </React.Fragment>
           );
@@ -474,16 +597,13 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
                 if (py < lyMin) lyMin = py;
                 if (py > lyMax) lyMax = py;
             });
-            // Update global bounds directly with the line points + thickness
-            // Since line points are absolute, we don't add x/y (which are usually 0 for lines)
-            // But if x/y are set, we should respect them.
             if (lxMin < Infinity) {
                 if (lxMin + x - thick < minX) minX = lxMin + x - thick;
                 if (lxMax + x + thick > maxX) maxX = lxMax + x + thick;
                 if (lyMin + y - thick < minY) minY = lyMin + y - thick;
                 if (lyMax + y + thick > maxY) maxY = lyMax + y + thick;
             }
-            return; // Continue to next shape
+            return;
         }
 
         if (x - dx < minX) minX = x - dx;
