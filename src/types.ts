@@ -22,11 +22,19 @@ export interface StackupLayer {
 
 export type ShapeType = "circle" | "rect" | "line";
 
+export interface LayerAssignment {
+    depth: string;
+    endmillRadius: string;
+}
+
 export interface BaseShape {
   id: string;
   type: ShapeType;
   name: string;
-  assignedLayers: Record<string, string>;
+  // assignedLayers maps LayerID -> { depth, endmillRadius }
+  // We include 'string' in the type for backward compatibility during load, 
+  // but it is normalized to LayerAssignment in the app.
+  assignedLayers: Record<string, LayerAssignment | string>;
 }
 
 export interface FootprintCircle extends BaseShape {

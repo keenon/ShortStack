@@ -4,7 +4,7 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, FootprintInstance, BoardOutline } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, FootprintInstance, BoardOutline, LayerAssignment } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -146,11 +146,28 @@ function App() {
           if (!fp.id || !fp.shapes) needsUpgrade = true;
           const sanitizedShapes = (fp.shapes || []).map((s: any) => {
             if (!s.id || !s.assignedLayers || s.name === undefined) needsUpgrade = true;
+            
+            // Normalize Assigned Layers
+            const rawLayers = s.assignedLayers || {};
+            const assignedLayers: Record<string, LayerAssignment> = {};
+            Object.entries(rawLayers).forEach(([k, v]) => {
+                if (typeof v === "string") {
+                    assignedLayers[k] = { depth: v, endmillRadius: "0" };
+                    needsUpgrade = true;
+                } else {
+                    const obj = v as any;
+                    assignedLayers[k] = { 
+                        depth: obj.depth || "0", 
+                        endmillRadius: obj.endmillRadius || "0" 
+                    };
+                }
+            });
+
             const baseShape = {
               ...s,
               id: s.id || crypto.randomUUID(),
               name: s.name || "Unnamed Shape",
-              assignedLayers: s.assignedLayers || {},
+              assignedLayers: assignedLayers,
               x: s.x ?? "0",
               y: s.y ?? "0",
             };

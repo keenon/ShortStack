@@ -1,7 +1,7 @@
 // src/components/FootprintEditor.tsx
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import * as math from "mathjs";
-import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, FootprintLine, StackupLayer, Point } from "../types";
+import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, FootprintLine, StackupLayer, Point, LayerAssignment } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import './FootprintEditor.css';
@@ -79,8 +79,23 @@ export function modifyExpression(expression: string, delta: number): string {
 }
 
 // Evaluate math expressions to numbers (for visualization only)
-export function evaluateExpression(expression: string, params: Parameter[]): number {
-  if (!expression || !expression.trim()) return 0;
+// UPDATED: Accepts LayerAssignment object to prevent crashes in legacy renderers
+export function evaluateExpression(expression: string | LayerAssignment | undefined | null, params: Parameter[]): number {
+  if (!expression) return 0;
+
+  let exprStr = "";
+  if (typeof expression === 'object') {
+      if ('depth' in expression) {
+          exprStr = expression.depth;
+      } else {
+          return 0; 
+      }
+  } else {
+      exprStr = String(expression);
+  }
+
+  if (!exprStr || !exprStr.trim()) return 0;
+  
   try {
     const scope: Record<string, any> = {};
     params.forEach((p) => {
@@ -88,7 +103,7 @@ export function evaluateExpression(expression: string, params: Parameter[]): num
       const val = p.unit === "in" ? p.value * 25.4 : p.value;
       scope[p.key] = val;
     });
-    const result = math.evaluate(expression, scope);
+    const result = math.evaluate(exprStr, scope);
     if (typeof result === "number") return result;
     if (result && typeof result.toNumber === "function") return result.toNumber("mm");
     return 0;
@@ -161,7 +176,11 @@ const ShapeRenderer = ({
           fill = "black";
       } else {
           // Carved/Printed Layer: Outline in layer color, center fades to black based on depth
-          const depthVal = evaluateExpression(assigned[highestLayer.id], params);
+          // Handle both string (legacy) and LayerAssignment object
+          const rawAssignment = assigned[highestLayer.id];
+          const depthExpression = (typeof rawAssignment === 'string') ? rawAssignment : rawAssignment.depth;
+          
+          const depthVal = evaluateExpression(depthExpression, params);
           const thickVal = evaluateExpression(highestLayer.thicknessExpression, params);
           // Avoid divide by zero
           const ratio = (thickVal > 0.0001) ? (depthVal / thickVal) : 0;
@@ -365,6 +384,7 @@ const PropertiesPanel = ({
           {stackup.length === 0 && <div className="empty-hint">No stackup layers defined.</div>}
           {stackup.map((layer) => {
             const isChecked = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
+            const assignment = isChecked ? (shape.assignedLayers[layer.id] as LayerAssignment) : { depth: "0", endmillRadius: "0" };
             
             return (
               <div key={layer.id} className="layer-assignment-row">
@@ -375,7 +395,7 @@ const PropertiesPanel = ({
                     onChange={(e) => {
                         const newAssignments = { ...(shape.assignedLayers || {}) };
                         if (e.target.checked) {
-                            newAssignments[layer.id] = "0"; // Default depth
+                            newAssignments[layer.id] = { depth: "0", endmillRadius: "0" }; 
                         } else {
                             delete newAssignments[layer.id];
                         }
@@ -390,16 +410,34 @@ const PropertiesPanel = ({
                 
                 {isChecked && layer.type === "Carved/Printed" && (
                     <div className="layer-depth-wrapper">
-                        <ExpressionEditor 
-                            value={shape.assignedLayers[layer.id]}
-                            onChange={(val) => {
-                                const newAssignments = { ...shape.assignedLayers };
-                                newAssignments[layer.id] = val;
-                                updateShape(shape.id, "assignedLayers", newAssignments);
-                            }}
-                            params={params}
-                            placeholder="Depth"
-                        />
+                        <div style={{ display: 'flex', gap: '5px' }}>
+                            <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Depth</div>
+                                <ExpressionEditor 
+                                    value={assignment.depth}
+                                    onChange={(val) => {
+                                        const newAssignments = { ...shape.assignedLayers };
+                                        newAssignments[layer.id] = { ...assignment, depth: val };
+                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                    }}
+                                    params={params}
+                                    placeholder="Depth"
+                                />
+                            </div>
+                            <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Radius</div>
+                                <ExpressionEditor 
+                                    value={assignment.endmillRadius}
+                                    onChange={(val) => {
+                                        const newAssignments = { ...shape.assignedLayers };
+                                        newAssignments[layer.id] = { ...assignment, endmillRadius: val };
+                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                    }}
+                                    params={params}
+                                    placeholder="0"
+                                />
+                            </div>
+                        </div>
                     </div>
                 )}
               </div>
