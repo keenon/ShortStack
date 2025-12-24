@@ -3,7 +3,7 @@ use tauri::command;
 use tauri_plugin_shell::ShellExt;
 use std::f64::consts::PI;
 use geo::{Coord, LineString, MultiPolygon, Polygon};
-use geo::BooleanOps;
+// use geo::BooleanOps; // Replaced by csgrs
 use geo::bounding_rect::BoundingRect;
 use geo::MapCoords;
 use svg::Document;
@@ -11,6 +11,8 @@ use svg::node::element::{Path, Rectangle};
 use svg::node::element::path::Data;
 use std::fs::File;
 use std::io::Write;
+use csgrs::sketch::Sketch;
+use csgrs::traits::CSG; // Import CSG trait for union operations
 
 #[derive(Debug, serde::Deserialize)]
 struct ExportPoint {
@@ -95,19 +97,40 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
     let outline_ls = LineString::new(outline_coords);
     let board_poly = Polygon::new(outline_ls, vec![]);
 
-    // 2. Convert Shapes to MultiPolygon and Union
-    let mut united_shapes: MultiPolygon<f64> = MultiPolygon::new(vec![]);
+    // 2. Convert Shapes to Sketch and Union using csgrs
+    let mut united_sketch: Option<Sketch<()>> = None;
 
     for shape in &request.shapes {
         if let Some(poly) = shape_to_polygon(shape) {
-            let mp = MultiPolygon::new(vec![poly]);
-            if united_shapes.0.is_empty() {
-                united_shapes = mp;
+            // Convert geo::Polygon to Sketch
+            // Note: geo 0.29.3 and csgrs 0.20.1 are compatible
+            let geom = geo::Geometry::Polygon(poly);
+            // Convert Geometry to GeometryCollection using .into()
+            let shape_sketch = Sketch::from_geo(geom.into(), None); 
+
+            if let Some(current) = united_sketch {
+                united_sketch = Some(current.union(&shape_sketch));
             } else {
-                united_shapes = united_shapes.union(&mp);
+                united_sketch = Some(shape_sketch);
             }
         }
     }
+    
+    // 3. Convert Sketch back to MultiPolygon for export
+    let united_shapes = if let Some(sketch) = united_sketch {
+        let mut polys = Vec::new();
+        // Sketch contains a geo::GeometryCollection
+        for geom in sketch.geometry {
+            match geom {
+                geo::Geometry::Polygon(p) => polys.push(p),
+                geo::Geometry::MultiPolygon(mp) => polys.extend(mp.0),
+                _ => {} // Ignore other geometry types if any
+            }
+        }
+        MultiPolygon::new(polys)
+    } else {
+        MultiPolygon::new(vec![])
+    };
     
     Some((board_poly, united_shapes))
 }
