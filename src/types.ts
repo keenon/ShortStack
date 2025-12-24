@@ -45,6 +45,15 @@ export interface FootprintRect extends BaseShape {
   angle: string;
 }
 
+export interface Point {
+  id: string;
+  x: string;
+  y: string;
+  // Control points are relative to the anchor point (x, y)
+  handleIn?: { x: string; y: string };  // "Left" / Incoming handle
+  handleOut?: { x: string; y: string }; // "Right" / Outgoing handle
+}
+
 export interface FootprintLine extends BaseShape {
   type: "line";
   thickness: string;
@@ -68,13 +77,7 @@ export interface FootprintInstance {
   angle: string;       // Expression
 }
 
-// NEW: Board Outline types
-export interface Point {
-  id: string;
-  x: string;
-  y: string;
-}
-
+// Board Outline types
 export interface BoardOutline {
   points: Point[];
 }
@@ -84,5 +87,5 @@ export interface ProjectData {
   stackup: StackupLayer[];
   footprints: Footprint[];
   layout: FootprintInstance[];
-  boardOutline: BoardOutline; // Added Board Outline
+  boardOutline: BoardOutline; 
 }

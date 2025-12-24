@@ -131,12 +131,14 @@ const ShapeRenderer = ({
   params,
   stackup,
   onShapeDown,
+  onHandleDown,
 }: {
   shape: FootprintShape;
   isSelected: boolean;
   params: Parameter[];
   stackup: StackupLayer[];
-  onShapeDown: (e: React.MouseEvent, id: string) => void;
+  onShapeDown: (e: React.MouseEvent, id: string, pointIndex?: number) => void;
+  onHandleDown: (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => void;
 }) => {
   // Default styles (unassigned)
   let fill = isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)";
@@ -183,7 +185,6 @@ const ShapeRenderer = ({
     const r = evaluateExpression(shape.diameter, params) / 2;
     const cx = evaluateExpression(shape.x, params);
     const cy = evaluateExpression(shape.y, params);
-    // Y-axis flip: Negate cy to render Y-up in SVG
     return <circle cx={cx} cy={-cy} r={r} {...commonProps} />;
   }
 
@@ -194,12 +195,6 @@ const ShapeRenderer = ({
     const y = evaluateExpression(shape.y, params);
     const angle = evaluateExpression(shape.angle, params);
     
-    // Y-axis flip:
-    // Center is (x, -y).
-    // SVG Rect (x, y) is top-left.
-    // In Y-up: Top-Left is (x - w/2, y + h/2).
-    // Converted to SVG (negated Y): (x - w/2, -(y + h/2)) = (x - w/2, -y - h/2).
-    // Rotation: Negate angle (CCW becomes CW in SVG coord system, so -angle restores CCW visual)
     return (
       <rect
         x={x - w / 2}
@@ -215,25 +210,128 @@ const ShapeRenderer = ({
   if (shape.type === "line") {
       const thickness = evaluateExpression(shape.thickness, params);
       
-      const pointsStr = shape.points.map(p => {
-          const valX = evaluateExpression(p.x, params);
-          const valY = evaluateExpression(p.y, params);
-          // Y-axis flip: valY -> -valY
-          return `${valX},${-valY}`;
-      }).join(" ");
+      // Pre-evaluate all points
+      const pts = shape.points.map(p => ({
+          x: evaluateExpression(p.x, params),
+          y: evaluateExpression(p.y, params),
+          hIn: p.handleIn ? { 
+              x: evaluateExpression(p.handleIn.x, params), 
+              y: evaluateExpression(p.handleIn.y, params) 
+          } : null,
+          hOut: p.handleOut ? { 
+              x: evaluateExpression(p.handleOut.x, params), 
+              y: evaluateExpression(p.handleOut.y, params) 
+          } : null
+      }));
 
-      // Override fill to none for lines, and use evaluated thickness for strokeWidth
+      // Construct SVG Path 'd'
+      let d = "";
+      if (pts.length > 0) {
+          d = `M ${pts[0].x} ${-pts[0].y}`;
+          
+          for (let i = 0; i < pts.length - 1; i++) {
+              const curr = pts[i];
+              const next = pts[i+1];
+              
+              // Handle Out for current point (Control Point 1)
+              // If no handle, use current point
+              const cp1x = curr.x + (curr.hOut?.x || 0);
+              const cp1y = -(curr.y + (curr.hOut?.y || 0));
+
+              // Handle In for next point (Control Point 2)
+              // If no handle, use next point
+              const cp2x = next.x + (next.hIn?.x || 0);
+              const cp2y = -(next.y + (next.hIn?.y || 0));
+              
+              const endX = next.x;
+              const endY = -next.y;
+
+              d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${endX} ${endY}`;
+          }
+      }
+
+      // Render Handles only if selected
+      const handles = isSelected ? pts.map((pt, idx) => {
+          const elements = [];
+          
+          // Anchor Point
+          elements.push(
+              <circle 
+                  key={`anchor-${idx}`}
+                  cx={pt.x} cy={-pt.y} r={3/strokeWidth} // Scale radius slightly with zoom 
+                  fill="#fff" stroke="#646cff" strokeWidth={1}
+                  vectorEffect="non-scaling-stroke"
+                  onMouseDown={(e) => {
+                      e.stopPropagation();
+                      onShapeDown(e, shape.id, idx);
+                  }}
+              />
+          );
+
+          // Handle In
+          if (pt.hIn) {
+              const hx = pt.x + pt.hIn.x;
+              const hy = -(pt.y + pt.hIn.y);
+              elements.push(
+                  <line 
+                      key={`line-in-${idx}`}
+                      x1={pt.x} y1={-pt.y} x2={hx} y2={hy}
+                      stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke"
+                  />,
+                  <circle 
+                      key={`handle-in-${idx}`}
+                      cx={hx} cy={hy} r={2.5/strokeWidth}
+                      fill="#646cff"
+                      vectorEffect="non-scaling-stroke"
+                      style={{cursor: 'crosshair'}}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        onHandleDown(e, shape.id, idx, 'in');
+                      }}
+                  />
+              );
+          }
+
+          // Handle Out
+          if (pt.hOut) {
+              const hx = pt.x + pt.hOut.x;
+              const hy = -(pt.y + pt.hOut.y);
+              elements.push(
+                  <line 
+                      key={`line-out-${idx}`}
+                      x1={pt.x} y1={-pt.y} x2={hx} y2={hy}
+                      stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke"
+                  />,
+                  <circle 
+                      key={`handle-out-${idx}`}
+                      cx={hx} cy={hy} r={2.5/strokeWidth}
+                      fill="#646cff"
+                      vectorEffect="non-scaling-stroke"
+                      style={{cursor: 'crosshair'}}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        onHandleDown(e, shape.id, idx, 'out');
+                      }}
+                  />
+              );
+          }
+          return elements;
+      }) : null;
+
       return (
-          <polyline 
-              points={pointsStr} 
-              {...commonProps} 
-              fill="none" 
-              strokeWidth={thickness} 
-              strokeLinecap="round" 
-              strokeLinejoin="round" 
-              vectorEffect={undefined} // Remove non-scaling-stroke so thickness zooms physically
-              style={{ ...commonProps.style, opacity: isSelected ? 1 : 0.8 }}
-          />
+          <g>
+            <path 
+                d={d} 
+                {...commonProps} 
+                fill="none" 
+                strokeWidth={thickness} 
+                strokeLinecap="round" 
+                strokeLinejoin="round" 
+                vectorEffect={undefined} 
+                style={{ ...commonProps.style, opacity: isSelected ? 1 : 0.8 }}
+            />
+            {handles}
+          </g>
       );
   }
 
@@ -298,7 +396,6 @@ const PropertiesPanel = ({
                             params={params}
                             placeholder="Depth"
                         />
-                        {/* Removed separate result text as ExpressionEditor now shows it internally */}
                     </div>
                 )}
               </div>
@@ -400,9 +497,21 @@ const PropertiesPanel = ({
                 <label>Points</label>
                 <div className="points-list-container">
                     {(shape as FootprintLine).points.map((p, idx) => (
-                        <div key={p.id} className="point-row">
-                            <span className="point-idx">{idx + 1}</span>
-                            <div style={{flex: 1}}>
+                        <div key={p.id} className="point-block">
+                            <div className="point-header">
+                                <span>Point {idx + 1}</span>
+                                <button 
+                                    className="icon-btn danger" 
+                                    onClick={() => {
+                                        const newPoints = (shape as FootprintLine).points.filter((_, i) => i !== idx);
+                                        updateShape(shape.id, "points", newPoints);
+                                    }}
+                                    title="Remove Point"
+                                >×</button>
+                            </div>
+                            
+                            <div className="point-row full">
+                                <span className="label">X</span>
                                 <ExpressionEditor 
                                     value={p.x}
                                     onChange={(val) => {
@@ -414,7 +523,8 @@ const PropertiesPanel = ({
                                     placeholder="X"
                                 />
                             </div>
-                            <div style={{flex: 1}}>
+                            <div className="point-row full">
+                                <span className="label">Y</span>
                                 <ExpressionEditor 
                                     value={p.y}
                                     onChange={(val) => {
@@ -426,14 +536,117 @@ const PropertiesPanel = ({
                                     placeholder="Y"
                                 />
                             </div>
-                            <button 
-                                className="icon-btn danger" 
-                                onClick={() => {
-                                    const newPoints = (shape as FootprintLine).points.filter((_, i) => i !== idx);
-                                    updateShape(shape.id, "points", newPoints);
-                                }}
-                                title="Remove Point"
-                            >×</button>
+
+                            <div className="point-controls-toggles">
+                                <label className="checkbox-label">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={!!p.handleIn}
+                                        onChange={(e) => {
+                                            const newPoints = [...(shape as FootprintLine).points];
+                                            if (e.target.checked) {
+                                                newPoints[idx] = { ...p, handleIn: { x: "-5", y: "0" } };
+                                            } else {
+                                                const pt = { ...p };
+                                                delete pt.handleIn;
+                                                newPoints[idx] = pt;
+                                            }
+                                            updateShape(shape.id, "points", newPoints);
+                                        }}
+                                    /> In Handle
+                                </label>
+                                <label className="checkbox-label">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={!!p.handleOut}
+                                        onChange={(e) => {
+                                            const newPoints = [...(shape as FootprintLine).points];
+                                            if (e.target.checked) {
+                                                newPoints[idx] = { ...p, handleOut: { x: "5", y: "0" } };
+                                            } else {
+                                                const pt = { ...p };
+                                                delete pt.handleOut;
+                                                newPoints[idx] = pt;
+                                            }
+                                            updateShape(shape.id, "points", newPoints);
+                                        }}
+                                    /> Out Handle
+                                </label>
+                            </div>
+
+                            {p.handleIn && (
+                                <div className="handle-sub-block">
+                                    <div className="sub-label">Handle In (Relative)</div>
+                                    <div className="handle-inputs">
+                                        <div className="mini-input">
+                                            <span>dX</span>
+                                            <ExpressionEditor 
+                                                value={p.handleIn.x}
+                                                onChange={(val) => {
+                                                    const newPoints = [...(shape as FootprintLine).points];
+                                                    // Ensure object exists
+                                                    if (newPoints[idx].handleIn) {
+                                                        newPoints[idx].handleIn!.x = val;
+                                                        updateShape(shape.id, "points", newPoints);
+                                                    }
+                                                }}
+                                                params={params}
+                                            />
+                                        </div>
+                                        <div className="mini-input">
+                                            <span>dY</span>
+                                            <ExpressionEditor 
+                                                value={p.handleIn.y}
+                                                onChange={(val) => {
+                                                    const newPoints = [...(shape as FootprintLine).points];
+                                                    if (newPoints[idx].handleIn) {
+                                                        newPoints[idx].handleIn!.y = val;
+                                                        updateShape(shape.id, "points", newPoints);
+                                                    }
+                                                }}
+                                                params={params}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {p.handleOut && (
+                                <div className="handle-sub-block">
+                                    <div className="sub-label">Handle Out (Relative)</div>
+                                    <div className="handle-inputs">
+                                        <div className="mini-input">
+                                            <span>dX</span>
+                                            <ExpressionEditor 
+                                                value={p.handleOut.x}
+                                                onChange={(val) => {
+                                                    const newPoints = [...(shape as FootprintLine).points];
+                                                    if (newPoints[idx].handleOut) {
+                                                        newPoints[idx].handleOut!.x = val;
+                                                        updateShape(shape.id, "points", newPoints);
+                                                    }
+                                                }}
+                                                params={params}
+                                            />
+                                        </div>
+                                        <div className="mini-input">
+                                            <span>dY</span>
+                                            <ExpressionEditor 
+                                                value={p.handleOut.y}
+                                                onChange={(val) => {
+                                                    const newPoints = [...(shape as FootprintLine).points];
+                                                    if (newPoints[idx].handleOut) {
+                                                        newPoints[idx].handleOut!.y = val;
+                                                        updateShape(shape.id, "points", newPoints);
+                                                    }
+                                                }}
+                                                params={params}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                         </div>
                     ))}
                     <button 
@@ -645,7 +858,14 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   const shapeDragStartPos = useRef({ x: 0, y: 0 });
   // Store the FULL shape object state at start of drag
   const shapeDragStartData = useRef<FootprintShape | null>(null);
-  const draggedShapeId = useRef<string | null>(null);
+  
+  // Drag Target Info
+  const dragTargetRef = useRef<{ 
+      id: string; 
+      pointIdx?: number; 
+      handleType?: 'in' | 'out'; 
+  } | null>(null);
+
 
   // Sync ref with state
   useEffect(() => {
@@ -786,7 +1006,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
   // --- SHAPE DRAG HANDLERS ---
 
-  const handleShapeMouseDown = (e: React.MouseEvent, id: string) => {
+  const handleShapeMouseDown = (e: React.MouseEvent, id: string, pointIndex?: number) => {
       // Stop propagation to prevent Panning from starting
       e.stopPropagation(); 
       e.preventDefault();
@@ -801,7 +1021,8 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
       // Initialize Drag State
       isShapeDragging.current = true;
-      draggedShapeId.current = id;
+      dragTargetRef.current = { id, pointIdx: pointIndex }; // type undefined = entire shape/anchor
+
       shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
       
       // Deep clone to store initial state
@@ -812,8 +1033,27 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       window.addEventListener('mouseup', handleShapeMouseUp);
   };
 
+  const handleHandleMouseDown = (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => {
+      e.stopPropagation();
+      e.preventDefault();
+      
+      if (viewMode !== "2D") return;
+
+      setSelectedShapeId(id);
+      const shape = footprint.shapes.find(s => s.id === id);
+      if (!shape) return;
+
+      isShapeDragging.current = true;
+      dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
+      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+      shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
+
+      window.addEventListener('mousemove', handleShapeMouseMove);
+      window.addEventListener('mouseup', handleShapeMouseUp);
+  };
+
   const handleShapeMouseMove = (e: MouseEvent) => {
-      if (!isShapeDragging.current || !wrapperRef.current || !draggedShapeId.current || !shapeDragStartData.current) return;
+      if (!isShapeDragging.current || !wrapperRef.current || !dragTargetRef.current || !shapeDragStartData.current) return;
 
       const rect = wrapperRef.current.getBoundingClientRect();
       const scaleX = viewBoxRef.current.width / rect.width;
@@ -827,26 +1067,65 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       const dyWorld = -dyPx * scaleY;
 
       const currentFP = footprintRef.current;
-      const targetId = draggedShapeId.current;
+      const { id, pointIdx, handleType } = dragTargetRef.current;
       const startShape = shapeDragStartData.current;
 
       const updatedShapes = currentFP.shapes.map(s => {
-          if (s.id === targetId) {
+          if (s.id === id) {
+              
               if (s.type === "line" && startShape.type === "line") {
-                  // For Line: Update all points
-                  const newPoints = startShape.points.map(p => ({
-                      ...p,
-                      x: modifyExpression(p.x, dxWorld),
-                      y: modifyExpression(p.y, dyWorld)
-                  }));
+                  const newPoints = [...startShape.points];
+                  
+                  if (handleType && pointIdx !== undefined) {
+                      // Dragging a Control Handle (Relative update)
+                      const p = newPoints[pointIdx];
+                      if (handleType === 'in' && p.handleIn) {
+                          newPoints[pointIdx] = {
+                              ...p,
+                              handleIn: {
+                                  x: modifyExpression(p.handleIn.x, dxWorld),
+                                  y: modifyExpression(p.handleIn.y, dyWorld)
+                              }
+                          };
+                      } else if (handleType === 'out' && p.handleOut) {
+                          newPoints[pointIdx] = {
+                              ...p,
+                              handleOut: {
+                                  x: modifyExpression(p.handleOut.x, dxWorld),
+                                  y: modifyExpression(p.handleOut.y, dyWorld)
+                              }
+                          };
+                      }
+                  } else if (pointIdx !== undefined) {
+                      // Dragging a specific Point (Line vertex)
+                      const p = newPoints[pointIdx];
+                      newPoints[pointIdx] = {
+                          ...p,
+                          x: modifyExpression(p.x, dxWorld),
+                          y: modifyExpression(p.y, dyWorld)
+                      };
+                  } else {
+                      // Dragging entire Line shape (all points)
+                      const allMoved = newPoints.map(p => ({
+                          ...p,
+                          x: modifyExpression(p.x, dxWorld),
+                          y: modifyExpression(p.y, dyWorld)
+                      }));
+                      return { ...s, points: allMoved };
+                  }
+
                   return { ...s, points: newPoints };
-              } else if (startShape.type === "circle" || startShape.type === "rect") {
-                  // For Circle/Rect: Update center
-                  return { 
-                      ...s, 
-                      x: modifyExpression(startShape.x, dxWorld), 
-                      y: modifyExpression(startShape.y, dyWorld) 
-                  };
+              } 
+              
+              // Standard Shapes (Circle/Rect)
+              if (pointIdx === undefined && !handleType) {
+                   if (startShape.type === "circle" || startShape.type === "rect") {
+                      return { 
+                          ...s, 
+                          x: modifyExpression(startShape.x, dxWorld), 
+                          y: modifyExpression(startShape.y, dyWorld) 
+                      };
+                  }
               }
           }
           return s;
@@ -857,7 +1136,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
   const handleShapeMouseUp = (e: MouseEvent) => {
       isShapeDragging.current = false;
-      draggedShapeId.current = null;
+      dragTargetRef.current = null;
       shapeDragStartData.current = null;
       window.removeEventListener('mousemove', handleShapeMouseMove);
       window.removeEventListener('mouseup', handleShapeMouseUp);
@@ -1112,11 +1391,12 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                                 params={params}
                                 stackup={stackup}
                                 onShapeDown={handleShapeMouseDown}
+                                onHandleDown={handleHandleMouseDown}
                             />
                         );
                     })}
                 </svg>
-                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
+                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan | Drag Handles</div>
             </div>
             
             {/* 3D VIEW - Persist when hidden */}
