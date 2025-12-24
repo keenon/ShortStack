@@ -561,6 +561,19 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
         });
     });
 
+    // 2. Prepare STL Data if needed
+    let stlContent: number[] | null = null;
+    if (format === "STL") {
+        const raw = layout3DRef.current?.getLayerSTL(layerId);
+        if (raw) {
+            // Convert Uint8Array to normal array for invoke compatibility
+            stlContent = Array.from(raw);
+        } else {
+             alert("Warning: Could not retrieve 3D mesh for STL export. Ensure the layer is visible in the 3D preview.");
+             return;
+        }
+    }
+
     // 3. Send to Rust
     try {
         await invoke("export_layer_files", {
@@ -571,7 +584,8 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                 cut_direction: layer.carveSide,
                 outline,
                 shapes,
-                layer_thickness: layerThickness
+                layer_thickness: layerThickness,
+                stl_content: stlContent
             }
         });
         alert(`Export initiated for ${path}`);

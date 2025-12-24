@@ -13,22 +13,15 @@ interface Props {
   footprints: Footprint[];
   params: Parameter[];
   stackup: StackupLayer[];
-  visibleLayers?: Record<string, boolean>; // NEW PROP
+  visibleLayers?: Record<string, boolean>;
 }
 
 export interface Layout3DViewHandle {
     resetCamera: () => void;
+    getLayerSTL: (layerId: string) => Uint8Array | null;
 }
 
-const LayerVolume = ({
-    layer,
-    layout,
-    footprints,
-    params,
-    boardShape,
-    bottomZ, // World Y
-    thickness
-}: {
+interface LayerVolumeProps {
     layer: StackupLayer;
     layout: FootprintInstance[];
     footprints: Footprint[];
@@ -36,7 +29,17 @@ const LayerVolume = ({
     boardShape: THREE.Shape;
     bottomZ: number;
     thickness: number;
-}) => {
+}
+
+const LayerVolume = forwardRef<THREE.Mesh, LayerVolumeProps>(({
+    layer,
+    layout,
+    footprints,
+    params,
+    boardShape,
+    bottomZ, // World Y
+    thickness
+}, ref) => {
     // We construct the geometry in a Local Space where:
     // Local X = World X
     // Local Y = World Z (Depth)
@@ -44,6 +47,7 @@ const LayerVolume = ({
     
     return (
         <mesh 
+            ref={ref}
             rotation={[-Math.PI / 2, 0, 0]} 
             position={[0, bottomZ, 0]} 
         >
@@ -66,15 +70,6 @@ const LayerVolume = ({
                     const sinA = Math.sin(instAngleRad);
 
                     // Reverse shapes to match "Top overwrites Bottom" logic
-                    // The last CSG operation (Addition/Subtraction) wins.
-                    // Index 0 is "Top", so it should be processed last (or first in this reversed list?)
-                    // In Footprint3DView, we reversed the list.
-                    // If A overwrites B, A must happen AFTER B.
-                    // If Index 0 is Top (A) and Index 1 is Bottom (B).
-                    // We want [B, A] execution order.
-                    // fp.shapes is [A, B].
-                    // fp.shapes.reverse() is [B, A].
-                    // So we iterate the reversed array.
                     const orderedShapes = [...fp.shapes].reverse();
 
                     return orderedShapes.map(shape => {
@@ -97,14 +92,6 @@ const LayerVolume = ({
                          
                          // A. Through Cut (Removes all material in the shape's footprint)
                          const throughHeight = thickness + 0.2; 
-                         // Center of the board in Local Z (which is 0..thickness)
-                         // Actually extrusion starts at 0 and goes to `depth` (thickness).
-                         // So 0 is bottom (in local coords) or top?
-                         // extrudeGeometry with depth > 0 extrudes along +Z.
-                         // So Z=0 is one face, Z=thickness is the other.
-                         // We position the board at `bottomZ`.
-                         // Local Z=0 corresponds to World Y = bottomZ.
-                         // Local Z=thickness corresponds to World Y = bottomZ + thickness (Top).
                          
                          const throughZ = thickness / 2; // Center of cut box
 
@@ -117,13 +104,9 @@ const LayerVolume = ({
                          if (shouldFill) {
                              if (layer.carveSide === "Top") {
                                  // Carving from Top (Local Z = thickness).
-                                 // Material remains at Bottom (Local Z = 0).
-                                 // Fill center = fillHeight / 2.
                                  fillZ = fillHeight / 2;
                              } else {
                                  // Carving from Bottom (Local Z = 0).
-                                 // Material remains at Top (Local Z = thickness).
-                                 // Fill center = thickness - (fillHeight / 2).
                                  fillZ = thickness - (fillHeight / 2);
                              }
                          }
@@ -193,16 +176,22 @@ const LayerVolume = ({
              <meshStandardMaterial color={layer.color} transparent opacity={0.9} />
         </mesh>
     );
-};
+});
 
 const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutline, footprints, params, stackup, visibleLayers }, ref) => {
   const controlsRef = useRef<any>(null);
+  const meshRefs = useRef<Record<string, THREE.Mesh>>({});
 
   useImperativeHandle(ref, () => ({
     resetCamera: () => {
         if (controlsRef.current) {
             controlsRef.current.reset();
         }
+    },
+    getLayerSTL: (layerId: string) => {
+        const mesh = meshRefs.current[layerId];
+        if (!mesh) return null;
+        return geometryToSTL(mesh.geometry);
     }
   }));
 
@@ -242,6 +231,10 @@ const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutli
               const node = isVisible ? (
                 <LayerVolume 
                   key={layer.id}
+                  ref={(el) => {
+                      if (el) meshRefs.current[layer.id] = el;
+                      else delete meshRefs.current[layer.id];
+                  }}
                   layer={layer}
                   layout={layout}
                   footprints={footprints}
@@ -273,5 +266,103 @@ const Layout3DView = forwardRef<Layout3DViewHandle, Props>(({ layout, boardOutli
     </div>
   );
 });
+
+// Helper to generate Binary STL from Three.js BufferGeometry
+// Note: This exports the geometry in its LOCAL coordinates. 
+// For LayerVolume, Local coordinates are:
+// X = Design X
+// Y = Design Y
+// Z = Thickness (Extrusion Direction)
+// This perfectly maps to STL standard (Z is up/thickness).
+function geometryToSTL(geometry: THREE.BufferGeometry): Uint8Array {
+    // Ensure non-indexed geometry for simplicity
+    const geom = geometry.toNonIndexed();
+    const pos = geom.getAttribute('position');
+    const count = pos.count; // Number of vertices
+    const triangleCount = Math.floor(count / 3);
+
+    // Binary STL Header: 80 bytes (Header) + 4 bytes (Count) + 50 bytes per triangle
+    const bufferLen = 80 + 4 + (50 * triangleCount);
+    const buffer = new ArrayBuffer(bufferLen);
+    const view = new DataView(buffer);
+
+    // Header (80 bytes) - leaving zeroed or add text
+    // ...
+
+    // Triangle Count (4 bytes, little endian)
+    view.setUint32(80, triangleCount, true);
+
+    let offset = 84;
+    for (let i = 0; i < triangleCount; i++) {
+        const i3 = i * 3;
+
+        // Vertices
+        const ax = pos.getX(i3);
+        const ay = pos.getY(i3);
+        const az = pos.getZ(i3);
+
+        const bx = pos.getX(i3 + 1);
+        const by = pos.getY(i3 + 1);
+        const bz = pos.getZ(i3 + 1);
+
+        const cx = pos.getX(i3 + 2);
+        const cy = pos.getY(i3 + 2);
+        const cz = pos.getZ(i3 + 2);
+
+        // Calculate Normal (Cross product)
+        const ux = bx - ax;
+        const uy = by - ay;
+        const uz = bz - az;
+        
+        const vx = cx - ax;
+        const vy = cy - ay;
+        const vz = cz - az;
+
+        let nx = uy * vz - uz * vy;
+        let ny = uz * vx - ux * vz;
+        let nz = ux * vy - uy * vx;
+
+        // Normalize
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (len > 0) {
+            nx /= len; ny /= len; nz /= len;
+        }
+
+        // Write Normal (12 bytes)
+        view.setFloat32(offset, nx, true);
+        view.setFloat32(offset + 4, ny, true);
+        view.setFloat32(offset + 8, nz, true);
+        offset += 12;
+
+        // Write Vertex 1 (12 bytes)
+        view.setFloat32(offset, ax, true);
+        view.setFloat32(offset + 4, ay, true);
+        view.setFloat32(offset + 8, az, true);
+        offset += 12;
+
+        // Write Vertex 2 (12 bytes)
+        view.setFloat32(offset, bx, true);
+        view.setFloat32(offset + 4, by, true);
+        view.setFloat32(offset + 8, bz, true);
+        offset += 12;
+
+        // Write Vertex 3 (12 bytes)
+        view.setFloat32(offset, cx, true);
+        view.setFloat32(offset + 4, cy, true);
+        view.setFloat32(offset + 8, cz, true);
+        offset += 12;
+
+        // Attribute Byte Count (2 bytes)
+        view.setUint16(offset, 0, true);
+        offset += 2;
+    }
+
+    // Clean up temporary geometry if created
+    if (geom !== geometry) {
+        geom.dispose();
+    }
+
+    return new Uint8Array(buffer);
+}
 
 export default Layout3DView;

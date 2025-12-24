@@ -1,9 +1,7 @@
 // src-tauri/src/lib.rs
 use tauri::command;
-// use tauri_plugin_shell::ShellExt; // Removed unused import
 use std::f64::consts::PI;
 use geo::{Coord, LineString, MultiPolygon, Polygon};
-// use geo::BooleanOps; // Replaced by csgrs
 use geo::bounding_rect::BoundingRect;
 use geo::MapCoords;
 use svg::Document;
@@ -12,8 +10,8 @@ use svg::node::element::path::Data;
 use std::fs::File;
 use std::io::Write;
 use csgrs::sketch::Sketch;
-use csgrs::mesh::Mesh; // Added Mesh import
-use csgrs::traits::CSG; // Import CSG trait for union operations
+use csgrs::mesh::Mesh; 
+use csgrs::traits::CSG; 
 
 #[derive(Debug, serde::Deserialize)]
 struct ExportPoint {
@@ -42,6 +40,7 @@ struct ExportRequest {
     outline: Vec<ExportPoint>,
     shapes: Vec<ExportShape>,
     layer_thickness: f64,
+    stl_content: Option<Vec<u8>>, // New Field for binary STL data
 }
 
 #[command]
@@ -58,6 +57,25 @@ fn export_layer_files(request: ExportRequest) {
         println!("Sample Shape 1: {:?}", s);
     }
     println!("-------------------------------");
+
+    if request.file_type == "STL" {
+        if let Some(content) = &request.stl_content {
+            // Write the pre-computed STL data from Typescript directly to file
+            match File::create(&request.filepath) {
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(content) {
+                         eprintln!("Error writing STL file: {}", e);
+                    } else {
+                         println!("STL export successful (Using pre-computed mesh).");
+                    }
+                },
+                Err(e) => eprintln!("Error creating file for STL: {}", e),
+            }
+        } else {
+             eprintln!("STL export requested but no mesh content provided.");
+        }
+        return;
+    }
 
     if request.file_type == "SVG" {
         if request.machining_type == "Carved/Printed" {
@@ -80,12 +98,6 @@ fn export_layer_files(request: ExportRequest) {
             eprintln!("Error generating DXF: {}", e);
         } else {
             println!("DXF export successful.");
-        }
-    } else if request.file_type == "STL" {
-        if let Err(e) = generate_stl(&request) {
-            eprintln!("Error generating STL: {}", e);
-        } else {
-            println!("STL export successful.");
         }
     }
 }
@@ -337,105 +349,6 @@ fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
     }
 
     writeln!(file, "  0\nENDSEC\n  0\nEOF")?;
-
-    Ok(())
-}
-
-fn generate_stl(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Board Base
-    // Convert outline to Polygon
-    let outline_coords: Vec<Coord<f64>> = request.outline.iter()
-        .map(|p| Coord { x: p.x, y: p.y })
-        .collect();
-
-    if outline_coords.is_empty() {
-        return Err("Board outline is empty".into());
-    }
-
-    let outline_ls = LineString::new(outline_coords);
-    let board_poly = Polygon::new(outline_ls, vec![]);
-
-    // Convert to Sketch and Extrude
-    // Note: Extrude Z+ from 0 to thickness.
-    let geom: geo::Geometry<f64> = board_poly.into();
-    // FIX: Convert Geometry to GeometryCollection for Sketch::from_geo
-    let sketch = Sketch::from_geo(geom.into(), None);
-    let mut board_mesh: Mesh<()> = sketch.extrude(request.layer_thickness);
-
-    // 2. Iterate Shapes
-    // We iterate in the order provided (which corresponds to Bottom-to-Top visual order from frontend)
-    // so that later shapes (Top) cut/overwrite earlier shapes (Bottom).
-    for shape in &request.shapes {
-        let actual_depth = shape.depth;
-        let fill_height = request.layer_thickness - actual_depth;
-        let should_fill = fill_height > 0.001;
-        
-        let through_height = request.layer_thickness + 0.2;
-        let through_z = request.layer_thickness / 2.0;
-
-        // Create Primitive for the shape
-        // We create it centered at Origin, then scale, rotate, translate.
-        let mut shape_primitive: Mesh<()> = if shape.shape_type == "circle" {
-             let diameter = shape.diameter.unwrap_or(1.0);
-             // Cylinder: radius, height, segments, metadata
-             Mesh::cylinder(diameter / 2.0, through_height, 32, None)
-        } else {
-             // Rect: Cube scaled to (w, h, height)
-             let w = shape.width.unwrap_or(1.0);
-             let h = shape.height.unwrap_or(1.0);
-             Mesh::cube(1.0, None).scale(w, h, through_height)
-        };
-
-        // Rotation (around Z axis)
-        if let Some(angle_deg) = shape.angle {
-            let angle_rad = angle_deg.to_radians();
-            // rotate(x, y, z) - Euler angles usually
-            shape_primitive = shape_primitive.rotate(0.0, 0.0, angle_rad);
-        }
-
-        // Translation to Position
-        // We place the through-cut centered at thickness/2 in Z.
-        shape_primitive = shape_primitive.translate(shape.x, shape.y, through_z);
-
-        // A. Subtract the full "through" hole
-        board_mesh = board_mesh.difference(&shape_primitive);
-
-        // B. Add Fill if needed
-        if should_fill {
-            let mut fill_primitive: Mesh<()> = if shape.shape_type == "circle" {
-                 let diameter = shape.diameter.unwrap_or(1.0);
-                 Mesh::cylinder(diameter / 2.0, fill_height, 32, None)
-            } else {
-                 let w = shape.width.unwrap_or(1.0);
-                 let h = shape.height.unwrap_or(1.0);
-                 Mesh::cube(1.0, None).scale(w, h, fill_height)
-            };
-
-            // Rotation
-            if let Some(angle_deg) = shape.angle {
-                let angle_rad = angle_deg.to_radians();
-                fill_primitive = fill_primitive.rotate(0.0, 0.0, angle_rad);
-            }
-
-            // Calculate Fill Z Position
-            let fill_z = if request.cut_direction == "Top" {
-                 // Carving from Top: Material remains at Bottom (0..fillHeight)
-                 fill_height / 2.0
-            } else {
-                 // Carving from Bottom: Material remains at Top (thickness-fillHeight..thickness)
-                 request.layer_thickness - (fill_height / 2.0)
-            };
-
-            fill_primitive = fill_primitive.translate(shape.x, shape.y, fill_z);
-
-            // Union
-            board_mesh = board_mesh.union(&fill_primitive);
-        }
-    }
-
-    // 3. Write STL
-    let stl_string = board_mesh.to_stl_ascii("exported_layer");
-    std::fs::write(&request.filepath, stl_string)?;
 
     Ok(())
 }
