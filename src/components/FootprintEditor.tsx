@@ -1,7 +1,7 @@
 // src/components/FootprintEditor.tsx
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import * as math from "mathjs";
-import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, StackupLayer } from "../types";
+import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, FootprintLine, StackupLayer, Point } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import './FootprintEditor.css';
@@ -212,6 +212,31 @@ const ShapeRenderer = ({
     );
   }
 
+  if (shape.type === "line") {
+      const thickness = evaluateExpression(shape.thickness, params);
+      
+      const pointsStr = shape.points.map(p => {
+          const valX = evaluateExpression(p.x, params);
+          const valY = evaluateExpression(p.y, params);
+          // Y-axis flip: valY -> -valY
+          return `${valX},${-valY}`;
+      }).join(" ");
+
+      // Override fill to none for lines, and use evaluated thickness for strokeWidth
+      return (
+          <polyline 
+              points={pointsStr} 
+              {...commonProps} 
+              fill="none" 
+              strokeWidth={thickness} 
+              strokeLinecap="round" 
+              strokeLinejoin="round" 
+              vectorEffect={undefined} // Remove non-scaling-stroke so thickness zooms physically
+              style={{ ...commonProps.style, opacity: isSelected ? 1 : 0.8 }}
+          />
+      );
+  }
+
   return null;
 };
 
@@ -291,25 +316,29 @@ const PropertiesPanel = ({
         />
       </div>
 
-      <div className="prop-group">
-        <label>Center X</label>
-        <ExpressionEditor
-          value={shape.x}
-          onChange={(val) => updateShape(shape.id, "x", val)}
-          params={params}
-          placeholder="0"
-        />
-      </div>
+      {shape.type !== "line" && (
+        <>
+          <div className="prop-group">
+            <label>Center X</label>
+            <ExpressionEditor
+              value={(shape as FootprintCircle | FootprintRect).x}
+              onChange={(val) => updateShape(shape.id, "x", val)}
+              params={params}
+              placeholder="0"
+            />
+          </div>
 
-      <div className="prop-group">
-        <label>Center Y</label>
-        <ExpressionEditor
-          value={shape.y}
-          onChange={(val) => updateShape(shape.id, "y", val)}
-          params={params}
-          placeholder="0"
-        />
-      </div>
+          <div className="prop-group">
+            <label>Center Y</label>
+            <ExpressionEditor
+              value={(shape as FootprintCircle | FootprintRect).y}
+              onChange={(val) => updateShape(shape.id, "y", val)}
+              params={params}
+              placeholder="0"
+            />
+          </div>
+        </>
+      )}
 
       {shape.type === "circle" && (
         <div className="prop-group">
@@ -352,6 +381,79 @@ const PropertiesPanel = ({
               placeholder="0"
             />
           </div>
+        </>
+      )}
+
+      {shape.type === "line" && (
+        <>
+            <div className="prop-group">
+                <label>Thickness</label>
+                <ExpressionEditor
+                    value={(shape as FootprintLine).thickness}
+                    onChange={(val) => updateShape(shape.id, "thickness", val)}
+                    params={params}
+                    placeholder="1"
+                />
+            </div>
+            
+            <div className="prop-group">
+                <label>Points</label>
+                <div className="points-list-container">
+                    {(shape as FootprintLine).points.map((p, idx) => (
+                        <div key={p.id} className="point-row">
+                            <span className="point-idx">{idx + 1}</span>
+                            <div style={{flex: 1}}>
+                                <ExpressionEditor 
+                                    value={p.x}
+                                    onChange={(val) => {
+                                        const newPoints = [...(shape as FootprintLine).points];
+                                        newPoints[idx] = { ...p, x: val };
+                                        updateShape(shape.id, "points", newPoints);
+                                    }}
+                                    params={params}
+                                    placeholder="X"
+                                />
+                            </div>
+                            <div style={{flex: 1}}>
+                                <ExpressionEditor 
+                                    value={p.y}
+                                    onChange={(val) => {
+                                        const newPoints = [...(shape as FootprintLine).points];
+                                        newPoints[idx] = { ...p, y: val };
+                                        updateShape(shape.id, "points", newPoints);
+                                    }}
+                                    params={params}
+                                    placeholder="Y"
+                                />
+                            </div>
+                            <button 
+                                className="icon-btn danger" 
+                                onClick={() => {
+                                    const newPoints = (shape as FootprintLine).points.filter((_, i) => i !== idx);
+                                    updateShape(shape.id, "points", newPoints);
+                                }}
+                                title="Remove Point"
+                            >×</button>
+                        </div>
+                    ))}
+                    <button 
+                        className="secondary small-btn" 
+                        onClick={() => {
+                            const newPoints = [...(shape as FootprintLine).points];
+                            // Add new point slightly offset from last one
+                            const last = newPoints[newPoints.length - 1] || { x: "0", y: "0" };
+                            newPoints.push({
+                                id: crypto.randomUUID(),
+                                x: modifyExpression(last.x, 5),
+                                y: modifyExpression(last.y, 5),
+                            });
+                            updateShape(shape.id, "points", newPoints);
+                        }}
+                    >
+                        + Add Point
+                    </button>
+                </div>
+            </div>
         </>
       )}
     </div>
@@ -541,7 +643,8 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   // Shape Dragging State Refs (Moving Components)
   const isShapeDragging = useRef(false);
   const shapeDragStartPos = useRef({ x: 0, y: 0 });
-  const shapeDragStartExpr = useRef({ x: "0", y: "0" });
+  // Store the FULL shape object state at start of drag
+  const shapeDragStartData = useRef<FootprintShape | null>(null);
   const draggedShapeId = useRef<string | null>(null);
 
   // Sync ref with state
@@ -700,7 +803,9 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       isShapeDragging.current = true;
       draggedShapeId.current = id;
       shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
-      shapeDragStartExpr.current = { x: shape.x, y: shape.y };
+      
+      // Deep clone to store initial state
+      shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
 
       // Attach Global Listeners for Dragging
       window.addEventListener('mousemove', handleShapeMouseMove);
@@ -708,7 +813,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   };
 
   const handleShapeMouseMove = (e: MouseEvent) => {
-      if (!isShapeDragging.current || !wrapperRef.current || !draggedShapeId.current) return;
+      if (!isShapeDragging.current || !wrapperRef.current || !draggedShapeId.current || !shapeDragStartData.current) return;
 
       const rect = wrapperRef.current.getBoundingClientRect();
       const scaleX = viewBoxRef.current.width / rect.width;
@@ -723,14 +828,26 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
       const currentFP = footprintRef.current;
       const targetId = draggedShapeId.current;
-      const startExpr = shapeDragStartExpr.current;
-
-      const newX = modifyExpression(startExpr.x, dxWorld);
-      const newY = modifyExpression(startExpr.y, dyWorld);
+      const startShape = shapeDragStartData.current;
 
       const updatedShapes = currentFP.shapes.map(s => {
           if (s.id === targetId) {
-              return { ...s, x: newX, y: newY };
+              if (s.type === "line" && startShape.type === "line") {
+                  // For Line: Update all points
+                  const newPoints = startShape.points.map(p => ({
+                      ...p,
+                      x: modifyExpression(p.x, dxWorld),
+                      y: modifyExpression(p.y, dyWorld)
+                  }));
+                  return { ...s, points: newPoints };
+              } else if (startShape.type === "circle" || startShape.type === "rect") {
+                  // For Circle/Rect: Update center
+                  return { 
+                      ...s, 
+                      x: modifyExpression(startShape.x, dxWorld), 
+                      y: modifyExpression(startShape.y, dyWorld) 
+                  };
+              }
           }
           return s;
       });
@@ -741,13 +858,14 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   const handleShapeMouseUp = (e: MouseEvent) => {
       isShapeDragging.current = false;
       draggedShapeId.current = null;
+      shapeDragStartData.current = null;
       window.removeEventListener('mousemove', handleShapeMouseMove);
       window.removeEventListener('mouseup', handleShapeMouseUp);
   };
 
   // --- ACTIONS ---
 
-  const addShape = (type: "circle" | "rect") => {
+  const addShape = (type: "circle" | "rect" | "line") => {
     const base = {
       id: crypto.randomUUID(),
       name: `New ${type}`,
@@ -758,8 +876,19 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
     if (type === "circle") {
       newShape = { ...base, type: "circle", x: "0", y: "0", diameter: "10" };
-    } else {
+    } else if (type === "rect") {
       newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0"};
+    } else {
+      // Line: default 2 points
+      newShape = { 
+          ...base, 
+          type: "line", 
+          thickness: "1", 
+          points: [
+              { id: crypto.randomUUID(), x: "0", y: "0" },
+              { id: crypto.randomUUID(), x: "10", y: "10" }
+          ]
+      };
     }
 
     onUpdate({
@@ -873,6 +1002,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
         
         <button onClick={() => addShape("circle")}>+ Circle</button>
         <button onClick={() => addShape("rect")}>+ Rect</button>
+        <button onClick={() => addShape("line")}>+ Line</button>
       </div>
 
       <div className="fp-workspace">

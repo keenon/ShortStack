@@ -20,7 +20,7 @@ export interface StackupLayer {
 
 // --- FOOTPRINT TYPES ---
 
-export type ShapeType = "circle" | "rect";
+export type ShapeType = "circle" | "rect" | "line";
 
 export interface BaseShape {
   id: string;
@@ -45,7 +45,13 @@ export interface FootprintRect extends BaseShape {
   angle: string;
 }
 
-export type FootprintShape = FootprintCircle | FootprintRect;
+export interface FootprintLine extends BaseShape {
+  type: "line";
+  thickness: string;
+  points: Point[];
+}
+
+export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine;
 
 export interface Footprint {
   id: string;
