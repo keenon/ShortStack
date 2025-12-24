@@ -408,31 +408,31 @@ const LayerSolid = ({
                  let angleRad = 0;
                  if (shape.type === "rect") angleRad = (evaluate((shape as FootprintRect).angle, params) * Math.PI) / 180;
 
+                 // Use -PI/2 to align Extrusion Z with World Y (Up), matching the "Through Cut" orientation.
+                 // This ensures the 2D Shape Y maps to World -Z, preserving orientation for asymmetric shapes (lines).
+                 roundedCutRot = [-Math.PI/2, -angleRad, 0];
+
                  if (layer.carveSide === "Top") {
                      // Cut from Top. Floor is at: Top - Depth.
                      // Local Y of Floor: (thickness/2) - actualDepth.
                      const floorY = (thickness / 2) - actualDepth;
                      
-                     // Rotate X=90 (PI/2) maps Z -> -Y
-                     // We want Extrusion Z (which points to -Y world) to align with Down.
-                     roundedCutRot = [Math.PI/2, angleRad, 0]; 
-
-                     // Tip is at local Z = depth + bevelThickness.
-                     // We want Tip to be at floorY.
-                     // World Y = OriginY - (Tip_Z)
-                     // OriginY = floorY + Tip_Z
-                     roundedCutPos = [localX, floorY + throughHeight + endmillRadius, localZ];
+                     // Extrusion points UP (+Y).
+                     // We want the bottom tip of the bevel (Front Bevel) to sit at floorY.
+                     // Front Bevel Z range: [-bevelThickness, 0] (Local)
+                     // Map Z->Y. Tip is at PosY - bevelThickness.
+                     // floorY = PosY - endmillRadius => PosY = floorY + endmillRadius
+                     roundedCutPos = [localX, floorY + endmillRadius, localZ];
                  
                  } else {
                      // Cut from Bottom.
                      const floorY = (-thickness / 2) + actualDepth;
-
-                     // Rotate X=-90 (-PI/2) maps Z -> +Y
-                     roundedCutRot = [-Math.PI/2, -angleRad, 0]; 
                      
-                     // Tip (Z max) should be at floorY.
-                     // World Y = OriginY + Tip_Z
-                     // OriginY = floorY - Tip_Z
+                     // Extrusion points UP (+Y).
+                     // We want the top tip of the bevel (Back Bevel) to sit at floorY.
+                     // Back Bevel Z range: [depth, depth + bevelThickness] (Local)
+                     // Map Z->Y. Tip is at PosY + depth + bevelThickness.
+                     // floorY = PosY + throughHeight + endmillRadius => PosY = floorY - ...
                      roundedCutPos = [localX, floorY - (throughHeight + endmillRadius), localZ];
                  }
              }
