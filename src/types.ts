@@ -43,6 +43,7 @@ export interface FootprintRect extends BaseShape {
   width: string;
   height: string;
   angle: string;
+  cornerRadius: string;
 }
 
 export interface Point {

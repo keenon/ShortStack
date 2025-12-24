@@ -194,6 +194,8 @@ const ShapeRenderer = ({
     const x = evaluateExpression(shape.x, params);
     const y = evaluateExpression(shape.y, params);
     const angle = evaluateExpression(shape.angle, params);
+    const rawCr = evaluateExpression((shape as FootprintRect).cornerRadius, params);
+    const cr = Math.max(0, Math.min(rawCr, Math.min(w, h) / 2));
     
     return (
       <rect
@@ -201,6 +203,8 @@ const ShapeRenderer = ({
         y={-y - h / 2}
         width={w}
         height={h}
+        rx={cr}
+        ry={cr}
         transform={`rotate(${-angle}, ${x}, ${-y})`}
         {...commonProps}
       />
@@ -474,6 +478,15 @@ const PropertiesPanel = ({
             <ExpressionEditor
               value={(shape as FootprintRect).angle}
               onChange={(val) => updateShape(shape.id, "angle", val)}
+              params={params}
+              placeholder="0"
+            />
+          </div>
+          <div className="prop-group">
+            <label>Corner Radius</label>
+            <ExpressionEditor
+              value={(shape as FootprintRect).cornerRadius}
+              onChange={(val) => updateShape(shape.id, "cornerRadius", val)}
               params={params}
               placeholder="0"
             />
@@ -1156,7 +1169,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     if (type === "circle") {
       newShape = { ...base, type: "circle", x: "0", y: "0", diameter: "10" };
     } else if (type === "rect") {
-      newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0"};
+      newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0", cornerRadius: "0" };
     } else {
       // Line: default 2 points
       newShape = { 

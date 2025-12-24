@@ -158,6 +158,7 @@ function App() {
               if (s.angle === undefined) { needsUpgrade = true; baseShape.angle = "0"; }
               baseShape.width = s.width ?? "10";
               baseShape.height = s.height ?? "10";
+              baseShape.cornerRadius = s.cornerRadius ?? "0";
             } else if (s.type === "circle") {
               baseShape.diameter = s.diameter ?? "10";
             }

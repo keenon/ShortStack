@@ -41,6 +41,31 @@ function evaluate(expression: string, params: Parameter[]): number {
   }
 }
 
+function createRoundedRectShape(width: number, height: number, radius: number): THREE.Shape {
+  const shape = new THREE.Shape();
+  const x = -width / 2;
+  const y = -height / 2;
+  
+  if (radius <= 0.001) {
+      shape.moveTo(x, y);
+      shape.lineTo(x + width, y);
+      shape.lineTo(x + width, y + height);
+      shape.lineTo(x, y + height);
+      shape.lineTo(x, y);
+  } else {
+       shape.moveTo(x, y + radius);
+       shape.lineTo(x, y + height - radius);
+       shape.quadraticCurveTo(x, y + height, x + radius, y + height);
+       shape.lineTo(x + width - radius, y + height);
+       shape.quadraticCurveTo(x + width, y + height, x + width, y + height - radius);
+       shape.lineTo(x + width, y + radius);
+       shape.quadraticCurveTo(x + width, y, x + width - radius, y);
+       shape.lineTo(x + radius, y);
+       shape.quadraticCurveTo(x, y, x, y + radius);
+  }
+  return shape;
+}
+
 /**
  * Generates a 2D THREE.Shape representing the outline of the thick line.
  * Handles Bezier curves and thickness.
@@ -295,12 +320,30 @@ const LayerSolid = ({
           } else if (shape.type === "rect") {
             const w = evaluate(shape.width, params);
             const h = evaluate(shape.height, params);
+            const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+            const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
             const angleDeg = evaluate((shape as FootprintRect).angle, params);
             const angleRad = (angleDeg * Math.PI) / 180;
-            // Box: [width, height, depth]
-            args = [w, 0, h]; 
-            rotation = [0, angleRad, 0];
-            type = "box";
+            
+            if (cr > 0.001) {
+                const rrShape = createRoundedRectShape(w, h, cr);
+                args = [rrShape, { depth: throughHeight, bevelEnabled: false }];
+                // Orient Extrude (XY plane -> Z up) to World (Vertical Y up)
+                // Rotate X -90 makes Z->Y.
+                // Rotate Y angleRad (around world vertical).
+                // Note on angle sign: FootprintEditor uses `rotate(${-angle})` for SVG (CW).
+                // Here we use `angleRad` (CCW in standard math).
+                rotation = [-Math.PI / 2, -angleRad, 0]; 
+                type = "extrude";
+                extrudeOffsetSub = -throughHeight / 2;
+                extrudeOffsetAdd = -fillHeight / 2;
+            } else {
+                // Standard Box
+                // Box: [width, height, depth]
+                args = [w, 0, h]; 
+                rotation = [0, angleRad, 0];
+                type = "box";
+            }
           } else if (shape.type === "line") {
               generatedShape = createLineShape(shape as FootprintLine, params);
               if (generatedShape) {
@@ -344,12 +387,25 @@ const LayerSolid = ({
                                 return <boxGeometry args={[args[0] + CSG_EPSILON, fillHeight, args[2] + CSG_EPSILON]} />;
                             }
                             if (type === "extrude") {
-                                // For lines, we need to regenerate the shape with slightly larger thickness for the fill
+                                // For lines/rounded rects, we need to regenerate the shape with slightly larger thickness for the fill
                                 // to ensure it bonds correctly to the walls.
-                                const baseThick = evaluate((shape as FootprintLine).thickness, params);
-                                const thickShape = createLineShape(shape as FootprintLine, params, baseThick + CSG_EPSILON);
-                                if (!thickShape) return null;
-                                return <extrudeGeometry args={[thickShape, { depth: fillHeight, bevelEnabled: false }]} />;
+                                if (shape.type === "line") {
+                                    const baseThick = evaluate((shape as FootprintLine).thickness, params);
+                                    const thickShape = createLineShape(shape as FootprintLine, params, baseThick + CSG_EPSILON);
+                                    if (!thickShape) return null;
+                                    return <extrudeGeometry args={[thickShape, { depth: fillHeight, bevelEnabled: false }]} />;
+                                } 
+                                else if (shape.type === "rect") {
+                                    // For rounded rect, expanding is slightly more complex than line thickness.
+                                    // We just expand width/height/radius slightly.
+                                    const w = evaluate((shape as FootprintRect).width, params);
+                                    const h = evaluate((shape as FootprintRect).height, params);
+                                    const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+                                    const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                                    
+                                    const expandedShape = createRoundedRectShape(w + CSG_EPSILON, h + CSG_EPSILON, cr + CSG_EPSILON/2);
+                                    return <extrudeGeometry args={[expandedShape, { depth: fillHeight, bevelEnabled: false }]} />;
+                                }
                             }
                             return null;
                         })()}
