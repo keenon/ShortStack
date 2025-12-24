@@ -56,6 +56,8 @@ export interface Point {
 
 export interface FootprintLine extends BaseShape {
   type: "line";
+  x: string;
+  y: string;
   thickness: string;
   points: Point[];
 }

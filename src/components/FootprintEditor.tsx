@@ -1163,6 +1163,8 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
           ...base, 
           type: "line", 
           thickness: "1", 
+          x: "0",
+          y: "0",
           points: [
               { id: crypto.randomUUID(), x: "0", y: "0" },
               { id: crypto.randomUUID(), x: "10", y: "10" }
