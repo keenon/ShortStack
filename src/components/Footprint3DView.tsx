@@ -129,18 +129,41 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
       rightPts.push(new THREE.Vector2(p.x - normal.x * halfThick, p.y - normal.y * halfThick));
   }
 
-  // 3. Build THREE.Shape
+  // 3. Build THREE.Shape with Rounded Ends
   const shape2D = new THREE.Shape();
-  // Forward along Left
+  
+  // Start at the first Left point
   shape2D.moveTo(leftPts[0].x, leftPts[0].y);
+  
+  // Traverse Left side forward
   for (let i = 1; i < leftPts.length; i++) {
       shape2D.lineTo(leftPts[i].x, leftPts[i].y);
   }
-  // Backward along Right
-  for (let i = rightPts.length - 1; i >= 0; i--) {
+
+  // End Cap: Rounded Arc from Left[end] to Right[end]
+  const lastIdx = pathPoints.length - 1;
+  const pLast = pathPoints[lastIdx];
+  // Calculate angle of the vector from center to the current point (Left[end])
+  const vLast = new THREE.Vector2().subVectors(leftPts[lastIdx], pLast);
+  const angLast = Math.atan2(vLast.y, vLast.x);
+  
+  // Draw clockwise arc to the opposite side (Left -> Right)
+  shape2D.absarc(pLast.x, pLast.y, halfThick, angLast, angLast + Math.PI, true);
+
+  // Traverse Right side backward
+  // We start from the second-to-last point because the arc lands us on the last Right point
+  for (let i = rightPts.length - 2; i >= 0; i--) {
       shape2D.lineTo(rightPts[i].x, rightPts[i].y);
   }
-  shape2D.closePath();
+
+  // Start Cap: Rounded Arc from Right[0] to Left[0]
+  const pFirst = pathPoints[0];
+  // Calculate angle of the vector from center to the current point (Right[0])
+  const vFirst = new THREE.Vector2().subVectors(rightPts[0], pFirst);
+  const angFirst = Math.atan2(vFirst.y, vFirst.x);
+  
+  // Draw clockwise arc back to the start point (Right -> Left)
+  shape2D.absarc(pFirst.x, pFirst.y, halfThick, angFirst, angFirst + Math.PI, true);
 
   return shape2D;
 }
