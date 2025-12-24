@@ -890,6 +890,30 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   const [viewBox, setViewBox] = useState({ x: -50, y: -50, width: 100, height: 100 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
   
+  // PERFORMANCE: Debounced State for 3D View
+  // We maintain a separate footprint object for the 3D view which updates less frequently.
+  const [deferredFootprint, setDeferredFootprint] = useState(footprint);
+
+  // Effect to debounce updates to the 3D view state
+  useEffect(() => {
+    // If we are currently in 2D mode, we don't need to burn CPU updating the 3D view in the background.
+    // However, when switching tabs, we'll want it up to date.
+    if (viewMode === "2D") return;
+
+    const timer = setTimeout(() => {
+        setDeferredFootprint(footprint);
+    }, 600); // 600ms delay to allow typing/dragging to finish before expensive CSG calc
+
+    return () => clearTimeout(timer);
+  }, [footprint, viewMode]);
+
+  // Effect to ensure immediate update when switching TO 3D view
+  useEffect(() => {
+      if (viewMode === "3D") {
+          setDeferredFootprint(footprint);
+      }
+  }, [viewMode]); // intentionally omit footprint from deps to avoid double-update logic
+
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const viewBoxRef = useRef(viewBox);
@@ -1453,13 +1477,15 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
             </div>
             
             {/* 3D VIEW - Persist when hidden */}
+            {/* Note: We use deferredFootprint here to avoid lagging 2D interactions with heavy CSG updates */}
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
                 <Footprint3DView 
                     ref={footprint3DRef}
-                    footprint={footprint}
+                    footprint={deferredFootprint}
                     params={params}
                     stackup={stackup}
                     visibleLayers={layerVisibility} // Pass visibility
+                    is3DActive={viewMode === "3D"} // Pass active state to pause rendering
                 />
             </div>
             </div>
