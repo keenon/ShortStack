@@ -306,7 +306,7 @@ const LayerSolid = ({
                     ) : type === "box" ? (
                         <boxGeometry args={[args[0], throughHeight, args[2]]} />
                     ) : (
-                        <extrudeGeometry args={args} />
+                        <extrudeGeometry args={args as [THREE.Shape, THREE.ExtrudeGeometryOptions]} />
                     )}
                 </Subtraction>
 
