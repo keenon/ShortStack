@@ -1,11 +1,11 @@
 // src/components/LayoutEditor.tsx
-import { useState, useRef, useEffect, useLayoutEffect, Fragment } from "react";
+import { useState, useRef, useEffect, Fragment } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point, FootprintRect, FootprintCircle } from "../types";
-import { evaluateExpression, modifyExpression } from "./FootprintEditor";
 import ExpressionEditor from "./ExpressionEditor";
 import Layout3DView, { Layout3DViewHandle } from "./Layout3DView";
+import Viewer2D, { Viewer2DItem, evaluateExpression, modifyExpression } from "./Viewer2D";
 import './LayoutEditor.css';
 
 interface Props {
@@ -16,33 +16,6 @@ interface Props {
   footprints: Footprint[];
   params: Parameter[];
   stackup: StackupLayer[];
-}
-
-// ------------------------------------------------------------------
-// HELPERS
-// ------------------------------------------------------------------
-
-function interpolateColor(hex: string, ratio: number): string {
-  const r = Math.max(0, Math.min(1, ratio));
-  // If full depth, plain black
-  if (r === 1) return "black";
-  // If 0 depth, pure layer color
-  if (r === 0) return hex;
-
-  let c = hex.trim();
-  if (c.startsWith("#")) c = c.substring(1);
-  if (c.length === 3) c = c.split("").map(char => char + char).join("");
-  // Fallback
-  if (c.length !== 6) return "black";
-
-  const num = parseInt(c, 16);
-  const red = (num >> 16) & 0xff;
-  const green = (num >> 8) & 0xff;
-  const blue = num & 0xff;
-
-  // Mix with black (0,0,0) -> target = color * (1-r)
-  const f = 1 - r;
-  return `rgb(${Math.round(red * f)}, ${Math.round(green * f)}, ${Math.round(blue * f)})`;
 }
 
 // ------------------------------------------------------------------
@@ -65,7 +38,6 @@ const LayerVisibilityPanel = ({
     <div className="layout-left-subpanel">
       <h3 style={{ marginTop: 0 }}>Layers</h3>
       <div className="layer-list-scroll">
-        {/* Unassigned Layer */}
         <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
             <div className="layer-vis-info">
                 <div 
@@ -82,7 +54,6 @@ const LayerVisibilityPanel = ({
             </button>
         </div>
 
-        {/* Stackup Layers */}
         {stackup.map((layer) => (
              <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`} style={{flexWrap: 'wrap'}}>
                 <div className="layer-vis-info" style={{ width: '100%', marginBottom: '5px' }}>
@@ -146,85 +117,7 @@ const LayerVisibilityPanel = ({
   );
 };
 
-// 2. SHAPE RENDERER
-const InstanceShapeRenderer = ({ 
-    shape, 
-    params,
-    isSelected,
-    stackup
-}: { 
-    shape: FootprintShape; 
-    params: Parameter[];
-    isSelected: boolean;
-    stackup: StackupLayer[];
-}) => {
-    // Default styles (unassigned)
-    let fill = isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)";
-    let stroke = isSelected ? "#646cff" : "#888";
-    let strokeWidth = isSelected ? 2 : 1;
-    const vectorEffect = "non-scaling-stroke";
-
-    // Calculate Color based on highest layer
-    const assigned = shape.assignedLayers || {};
-    // Find highest layer (first in stackup list) that is assigned
-    const highestLayer = stackup.find(l => assigned[l.id] !== undefined);
-
-    if (highestLayer) {
-        stroke = highestLayer.color;
-        // Make selection bolder since we use layer color for stroke
-        strokeWidth = isSelected ? 3 : 2;
-
-        if (highestLayer.type === "Cut") {
-            // Cut Layer: Solid black
-            fill = "black";
-        } else {
-            // Carved/Printed Layer: Outline in layer color, center fades to black based on depth
-            const depthVal = evaluateExpression(assigned[highestLayer.id], params);
-            const thickVal = evaluateExpression(highestLayer.thicknessExpression, params);
-            // Avoid divide by zero
-            const ratio = (thickVal > 0.0001) ? (depthVal / thickVal) : 0;
-            
-            fill = interpolateColor(highestLayer.color, ratio);
-        }
-    }
-
-    const commonProps = {
-        fill,
-        stroke,
-        strokeWidth,
-        vectorEffect: "non-scaling-stroke" as const,
-    };
-
-    if (shape.type === "circle") {
-        const r = evaluateExpression(shape.diameter, params) / 2;
-        const cx = evaluateExpression(shape.x, params);
-        const cy = evaluateExpression(shape.y, params);
-        // Y-axis flip: -cy
-        return <circle cx={cx} cy={-cy} r={r} {...commonProps} />;
-    }
-
-    if (shape.type === "rect") {
-        const w = evaluateExpression(shape.width, params);
-        const h = evaluateExpression(shape.height, params);
-        const x = evaluateExpression(shape.x, params);
-        const y = evaluateExpression(shape.y, params);
-        const angle = evaluateExpression(shape.angle, params);
-        // Y-axis flip: (x, -y). Top-Left: (x - w/2, -y - h/2). Angle: -angle.
-        return (
-            <rect
-                x={x - w / 2}
-                y={-y - h / 2}
-                width={w}
-                height={h}
-                transform={`rotate(${-angle}, ${x}, ${-y})`}
-                {...commonProps}
-            />
-        );
-    }
-    return null;
-};
-
-// 3. BOARD OUTLINE PROPERTIES
+// 2. BOARD OUTLINE PROPERTIES
 const BoardOutlineProperties = ({ 
     boardOutline, 
     setBoardOutline, 
@@ -385,27 +278,13 @@ const BoardOutlineProperties = ({
 // ------------------------------------------------------------------
 
 export default function LayoutEditor({ layout, setLayout, boardOutline, setBoardOutline, footprints, params, stackup }: Props) {
-  // SPECIAL ID: We use "BOARD_OUTLINE" as a hardcoded ID for selection
   const [selectedId, setSelectedId] = useState<string | null>("BOARD_OUTLINE");
-  
-  // Layer Visibility State: undefined/true = visible, false = hidden
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
-
   const [viewBox, setViewBox] = useState({ x: -100, y: -100, width: 200, height: 200 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
-  
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const viewBoxRef = useRef(viewBox);
   
-  // Ref for 3D View to control camera
   const layout3DRef = useRef<Layout3DViewHandle>(null);
-
-  // Dragging State Refs for Canvas Pan
-  const isDragging = useRef(false);
-  const hasMoved = useRef(false);
-  const dragStart = useRef({ x: 0, y: 0 });
-  const dragStartViewBox = useRef({ x: 0, y: 0 });
-  const clickedId = useRef<string | null>(null);
 
   // Dragging State Refs for Instances
   const isInstanceDragging = useRef(false);
@@ -418,16 +297,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   const draggedPointId = useRef<string | null>(null);
   const pointDragStartPos = useRef({ x: 0, y: 0 });
   const pointDragStartExpr = useRef({ x: "0", y: "0" });
-
-  // Ref to access latest layout in event handlers
-  const layoutRef = useRef(layout);
-  useEffect(() => {
-    layoutRef.current = layout;
-  }, [layout]);
-
-  useEffect(() => {
-    viewBoxRef.current = viewBox;
-  }, [viewBox]);
 
   // --- ACTIONS ---
 
@@ -466,7 +335,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     const layer = stackup.find(l => l.id === layerId);
     if (!layer) return;
 
-    // 1. Open Save Dialog
     const path = await save({
         defaultPath: `${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_${format.toLowerCase()}.${format.toLowerCase()}`,
         filters: [{
@@ -477,24 +345,19 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
 
     if (!path) return;
 
-    // 2. Prepare Data
-    // Evaluate Layer Thickness
     const layerThickness = evaluateExpression(layer.thicknessExpression, params);
 
-    // Evaluate Board Outline
     const outline = boardOutline.points.map(p => ({
         x: evaluateExpression(p.x, params),
         y: evaluateExpression(p.y, params)
     }));
 
-    // Gather Shapes
     const shapes: any[] = [];
 
     layout.forEach(inst => {
         const fp = footprints.find(f => f.id === inst.footprintId);
         if (!fp) return;
 
-        // Instance Transforms
         const instX = evaluateExpression(inst.x, params);
         const instY = evaluateExpression(inst.y, params);
         const instAngle = evaluateExpression(inst.angle, params);
@@ -502,32 +365,22 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
         const cosA = Math.cos(instAngleRad);
         const sinA = Math.sin(instAngleRad);
 
-        // Process shapes in REVERSE order to match the visual stack (last is top)
-        // because the visual editor uses [...fp.shapes].reverse()
         [...fp.shapes].reverse().forEach(s => {
-            // Check if shape is assigned to this layer
             if (!s.assignedLayers || s.assignedLayers[layer.id] === undefined) return;
 
-            // Calculate Depth
             let depth = 0;
             if (layer.type === "Cut") {
-                // For cut layers, depth is usually full thickness
                 depth = layerThickness; 
             } else {
-                // For carved layers, depth is defined in the footprint assignment
                 const val = evaluateExpression(s.assignedLayers[layer.id], params);
                 depth = Math.max(0, val);
             }
             if (depth <= 0) return;
 
-            // Transform Shape Center to Absolute World Coordinates
             const sx = evaluateExpression(s.x, params);
             const sy = evaluateExpression(s.y, params);
-
-            // Rotate shape position relative to instance origin
             const rx = sx * cosA - sy * sinA;
             const ry = sx * sinA + sy * cosA;
-
             const finalX = instX + rx;
             const finalY = instY + ry;
 
@@ -547,19 +400,17 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                     y: finalY,
                     width: evaluateExpression((s as FootprintRect).width, params),
                     height: evaluateExpression((s as FootprintRect).height, params),
-                    angle: instAngle + sAngle, // Sum angles
+                    angle: instAngle + sAngle, 
                     depth: depth
                 });
             }
         });
     });
 
-    // 2. Prepare STL Data if needed
     let stlContent: number[] | null = null;
     if (format === "STL") {
         const raw = layout3DRef.current?.getLayerSTL(layerId);
         if (raw) {
-            // Convert Uint8Array to normal array for invoke compatibility
             stlContent = Array.from(raw);
         } else {
              alert("Warning: Could not retrieve 3D mesh for STL export. Ensure the layer is visible in the 3D preview.");
@@ -567,7 +418,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
         }
     }
 
-    // 3. Send to Rust
     try {
         await invoke("export_layer_files", {
             request: {
@@ -588,135 +438,60 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     }
   };
 
-  // --- HELPERS ---
-
-  // Check if a shape should be visible based on its layer assignment and current global visibility
-  const isShapeVisible = (shape: FootprintShape) => {
-    const assignedIds = Object.keys(shape.assignedLayers || {});
-    
-    if (assignedIds.length === 0) {
-        // If assigned to no layers, use "unassigned" visibility
-        return layerVisibility["unassigned"] !== false;
-    }
-    
-    // If assigned to layers, visible if NOT ALL of them are hidden.
-    const allAssignedLayersHidden = assignedIds.every(id => layerVisibility[id] === false);
-    return !allAssignedLayersHidden;
-  };
-
-  // --- 2D CANVAS NAVIGATION LOGIC ---
+  // --- UNIFIED HANDLERS for Viewer2D ---
   
-  useLayoutEffect(() => {
-    if (!wrapperRef.current || viewMode !== "2D") return;
-    const updateDimensions = () => {
-        if (!wrapperRef.current) return;
-        const { width, height } = wrapperRef.current.getBoundingClientRect();
-        if (width === 0 || height === 0) return;
-        setViewBox(prev => {
-            const newHeight = prev.width / (width / height);
-            const centerX = prev.x + prev.width / 2;
-            const centerY = prev.y + prev.height / 2;
-            return { x: centerX - prev.width / 2, y: centerY - newHeight / 2, width: prev.width, height: newHeight };
-        });
-    };
-    const observer = new ResizeObserver(updateDimensions);
-    observer.observe(wrapperRef.current);
-    updateDimensions(); 
-    return () => observer.disconnect();
-  }, [viewMode]);
+  const handleItemMouseDown = (e: React.MouseEvent, item: Viewer2DItem, subId?: string | number) => {
+      e.stopPropagation();
+      e.preventDefault();
 
-  useEffect(() => {
-    if (viewMode !== "2D") return;
-    const element = wrapperRef.current; 
-    if (!element) return;
-    const onWheel = (e: WheelEvent) => {
-        e.preventDefault();
-        const rect = element.getBoundingClientRect();
-        const ratioX = (e.clientX - rect.left) / rect.width;
-        const ratioY = (e.clientY - rect.top) / rect.height;
-        const userX = viewBoxRef.current.x + ratioX * viewBoxRef.current.width;
-        const userY = viewBoxRef.current.y + ratioY * viewBoxRef.current.height;
-        const scale = e.deltaY > 0 ? 1.1 : 1 / 1.1;
-        const newWidth = viewBoxRef.current.width * scale;
-        const newHeight = viewBoxRef.current.height * scale;
-        setViewBox({ x: userX - ratioX * newWidth, y: userY - ratioY * newHeight, width: newWidth, height: newHeight });
-    };
-    element.addEventListener('wheel', onWheel, { passive: false });
-    return () => element.removeEventListener('wheel', onWheel);
-  }, [viewMode]);
+      setSelectedId(item.id);
 
-  // --- PANNING HANDLERS ---
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (viewMode !== "2D" || e.button !== 0) return;
-    isDragging.current = true;
-    hasMoved.current = false;
-    dragStart.current = { x: e.clientX, y: e.clientY };
-    dragStartViewBox.current = { x: viewBox.x, y: viewBox.y };
-    window.addEventListener('mousemove', handleGlobalMouseMove);
-    window.addEventListener('mouseup', handleGlobalMouseUp);
-  };
+      if (item.type === "instance") {
+          const inst = layout.find(i => i.id === item.id);
+          if (!inst) return;
+          
+          isInstanceDragging.current = true;
+          draggedInstanceId.current = item.id;
+          instanceDragStartPos.current = { x: e.clientX, y: e.clientY };
+          instanceDragStartExpr.current = { x: inst.x, y: inst.y };
 
-  const handleGlobalMouseMove = (e: MouseEvent) => {
-    if (!isDragging.current || !wrapperRef.current) return;
-    const dx = e.clientX - dragStart.current.x;
-    const dy = e.clientY - dragStart.current.y;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved.current = true;
-    const rect = wrapperRef.current.getBoundingClientRect();
-    const scaleX = viewBoxRef.current.width / rect.width;
-    const scaleY = viewBoxRef.current.height / rect.height;
-    setViewBox(prev => ({ ...prev, x: dragStartViewBox.current.x - dx * scaleX, y: dragStartViewBox.current.y - dy * scaleY }));
-  };
+          window.addEventListener('mousemove', handleInstanceMouseMove);
+          window.addEventListener('mouseup', handleInstanceMouseUp);
+      }
 
-  const handleGlobalMouseUp = () => {
-    isDragging.current = false;
-    window.removeEventListener('mousemove', handleGlobalMouseMove);
-    window.removeEventListener('mouseup', handleGlobalMouseUp);
-    if (!hasMoved.current) {
-        setSelectedId(clickedId.current);
-    }
-    clickedId.current = null;
-  };
+      if (item.type === "board") {
+          // If subId is present, we are dragging a point handle
+          if (subId && typeof subId === "string") {
+            const point = boardOutline.points.find(p => p.id === subId);
+            if (!point) return;
 
-  // --- INSTANCE DRAG HANDLERS ---
-  const handleInstanceMouseDown = (e: React.MouseEvent, id: string) => {
-    // Prevent Panning
-    e.stopPropagation();
-    e.preventDefault();
+            isPointDragging.current = true;
+            draggedPointId.current = subId;
+            pointDragStartPos.current = { x: e.clientX, y: e.clientY };
+            pointDragStartExpr.current = { x: point.x, y: point.y };
 
-    if (viewMode !== "2D") return;
-
-    // Select the instance
-    setSelectedId(id);
-
-    const inst = layout.find(i => i.id === id);
-    if (!inst) return;
-
-    isInstanceDragging.current = true;
-    draggedInstanceId.current = id;
-    instanceDragStartPos.current = { x: e.clientX, y: e.clientY };
-    instanceDragStartExpr.current = { x: inst.x, y: inst.y };
-
-    window.addEventListener('mousemove', handleInstanceMouseMove);
-    window.addEventListener('mouseup', handleInstanceMouseUp);
+            window.addEventListener('mousemove', handlePointMouseMove);
+            window.addEventListener('mouseup', handlePointMouseUp);
+          }
+      }
   };
 
   const handleInstanceMouseMove = (e: MouseEvent) => {
     if (!isInstanceDragging.current || !wrapperRef.current || !draggedInstanceId.current) return;
 
     const rect = wrapperRef.current.getBoundingClientRect();
-    const scaleX = viewBoxRef.current.width / rect.width;
-    const scaleY = viewBoxRef.current.height / rect.height;
+    const scaleX = viewBox.width / rect.width;
+    const scaleY = viewBox.height / rect.height;
 
     const dxPx = e.clientX - instanceDragStartPos.current.x;
     const dyPx = e.clientY - instanceDragStartPos.current.y;
 
     const dxWorld = dxPx * scaleX;
-    // Y-axis flip: Mouse down = negative world Y direction
+    // Y-axis flip
     const dyWorld = -dyPx * scaleY;
 
     const startExpr = instanceDragStartExpr.current;
     
-    // Update Expressions
     const newX = modifyExpression(startExpr.x, dxWorld);
     const newY = modifyExpression(startExpr.y, dyWorld);
 
@@ -735,38 +510,17 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     window.removeEventListener('mouseup', handleInstanceMouseUp);
   };
 
-  // --- BOARD POINT DRAG HANDLERS ---
-  const handlePointMouseDown = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    e.preventDefault();
-    if (viewMode !== "2D") return;
-
-    setSelectedId("BOARD_OUTLINE"); 
-
-    const point = boardOutline.points.find(p => p.id === id);
-    if (!point) return;
-
-    isPointDragging.current = true;
-    draggedPointId.current = id;
-    pointDragStartPos.current = { x: e.clientX, y: e.clientY };
-    pointDragStartExpr.current = { x: point.x, y: point.y };
-
-    window.addEventListener('mousemove', handlePointMouseMove);
-    window.addEventListener('mouseup', handlePointMouseUp);
-  };
-
   const handlePointMouseMove = (e: MouseEvent) => {
     if (!isPointDragging.current || !wrapperRef.current || !draggedPointId.current) return;
 
     const rect = wrapperRef.current.getBoundingClientRect();
-    const scaleX = viewBoxRef.current.width / rect.width;
-    const scaleY = viewBoxRef.current.height / rect.height;
+    const scaleX = viewBox.width / rect.width;
+    const scaleY = viewBox.height / rect.height;
 
     const dxPx = e.clientX - pointDragStartPos.current.x;
     const dyPx = e.clientY - pointDragStartPos.current.y;
 
     const dxWorld = dxPx * scaleX;
-    // Y-axis flip
     const dyWorld = -dyPx * scaleY;
 
     const startExpr = pointDragStartExpr.current;
@@ -799,25 +553,38 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     }
   };
 
-  const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
-
   const selectedInstance = layout.find(inst => inst.id === selectedId);
 
-  // Construct SVG polygon points string
-  // Y-axis flip for points
-  const boardPointsStr = boardOutline.points
-    .map(p => `${evaluateExpression(p.x, params)},${-evaluateExpression(p.y, params)}`)
-    .join(' ');
+  // PREPARE VIEWER ITEMS
+  const viewerItems: Viewer2DItem[] = [];
 
-  // Handle size relative to view
-  const handleSize = Math.max(viewBox.width / 80, 0.5);
+  // 1. Board Outline
+  viewerItems.push({
+      type: "board",
+      id: "BOARD_OUTLINE",
+      data: boardOutline,
+      selected: selectedId === "BOARD_OUTLINE",
+      visible: true
+  });
+
+  // 2. Instances
+  layout.forEach(inst => {
+      const fp = footprints.find(f => f.id === inst.footprintId);
+      if (fp) {
+          viewerItems.push({
+              type: "instance",
+              id: inst.id,
+              data: inst,
+              footprint: fp,
+              selected: inst.id === selectedId,
+              visible: true // We can filter this if we want specific instances hidden
+          });
+      }
+  });
 
   return (
     <div className="layout-editor-container">
-      {/* 1. LEFT PANEL: LAYERS & INSTANCES */}
       <div className="layout-sidebar-left">
-        
-        {/* Top Half: Layers */}
         <LayerVisibilityPanel 
             stackup={stackup}
             visibility={layerVisibility}
@@ -825,14 +592,12 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
             onExport={handleExport}
         />
 
-        {/* Bottom Half: Layout Objects */}
         <div className="layout-left-subpanel">
             <div className="sidebar-header-row">
                 <h3>Layout Objects</h3>
             </div>
 
             <div className="layout-instance-list">
-            {/* HARDCODED BOARD OUTLINE ITEM */}
             <div 
                 className={`instance-item board-outline-item ${selectedId === 'BOARD_OUTLINE' ? 'selected' : ''}`}
                 onClick={() => setSelectedId('BOARD_OUTLINE')}
@@ -895,7 +660,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
         </div>
       </div>
 
-      {/* 2. CENTER PANEL: 2D/3D VISUALIZER */}
       <div className="layout-center">
         <div className="view-toggle-bar">
           <button className={`view-toggle-btn ${viewMode === "2D" ? "active" : ""}`} onClick={() => setViewMode("2D")}>2D Layout</button>
@@ -906,105 +670,16 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
           <button className="canvas-home-btn" onClick={handleHomeClick} title="Reset View">🏠</button>
           
           <div style={{ display: viewMode === "2D" ? 'contents' : 'none' }}>
-            <svg className="layout-canvas" viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`} onMouseDown={handleMouseDown}>
-              <defs>
-                <pattern id="layout-grid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
-                  <path d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} fill="none" stroke="#333" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-                </pattern>
-              </defs>
-              <rect x={viewBox.x} y={viewBox.y} width={viewBox.width} height={viewBox.height} fill="url(#layout-grid)" />
-              <line x1={viewBox.x} y1="0" x2={viewBox.x + viewBox.width} y2="0" stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-              <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-              
-              {/* Render Board Outline */}
-              <polygon 
-                points={boardPointsStr}
-                fill="none"
-                stroke="transparent"
-                strokeWidth={12}
-                vectorEffect="non-scaling-stroke"
-                style={{ cursor: 'pointer' }}
-                onMouseDown={(e) => {
-                     e.stopPropagation();
-                     setSelectedId("BOARD_OUTLINE");
-                }}
-              />
-              <polygon 
-                points={boardPointsStr}
-                fill="none"
-                stroke={selectedId === "BOARD_OUTLINE" ? "#646cff" : "#555"}
-                strokeWidth={selectedId === "BOARD_OUTLINE" ? 3 : 2}
-                strokeDasharray={selectedId === "BOARD_OUTLINE" ? "0" : "5,5"}
-                vectorEffect="non-scaling-stroke"
-                style={{ pointerEvents: 'none' }}
-              />
-
-              {/* Board Points Handles */}
-              {selectedId === "BOARD_OUTLINE" && boardOutline.points.map((p) => {
-                  const px = evaluateExpression(p.x, params);
-                  const py = evaluateExpression(p.y, params);
-                  // Y-axis flip: -py
-                  return (
-                    <rect
-                        key={p.id}
-                        x={px - handleSize / 2}
-                        y={-py - handleSize / 2}
-                        width={handleSize}
-                        height={handleSize}
-                        fill="#fff"
-                        stroke="#646cff"
-                        strokeWidth={handleSize / 5}
-                        style={{ cursor: 'grab' }}
-                        vectorEffect="non-scaling-stroke"
-                        onMouseDown={(e) => handlePointMouseDown(e, p.id)}
-                    />
-                  );
-              })}
-
-              {layout.map((inst) => {
-                  const fp = footprints.find(f => f.id === inst.footprintId);
-                  if (!fp) return null;
-                  
-                  const evalX = evaluateExpression(inst.x, params);
-                  const evalY = evaluateExpression(inst.y, params);
-                  const evalAngle = evaluateExpression(inst.angle, params);
-                  const isSelected = inst.id === selectedId;
-
-                  // Y-axis flip: translate(x, -y). Rotate(-angle).
-                  return (
-                      <g 
-                        key={inst.id} 
-                        transform={`translate(${evalX}, ${-evalY}) rotate(${-evalAngle})`}
-                        style={{ cursor: 'grab' }}
-                        onMouseDown={(e) => handleInstanceMouseDown(e, inst.id)}
-                      >
-                          {/* Invisible hit area */}
-                          <circle r="5" fill="transparent" />
-                          
-                          <g style={{ 
-                            filter: isSelected ? 'drop-shadow(0 0 2px #646cff)' : undefined
-                          }}>
-                            {/* Reverse shapes so Index 0 (Top) is rendered last */}
-                            {[...fp.shapes].reverse().map(shape => {
-                                // 2D VISIBILITY CHECK
-                                if (!isShapeVisible(shape)) return null;
-
-                                return (
-                                    <InstanceShapeRenderer 
-                                        key={shape.id} 
-                                        shape={shape} 
-                                        params={params} 
-                                        isSelected={isSelected}
-                                        stackup={stackup}
-                                    />
-                                );
-                            })}
-                          </g>
-                      </g>
-                  );
-              })}
-            </svg>
-            <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan</div>
+            <Viewer2D 
+                items={viewerItems}
+                params={params}
+                stackup={stackup}
+                viewBox={viewBox}
+                setViewBox={setViewBox}
+                onItemDown={handleItemMouseDown}
+                wrapperRef={wrapperRef}
+            />
+            <div className="canvas-hint">Scroll to Zoom | Drag to Pan</div>
           </div>
           
           <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
@@ -1015,13 +690,12 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
                 footprints={footprints}
                 params={params}
                 stackup={stackup}
-                visibleLayers={layerVisibility} // PASS VISIBILITY
+                visibleLayers={layerVisibility} 
             />
           </div>
         </div>
       </div>
 
-      {/* 3. RIGHT PANEL: PROPERTIES */}
       <div className="layout-sidebar-right">
         {selectedId === "BOARD_OUTLINE" ? (
             <BoardOutlineProperties 

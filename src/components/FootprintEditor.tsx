@@ -1,10 +1,13 @@
 // src/components/FootprintEditor.tsx
-import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import * as math from "mathjs";
+import React, { useState, useRef, useEffect } from "react";
 import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, FootprintLine, StackupLayer, Point, LayerAssignment } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
+import Viewer2D, { Viewer2DItem, evaluateExpression, modifyExpression } from "./Viewer2D";
 import './FootprintEditor.css';
+
+// Re-export helpers for 3D views that depend on them
+export { evaluateExpression, modifyExpression } from "./Viewer2D";
 
 interface Props {
   footprint: Footprint;
@@ -15,353 +18,10 @@ interface Props {
 }
 
 // ------------------------------------------------------------------
-// HELPERS
-// ------------------------------------------------------------------
-
-export function modifyExpression(expression: string, delta: number): string {
-  if (delta === 0) return expression;
-  
-  let trimmed = expression ? expression.trim() : "0";
-  if (trimmed === "") trimmed = "0";
-
-  // Check for simple number (integer or float)
-  if (/^[-+]?[0-9]*\.?[0-9]+$/.test(trimmed)) {
-      const val = parseFloat(trimmed);
-      if (!isNaN(val)) {
-          return parseFloat((val + delta).toFixed(4)).toString();
-      }
-  }
-
-  // Check for ends with "+ number"
-  const plusMatch = trimmed.match(/^(.*)\+\s*([0-9]*\.?[0-9]+)$/);
-  if (plusMatch) {
-      const prefix = plusMatch[1];
-      const numStr = plusMatch[2];
-      const val = parseFloat(numStr);
-      if (!isNaN(val)) {
-          const newVal = val + delta;
-          if (newVal >= 0) {
-              return `${prefix}+ ${parseFloat(newVal.toFixed(4))}`;
-          } else {
-              return `${prefix}- ${parseFloat(Math.abs(newVal).toFixed(4))}`;
-          }
-      }
-  }
-
-  // Check for ends with "- number"
-  const minusMatch = trimmed.match(/^(.*)\-\s*([0-9]*\.?[0-9]+)$/);
-  if (minusMatch) {
-      const prefix = minusMatch[1];
-      const numStr = minusMatch[2];
-      const val = parseFloat(numStr);
-      if (!isNaN(val)) {
-          // Expression: prefix - val
-          // New: prefix - val + delta  => prefix - (val - delta)
-          const newVal = val - delta;
-          if (newVal >= 0) {
-               return `${prefix}- ${parseFloat(newVal.toFixed(4))}`;
-          } else {
-               // val - delta is negative (e.g. 5 - 10 = -5).
-               // prefix - (-5) => prefix + 5
-               return `${prefix}+ ${parseFloat(Math.abs(newVal).toFixed(4))}`;
-          }
-      }
-  }
-
-  // Fallback: Append + delta
-  const absDelta = Math.abs(delta);
-  const fmtDelta = parseFloat(absDelta.toFixed(4));
-  if (delta >= 0) {
-      return `${trimmed} + ${fmtDelta}`;
-  } else {
-      return `${trimmed} - ${fmtDelta}`;
-  }
-}
-
-// Evaluate math expressions to numbers (for visualization only)
-// UPDATED: Accepts LayerAssignment object to prevent crashes in legacy renderers
-export function evaluateExpression(expression: string | LayerAssignment | undefined | null, params: Parameter[]): number {
-  if (!expression) return 0;
-
-  let exprStr = "";
-  if (typeof expression === 'object') {
-      if ('depth' in expression) {
-          exprStr = expression.depth;
-      } else {
-          return 0; 
-      }
-  } else {
-      exprStr = String(expression);
-  }
-
-  if (!exprStr || !exprStr.trim()) return 0;
-  
-  try {
-    const scope: Record<string, any> = {};
-    params.forEach((p) => {
-      // Treat parameters as pure numbers in mm to allow mixed arithmetic (e.g. "Width + 5")
-      const val = p.unit === "in" ? p.value * 25.4 : p.value;
-      scope[p.key] = val;
-    });
-    const result = math.evaluate(exprStr, scope);
-    if (typeof result === "number") return result;
-    if (result && typeof result.toNumber === "function") return result.toNumber("mm");
-    return 0;
-  } catch (e) {
-    return 0; // Return 0 on error for visualizer
-  }
-}
-
-function interpolateColor(hex: string, ratio: number): string {
-  const r = Math.max(0, Math.min(1, ratio));
-  // If full depth, plain black
-  if (r === 1) return "black";
-  // If 0 depth, pure layer color
-  if (r === 0) return hex;
-
-  let c = hex.trim();
-  if (c.startsWith("#")) c = c.substring(1);
-  if (c.length === 3) c = c.split("").map(char => char + char).join("");
-  // Fallback
-  if (c.length !== 6) return "black";
-
-  const num = parseInt(c, 16);
-  const red = (num >> 16) & 0xff;
-  const green = (num >> 8) & 0xff;
-  const blue = num & 0xff;
-
-  // Mix with black (0,0,0) -> target = color * (1-r)
-  const f = 1 - r;
-  return `rgb(${Math.round(red * f)}, ${Math.round(green * f)}, ${Math.round(blue * f)})`;
-}
-
-// ------------------------------------------------------------------
 // SUB-COMPONENTS
 // ------------------------------------------------------------------
 
-// 1. SHAPE RENDERER (SVG)
-const ShapeRenderer = ({
-  shape,
-  isSelected,
-  params,
-  stackup,
-  onShapeDown,
-  onHandleDown,
-}: {
-  shape: FootprintShape;
-  isSelected: boolean;
-  params: Parameter[];
-  stackup: StackupLayer[];
-  onShapeDown: (e: React.MouseEvent, id: string, pointIndex?: number) => void;
-  onHandleDown: (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => void;
-}) => {
-  // Default styles (unassigned)
-  let fill = isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)";
-  let stroke = isSelected ? "#646cff" : "#888";
-  let strokeWidth = isSelected ? 2 : 1;
-  const vectorEffect = "non-scaling-stroke";
-
-  // Calculate Color based on highest layer
-  const assigned = shape.assignedLayers || {};
-  // Find highest layer (first in stackup list) that is assigned
-  const highestLayer = stackup.find(l => assigned[l.id] !== undefined);
-
-  if (highestLayer) {
-      stroke = highestLayer.color;
-      // Make selection bolder since we use layer color for stroke
-      strokeWidth = isSelected ? 3 : 2;
-
-      if (highestLayer.type === "Cut") {
-          // Cut Layer: Solid black with outline in layer color
-          fill = "black";
-      } else {
-          // Carved/Printed Layer: Outline in layer color, center fades to black based on depth
-          // Handle both string (legacy) and LayerAssignment object
-          const rawAssignment = assigned[highestLayer.id];
-          const depthExpression = (typeof rawAssignment === 'string') ? rawAssignment : rawAssignment.depth;
-          
-          const depthVal = evaluateExpression(depthExpression, params);
-          const thickVal = evaluateExpression(highestLayer.thicknessExpression, params);
-          // Avoid divide by zero
-          const ratio = (thickVal > 0.0001) ? (depthVal / thickVal) : 0;
-          
-          fill = interpolateColor(highestLayer.color, ratio);
-      }
-  }
-
-  const commonProps = {
-    onMouseDown: (e: React.MouseEvent) => {
-      onShapeDown(e, shape.id);
-    },
-    fill,
-    stroke,
-    strokeWidth,
-    vectorEffect,
-    style: { cursor: "pointer" },
-  };
-
-  if (shape.type === "circle") {
-    const r = evaluateExpression(shape.diameter, params) / 2;
-    const cx = evaluateExpression(shape.x, params);
-    const cy = evaluateExpression(shape.y, params);
-    return <circle cx={cx} cy={-cy} r={r} {...commonProps} />;
-  }
-
-  if (shape.type === "rect") {
-    const w = evaluateExpression(shape.width, params);
-    const h = evaluateExpression(shape.height, params);
-    const x = evaluateExpression(shape.x, params);
-    const y = evaluateExpression(shape.y, params);
-    const angle = evaluateExpression(shape.angle, params);
-    const rawCr = evaluateExpression((shape as FootprintRect).cornerRadius, params);
-    const cr = Math.max(0, Math.min(rawCr, Math.min(w, h) / 2));
-    
-    return (
-      <rect
-        x={x - w / 2}
-        y={-y - h / 2}
-        width={w}
-        height={h}
-        rx={cr}
-        ry={cr}
-        transform={`rotate(${-angle}, ${x}, ${-y})`}
-        {...commonProps}
-      />
-    );
-  }
-
-  if (shape.type === "line") {
-      const thickness = evaluateExpression(shape.thickness, params);
-      
-      // Pre-evaluate all points
-      const pts = shape.points.map(p => ({
-          x: evaluateExpression(p.x, params),
-          y: evaluateExpression(p.y, params),
-          hIn: p.handleIn ? { 
-              x: evaluateExpression(p.handleIn.x, params), 
-              y: evaluateExpression(p.handleIn.y, params) 
-          } : null,
-          hOut: p.handleOut ? { 
-              x: evaluateExpression(p.handleOut.x, params), 
-              y: evaluateExpression(p.handleOut.y, params) 
-          } : null
-      }));
-
-      // Construct SVG Path 'd'
-      let d = "";
-      if (pts.length > 0) {
-          d = `M ${pts[0].x} ${-pts[0].y}`;
-          
-          for (let i = 0; i < pts.length - 1; i++) {
-              const curr = pts[i];
-              const next = pts[i+1];
-              
-              // Handle Out for current point (Control Point 1)
-              // If no handle, use current point
-              const cp1x = curr.x + (curr.hOut?.x || 0);
-              const cp1y = -(curr.y + (curr.hOut?.y || 0));
-
-              // Handle In for next point (Control Point 2)
-              // If no handle, use next point
-              const cp2x = next.x + (next.hIn?.x || 0);
-              const cp2y = -(next.y + (next.hIn?.y || 0));
-              
-              const endX = next.x;
-              const endY = -next.y;
-
-              d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${endX} ${endY}`;
-          }
-      }
-
-      // Render Handles only if selected
-      const handles = isSelected ? pts.map((pt, idx) => {
-          const elements = [];
-          
-          // Anchor Point
-          elements.push(
-              <circle 
-                  key={`anchor-${idx}`}
-                  cx={pt.x} cy={-pt.y} r={3/strokeWidth} // Scale radius slightly with zoom 
-                  fill="#fff" stroke="#646cff" strokeWidth={1}
-                  vectorEffect="non-scaling-stroke"
-                  onMouseDown={(e) => {
-                      e.stopPropagation();
-                      onShapeDown(e, shape.id, idx);
-                  }}
-              />
-          );
-
-          // Handle In
-          if (pt.hIn) {
-              const hx = pt.x + pt.hIn.x;
-              const hy = -(pt.y + pt.hIn.y);
-              elements.push(
-                  <line 
-                      key={`line-in-${idx}`}
-                      x1={pt.x} y1={-pt.y} x2={hx} y2={hy}
-                      stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke"
-                  />,
-                  <circle 
-                      key={`handle-in-${idx}`}
-                      cx={hx} cy={hy} r={2.5/strokeWidth}
-                      fill="#646cff"
-                      vectorEffect="non-scaling-stroke"
-                      style={{cursor: 'crosshair'}}
-                      onMouseDown={(e) => {
-                        e.stopPropagation();
-                        onHandleDown(e, shape.id, idx, 'in');
-                      }}
-                  />
-              );
-          }
-
-          // Handle Out
-          if (pt.hOut) {
-              const hx = pt.x + pt.hOut.x;
-              const hy = -(pt.y + pt.hOut.y);
-              elements.push(
-                  <line 
-                      key={`line-out-${idx}`}
-                      x1={pt.x} y1={-pt.y} x2={hx} y2={hy}
-                      stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke"
-                  />,
-                  <circle 
-                      key={`handle-out-${idx}`}
-                      cx={hx} cy={hy} r={2.5/strokeWidth}
-                      fill="#646cff"
-                      vectorEffect="non-scaling-stroke"
-                      style={{cursor: 'crosshair'}}
-                      onMouseDown={(e) => {
-                        e.stopPropagation();
-                        onHandleDown(e, shape.id, idx, 'out');
-                      }}
-                  />
-              );
-          }
-          return elements;
-      }) : null;
-
-      return (
-          <g>
-            <path 
-                d={d} 
-                {...commonProps} 
-                fill="none" 
-                strokeWidth={thickness} 
-                strokeLinecap="round" 
-                strokeLinejoin="round" 
-                vectorEffect={undefined} 
-                style={{ ...commonProps.style, opacity: isSelected ? 1 : 0.8 }}
-            />
-            {handles}
-          </g>
-      );
-  }
-
-  return null;
-};
-
-// 2. PROPERTIES PANEL
+// 1. PROPERTIES PANEL (Unchanged logic, just keeping it here)
 const PropertiesPanel = ({
   shape,
   updateShape,
@@ -635,7 +295,6 @@ const PropertiesPanel = ({
                                                 value={p.handleIn.x}
                                                 onChange={(val) => {
                                                     const newPoints = [...(shape as FootprintLine).points];
-                                                    // Ensure object exists
                                                     if (newPoints[idx].handleIn) {
                                                         newPoints[idx].handleIn!.x = val;
                                                         updateShape(shape.id, "points", newPoints);
@@ -704,7 +363,6 @@ const PropertiesPanel = ({
                         className="secondary small-btn" 
                         onClick={() => {
                             const newPoints = [...(shape as FootprintLine).points];
-                            // Add new point slightly offset from last one
                             const last = newPoints[newPoints.length - 1] || { x: "0", y: "0" };
                             newPoints.push({
                                 id: crypto.randomUUID(),
@@ -724,7 +382,7 @@ const PropertiesPanel = ({
   );
 };
 
-// 3. LAYER VISIBILITY PANEL (NEW)
+// 2. LAYER VISIBILITY PANEL
 const LayerVisibilityPanel = ({
   stackup,
   visibility,
@@ -738,7 +396,6 @@ const LayerVisibilityPanel = ({
     <div className="fp-left-subpanel">
       <h3 style={{ marginTop: 0 }}>Layers</h3>
       <div className="layer-list-scroll">
-        {/* Unassigned Layer */}
         <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
             <div className="layer-vis-info">
                 <div 
@@ -755,7 +412,6 @@ const LayerVisibilityPanel = ({
             </button>
         </div>
 
-        {/* Stackup Layers */}
         {stackup.map((layer) => (
              <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`}>
                 <div className="layer-vis-info">
@@ -779,7 +435,7 @@ const LayerVisibilityPanel = ({
   );
 };
 
-// 4. SHAPE LIST PANEL
+// 3. SHAPE LIST PANEL
 const ShapeListPanel = ({
   shapes,
   selectedShapeId,
@@ -811,7 +467,6 @@ const ShapeListPanel = ({
             className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""} ${!visible ? "is-hidden" : ""}`}
             onClick={() => onSelect(shape.id)}
           >
-            {/* Colored squares for assigned layers */}
             <div className="shape-layer-indicators">
               {stackup.map(layer => {
                  if (shape.assignedLayers?.[layer.id] !== undefined) {
@@ -883,243 +538,62 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     footprintRef.current = footprint;
   }, [footprint]);
 
-  // Layer Visibility State: undefined/true = visible, false = hidden
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
 
-  // Viewport state for zooming/panning
   const [viewBox, setViewBox] = useState({ x: -50, y: -50, width: 100, height: 100 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
-  
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
   // PERFORMANCE: Debounced State for 3D View
-  // We maintain a separate footprint object for the 3D view which updates less frequently.
   const [deferredFootprint, setDeferredFootprint] = useState(footprint);
 
-  // Effect to debounce updates to the 3D view state
   useEffect(() => {
-    // If we are currently in 2D mode, we don't need to burn CPU updating the 3D view in the background.
-    // However, when switching tabs, we'll want it up to date.
     if (viewMode === "2D") return;
-
     const timer = setTimeout(() => {
         setDeferredFootprint(footprint);
-    }, 600); // 600ms delay to allow typing/dragging to finish before expensive CSG calc
-
+    }, 600);
     return () => clearTimeout(timer);
   }, [footprint, viewMode]);
 
-  // Effect to ensure immediate update when switching TO 3D view
   useEffect(() => {
       if (viewMode === "3D") {
           setDeferredFootprint(footprint);
       }
-  }, [viewMode]); // intentionally omit footprint from deps to avoid double-update logic
+  }, [viewMode]); 
 
-  const svgRef = useRef<SVGSVGElement>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const viewBoxRef = useRef(viewBox);
-  
-  // Ref for 3D View to control camera
   const footprint3DRef = useRef<Footprint3DViewHandle>(null);
 
-  // Dragging State Refs (Canvas Pan)
-  const isDragging = useRef(false);
-  const hasMoved = useRef(false);
-  const dragStart = useRef({ x: 0, y: 0 });
-  const dragStartViewBox = useRef({ x: 0, y: 0 });
-  const clickedShapeId = useRef<string | null>(null);
-
-  // Shape Dragging State Refs (Moving Components)
+  // Shape Dragging State Refs
   const isShapeDragging = useRef(false);
   const shapeDragStartPos = useRef({ x: 0, y: 0 });
-  // Store the FULL shape object state at start of drag
   const shapeDragStartData = useRef<FootprintShape | null>(null);
   
-  // Drag Target Info
   const dragTargetRef = useRef<{ 
       id: string; 
       pointIdx?: number; 
       handleType?: 'in' | 'out'; 
   } | null>(null);
 
-
-  // Sync ref with state
-  useEffect(() => {
-    viewBoxRef.current = viewBox;
-  }, [viewBox]);
-
-  // --- RESIZE OBSERVER (Adaptive Grid/Fill) ---
-  useLayoutEffect(() => {
-    if (!wrapperRef.current || viewMode !== "2D") return;
-    
-    const updateDimensions = () => {
-        if (!wrapperRef.current) return;
-        const { width, height } = wrapperRef.current.getBoundingClientRect();
-        if (width === 0 || height === 0) return;
-            
-        setViewBox(prev => {
-            const currentRatio = prev.width / prev.height;
-            const newRatio = width / height;
-            
-            const newHeight = prev.width / newRatio;
-            
-            // Keep center
-            const centerX = prev.x + prev.width / 2;
-            const centerY = prev.y + prev.height / 2;
-            
-            return {
-                x: centerX - prev.width / 2,
-                y: centerY - newHeight / 2,
-                width: prev.width,
-                height: newHeight
-            };
-        });
-    };
-
-    const observer = new ResizeObserver(() => {
-        updateDimensions();
-    });
-    
-    observer.observe(wrapperRef.current);
-    updateDimensions(); 
-
-    return () => observer.disconnect();
-  }, [viewMode]);
-
-  // --- ZOOM HANDLER ---
-  useEffect(() => {
-    if (viewMode !== "2D") return;
-    const element = wrapperRef.current; 
-    if (!element) return;
-
-    const onWheel = (e: WheelEvent) => {
-        e.preventDefault();
-        
-        const currentVB = viewBoxRef.current;
-        const rect = element.getBoundingClientRect();
-        
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-        
-        const ratioX = mouseX / rect.width;
-        const ratioY = mouseY / rect.height;
-        
-        const userX = currentVB.x + ratioX * currentVB.width;
-        const userY = currentVB.y + ratioY * currentVB.height;
-        
-        const ZOOM_SPEED = 1.1;
-        const delta = Math.sign(e.deltaY); 
-        const scale = delta > 0 ? ZOOM_SPEED : 1 / ZOOM_SPEED;
-        
-        const newWidth = currentVB.width * scale;
-        const newHeight = currentVB.height * scale;
-        
-        const newX = userX - ratioX * newWidth;
-        const newY = userY - ratioY * newHeight;
-        
-        setViewBox({ x: newX, y: newY, width: newWidth, height: newHeight });
-    };
-
-    element.addEventListener('wheel', onWheel, { passive: false });
-    return () => {
-        element.removeEventListener('wheel', onWheel);
-    };
-  }, [viewMode]);
-
-  // --- PAN HANDLERS ---
-  
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (viewMode !== "2D") return;
-    if (e.button !== 0) return;
-    
-    isDragging.current = true;
-    hasMoved.current = false;
-    dragStart.current = { x: e.clientX, y: e.clientY };
-    dragStartViewBox.current = { x: viewBox.x, y: viewBox.y };
-    
-    window.addEventListener('mousemove', handleGlobalMouseMove);
-    window.addEventListener('mouseup', handleGlobalMouseUp);
-  };
-
-  const handleGlobalMouseMove = (e: MouseEvent) => {
-    if (!isDragging.current || !wrapperRef.current) return;
-    
-    const dx = e.clientX - dragStart.current.x;
-    const dy = e.clientY - dragStart.current.y;
-    
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
-        hasMoved.current = true;
-    }
-    
-    const rect = wrapperRef.current.getBoundingClientRect();
-    const scaleX = viewBoxRef.current.width / rect.width;
-    const scaleY = viewBoxRef.current.height / rect.height;
-    
-    const newX = dragStartViewBox.current.x - dx * scaleX;
-    const newY = dragStartViewBox.current.y - dy * scaleY;
-    
-    setViewBox(prev => ({
-        ...prev,
-        x: newX,
-        y: newY
-    }));
-  };
-
-  const handleGlobalMouseUp = (e: MouseEvent) => {
-    isDragging.current = false;
-    window.removeEventListener('mousemove', handleGlobalMouseMove);
-    window.removeEventListener('mouseup', handleGlobalMouseUp);
-
-    if (!hasMoved.current) {
-        if (clickedShapeId.current) {
-            setSelectedShapeId(clickedShapeId.current);
-        } else {
-            setSelectedShapeId(null);
-        }
-    }
-    clickedShapeId.current = null;
-  };
+  // --- ZOOM & PAN managed by Viewer2D via viewBox state ---
+  // The Viewer2D component takes `viewBox` and `setViewBox`.
 
   // --- SHAPE DRAG HANDLERS ---
-
-  const handleShapeMouseDown = (e: React.MouseEvent, id: string, pointIndex?: number) => {
-      // Stop propagation to prevent Panning from starting
-      e.stopPropagation(); 
-      e.preventDefault();
-
+  const handleItemMouseDown = (e: React.MouseEvent, item: Viewer2DItem, subId?: string | number, handleType?: 'in' | 'out') => {
       if (viewMode !== "2D") return;
+      if (item.type !== "shape") return;
 
-      // Select the shape
-      setSelectedShapeId(id);
+      setSelectedShapeId(item.id);
       
-      const shape = footprint.shapes.find(s => s.id === id);
-      if (!shape) return;
-
-      // Initialize Drag State
-      isShapeDragging.current = true;
-      dragTargetRef.current = { id, pointIdx: pointIndex }; // type undefined = entire shape/anchor
-
-      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
-      
-      // Deep clone to store initial state
-      shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
-
-      // Attach Global Listeners for Dragging
-      window.addEventListener('mousemove', handleShapeMouseMove);
-      window.addEventListener('mouseup', handleShapeMouseUp);
-  };
-
-  const handleHandleMouseDown = (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => {
-      e.stopPropagation();
-      e.preventDefault();
-      
-      if (viewMode !== "2D") return;
-
-      setSelectedShapeId(id);
-      const shape = footprint.shapes.find(s => s.id === id);
+      const shape = footprint.shapes.find(s => s.id === item.id);
       if (!shape) return;
 
       isShapeDragging.current = true;
-      dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
+      dragTargetRef.current = { 
+          id: item.id, 
+          pointIdx: typeof subId === 'number' ? subId : undefined, 
+          handleType: handleType
+      };
+
       shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
       shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
 
@@ -1131,8 +605,8 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       if (!isShapeDragging.current || !wrapperRef.current || !dragTargetRef.current || !shapeDragStartData.current) return;
 
       const rect = wrapperRef.current.getBoundingClientRect();
-      const scaleX = viewBoxRef.current.width / rect.width;
-      const scaleY = viewBoxRef.current.height / rect.height;
+      const scaleX = viewBox.width / rect.width;
+      const scaleY = viewBox.height / rect.height;
 
       const dxPx = e.clientX - shapeDragStartPos.current.x;
       const dyPx = e.clientY - shapeDragStartPos.current.y;
@@ -1147,12 +621,10 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
       const updatedShapes = currentFP.shapes.map(s => {
           if (s.id === id) {
-              
               if (s.type === "line" && startShape.type === "line") {
                   const newPoints = [...startShape.points];
                   
                   if (handleType && pointIdx !== undefined) {
-                      // Dragging a Control Handle (Relative update)
                       const p = newPoints[pointIdx];
                       if (handleType === 'in' && p.handleIn) {
                           newPoints[pointIdx] = {
@@ -1172,7 +644,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                           };
                       }
                   } else if (pointIdx !== undefined) {
-                      // Dragging a specific Point (Line vertex)
                       const p = newPoints[pointIdx];
                       newPoints[pointIdx] = {
                           ...p,
@@ -1180,7 +651,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                           y: modifyExpression(p.y, dyWorld)
                       };
                   } else {
-                      // Dragging entire Line shape (all points)
                       const allMoved = newPoints.map(p => ({
                           ...p,
                           x: modifyExpression(p.x, dxWorld),
@@ -1188,11 +658,9 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                       }));
                       return { ...s, points: allMoved };
                   }
-
                   return { ...s, points: newPoints };
               } 
               
-              // Standard Shapes (Circle/Rect)
               if (pointIdx === undefined && !handleType) {
                    if (startShape.type === "circle" || startShape.type === "rect") {
                       return { 
@@ -1233,7 +701,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     } else if (type === "rect") {
       newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0", cornerRadius: "0" };
     } else {
-      // Line: default 2 points
       newShape = { 
           ...base, 
           type: "line", 
@@ -1277,10 +744,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
     const newShapes = [...footprint.shapes];
     const targetIndex = index + direction;
-    
-    // Swap
     [newShapes[index], newShapes[targetIndex]] = [newShapes[targetIndex], newShapes[index]];
-    
     onUpdate({ ...footprint, shapes: newShapes });
   };
 
@@ -1291,7 +755,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   const toggleLayerVisibility = (id: string) => {
     setLayerVisibility(prev => ({
         ...prev,
-        [id]: prev[id] === undefined ? false : !prev[id] // toggle between true/undefined (visible) and false (hidden)
+        [id]: prev[id] === undefined ? false : !prev[id]
     }));
   };
 
@@ -1321,28 +785,30 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     }
   };
 
-  // --- DERIVED STATE ---
+  // --- PREPARE ITEMS FOR VIEWER2D ---
   const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
-  const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
-  // VISIBILITY CHECK FOR 2D
   const isShapeVisible = (shape: FootprintShape) => {
       const assignedIds = Object.keys(shape.assignedLayers || {});
-      
       if (assignedIds.length === 0) {
-          // If assigned to no layers, use "unassigned" visibility
           return layerVisibility["unassigned"] !== false;
       }
-      
-      // If assigned to layers, visible if NOT ALL of them are hidden.
       const allAssignedLayersHidden = assignedIds.every(id => layerVisibility[id] === false);
       return !allAssignedLayersHidden;
   };
 
-  // --- RENDER: EDITOR VIEW ---
+  // Viewer2D expects items. Footprint editor renders shapes.
+  // Note: We reverse the array for display so index 0 (top) is drawn last (on top).
+  const viewerItems: Viewer2DItem[] = [...footprint.shapes].reverse().map(shape => ({
+      type: "shape",
+      id: shape.id,
+      data: shape,
+      selected: shape.id === selectedShapeId,
+      visible: isShapeVisible(shape)
+  }));
+
   return (
     <div className="footprint-editor-container">
-      {/* Header Toolbar */}
       <div className="fp-toolbar">
         <button className="secondary" onClick={onClose}>
           ← Back
@@ -1353,16 +819,13 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
             value={footprint.name}
             onChange={(e) => updateFootprintName(e.target.value)}
         />
-        
         <div className="spacer" />
-        
         <button onClick={() => addShape("circle")}>+ Circle</button>
         <button onClick={() => addShape("rect")}>+ Rect</button>
         <button onClick={() => addShape("line")}>+ Line</button>
       </div>
 
       <div className="fp-workspace">
-        {/* LEFT: LAYERS AND SHAPES */}
         <div className="fp-left-panel">
             <LayerVisibilityPanel 
                 stackup={stackup}
@@ -1381,9 +844,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
             />
         </div>
 
-        {/* CENTER: VISUAL EDITOR with Toggle Bar */}
         <div className="fp-center-column">
-            {/* VIEW TOGGLE */}
             <div className="view-toggle-bar">
                 <button 
                     className={`view-toggle-btn ${viewMode === "2D" ? "active" : ""}`}
@@ -1403,7 +864,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                 className="fp-canvas-wrapper" 
                 ref={wrapperRef}
             >
-                {/* Home Button handles both views now */}
                 <button 
                     className="canvas-home-btn" 
                     onClick={handleHomeClick}
@@ -1412,86 +872,32 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                     🏠
                 </button>
 
-            {/* 2D View Container - Persist when hidden */}
             <div style={{ display: viewMode === "2D" ? 'contents' : 'none' }}>
-                <svg 
-                    ref={svgRef}
-                    className="fp-canvas" 
-                    viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
-                    onMouseDown={handleMouseDown}
-                >
-                    <defs>
-                    <pattern 
-                        id="grid" 
-                        width={gridSize} 
-                        height={gridSize} 
-                        patternUnits="userSpaceOnUse"
-                    >
-                        <path 
-                            d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} 
-                            fill="none" 
-                            stroke="#333" 
-                            strokeWidth="1" 
-                            vectorEffect="non-scaling-stroke" 
-                        />
-                    </pattern>
-                    </defs>
-                    
-                    <rect 
-                        x={viewBox.x} 
-                        y={viewBox.y} 
-                        width={viewBox.width} 
-                        height={viewBox.height} 
-                        fill="url(#grid)" 
-                    />
-                    
-                    <line 
-                        x1={viewBox.x} y1="0" 
-                        x2={viewBox.x + viewBox.width} y2="0" 
-                        stroke="#444" strokeWidth="2" 
-                        vectorEffect="non-scaling-stroke" 
-                    />
-                    <line 
-                        x1="0" y1={viewBox.y} 
-                        x2="0" y2={viewBox.y + viewBox.height} 
-                        stroke="#444" strokeWidth="2" 
-                        vectorEffect="non-scaling-stroke" 
-                    />
-
-                    {[...footprint.shapes].reverse().map((shape) => {
-                        if (!isShapeVisible(shape)) return null;
-                        return (
-                            <ShapeRenderer
-                                key={shape.id}
-                                shape={shape}
-                                isSelected={shape.id === selectedShapeId}
-                                params={params}
-                                stackup={stackup}
-                                onShapeDown={handleShapeMouseDown}
-                                onHandleDown={handleHandleMouseDown}
-                            />
-                        );
-                    })}
-                </svg>
-                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan | Drag Handles</div>
+                <Viewer2D 
+                    items={viewerItems}
+                    params={params}
+                    stackup={stackup}
+                    viewBox={viewBox}
+                    setViewBox={setViewBox}
+                    onItemDown={handleItemMouseDown}
+                    wrapperRef={wrapperRef}
+                />
+                <div className="canvas-hint">Scroll to Zoom | Drag to Pan | Drag Handles</div>
             </div>
             
-            {/* 3D VIEW - Persist when hidden */}
-            {/* Note: We use deferredFootprint here to avoid lagging 2D interactions with heavy CSG updates */}
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
                 <Footprint3DView 
                     ref={footprint3DRef}
                     footprint={deferredFootprint}
                     params={params}
                     stackup={stackup}
-                    visibleLayers={layerVisibility} // Pass visibility
-                    is3DActive={viewMode === "3D"} // Pass active state to pause rendering
+                    visibleLayers={layerVisibility}
+                    is3DActive={viewMode === "3D"} 
                 />
             </div>
             </div>
         </div>
 
-        {/* RIGHT: PROPERTIES PANEL */}
         <div className="fp-sidebar">
           {activeShape ? (
             <>
