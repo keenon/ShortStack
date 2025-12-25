@@ -77,6 +77,8 @@ export interface Footprint {
   id: string;
   name: string;
   shapes: FootprintShape[];
+  isBoard?: boolean;      // NEW: Marks if this footprint is a standalone board
+  boardOutline?: Point[]; // NEW: Outline points if isBoard is true
 }
 
 export interface FootprintInstance {
@@ -88,7 +90,7 @@ export interface FootprintInstance {
   angle: string;       // Expression
 }
 
-// Board Outline types
+// Board Outline types (Global Project Board)
 export interface BoardOutline {
   points: Point[];
 }

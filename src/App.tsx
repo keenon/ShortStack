@@ -144,6 +144,11 @@ function App() {
         // Sanitize Footprints
         const newFootprints: Footprint[] = rawFootprints.map((fp: any) => {
           if (!fp.id || !fp.shapes) needsUpgrade = true;
+          
+          // New properties sanitization
+          if (fp.isBoard === undefined) { fp.isBoard = false; needsUpgrade = true; }
+          if (fp.isBoard && !fp.boardOutline) { fp.boardOutline = []; needsUpgrade = true; }
+
           const sanitizedShapes = (fp.shapes || []).map((s: any) => {
             if (!s.id || !s.assignedLayers || s.name === undefined) needsUpgrade = true;
             

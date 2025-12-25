@@ -14,6 +14,8 @@ interface Props {
   stackup: StackupLayer[];
 }
 
+const BOARD_OUTLINE_ID = "BOARD_OUTLINE";
+
 // ------------------------------------------------------------------
 // HELPERS
 // ------------------------------------------------------------------
@@ -79,7 +81,6 @@ export function modifyExpression(expression: string, delta: number): string {
 }
 
 // Evaluate math expressions to numbers (for visualization only)
-// UPDATED: Accepts LayerAssignment object to prevent crashes in legacy renderers
 export function evaluateExpression(expression: string | LayerAssignment | undefined | null, params: Parameter[]): number {
   if (!expression) return 0;
 
@@ -99,7 +100,7 @@ export function evaluateExpression(expression: string | LayerAssignment | undefi
   try {
     const scope: Record<string, any> = {};
     params.forEach((p) => {
-      // Treat parameters as pure numbers in mm to allow mixed arithmetic (e.g. "Width + 5")
+      // Treat parameters as pure numbers in mm
       const val = p.unit === "in" ? p.value * 25.4 : p.value;
       scope[p.key] = val;
     });
@@ -175,8 +176,7 @@ const ShapeRenderer = ({
           // Cut Layer: Solid black with outline in layer color
           fill = "black";
       } else {
-          // Carved/Printed Layer: Outline in layer color, center fades to black based on depth
-          // Handle both string (legacy) and LayerAssignment object
+          // Carved/Printed Layer
           const rawAssignment = assigned[highestLayer.id];
           const depthExpression = (typeof rawAssignment === 'string') ? rawAssignment : rawAssignment.depth;
           
@@ -256,13 +256,9 @@ const ShapeRenderer = ({
               const curr = pts[i];
               const next = pts[i+1];
               
-              // Handle Out for current point (Control Point 1)
-              // If no handle, use current point
               const cp1x = curr.x + (curr.hOut?.x || 0);
               const cp1y = -(curr.y + (curr.hOut?.y || 0));
 
-              // Handle In for next point (Control Point 2)
-              // If no handle, use next point
               const cp2x = next.x + (next.hIn?.x || 0);
               const cp2y = -(next.y + (next.hIn?.y || 0));
               
@@ -281,7 +277,7 @@ const ShapeRenderer = ({
           elements.push(
               <circle 
                   key={`anchor-${idx}`}
-                  cx={pt.x} cy={-pt.y} r={3/strokeWidth} // Scale radius slightly with zoom 
+                  cx={pt.x} cy={-pt.y} r={3/strokeWidth}
                   fill="#fff" stroke="#646cff" strokeWidth={1}
                   vectorEffect="non-scaling-stroke"
                   onMouseDown={(e) => {
@@ -361,18 +357,359 @@ const ShapeRenderer = ({
   return null;
 };
 
+// NEW: Board Outline Renderer (Closed Loop)
+const BoardOutlineRenderer = ({
+  points,
+  isSelected,
+  params,
+  onMouseDown,
+  onHandleDown,
+}: {
+  points: Point[];
+  isSelected: boolean;
+  params: Parameter[];
+  onMouseDown: (e: React.MouseEvent, id: string, idx?: number) => void;
+  onHandleDown: (e: React.MouseEvent, id: string, idx: number, type: 'in' | 'out') => void;
+}) => {
+    // Styling for board outline - Matched to LayoutEditor
+    const stroke = isSelected ? "#646cff" : "#555";
+    const strokeWidth = isSelected ? 3 : 2;
+    const strokeDasharray = isSelected ? "0" : "5,5";
+
+    // Pre-evaluate points
+    const pts = points.map(p => ({
+        x: evaluateExpression(p.x, params),
+        y: evaluateExpression(p.y, params),
+        hIn: p.handleIn ? { 
+            x: evaluateExpression(p.handleIn.x, params), 
+            y: evaluateExpression(p.handleIn.y, params) 
+        } : null,
+        hOut: p.handleOut ? { 
+            x: evaluateExpression(p.handleOut.x, params), 
+            y: evaluateExpression(p.handleOut.y, params) 
+        } : null
+    }));
+
+    let d = "";
+    if (pts.length > 0) {
+        d = `M ${pts[0].x} ${-pts[0].y}`;
+        
+        for (let i = 0; i < pts.length; i++) {
+            const curr = pts[i];
+            // Loop back to 0 at the end
+            const next = pts[(i + 1) % pts.length];
+            
+            const cp1x = curr.x + (curr.hOut?.x || 0);
+            const cp1y = -(curr.y + (curr.hOut?.y || 0));
+
+            const cp2x = next.x + (next.hIn?.x || 0);
+            const cp2y = -(next.y + (next.hIn?.y || 0));
+            
+            const endX = next.x;
+            const endY = -next.y;
+
+            d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${endX} ${endY}`;
+        }
+        d += " Z"; // Close path explicitly
+    }
+
+    // Handles - Matched sizing to Line Tool in FootprintEditor
+    const handles = isSelected ? pts.map((pt, idx) => {
+        const elements = [];
+        
+        // Anchor Point
+        elements.push(
+            <circle 
+                key={`bo-anchor-${idx}`}
+                cx={pt.x} cy={-pt.y} r={3/strokeWidth}
+                fill="#fff" stroke="#646cff" strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+                onMouseDown={(e) => {
+                    e.stopPropagation();
+                    onMouseDown(e, BOARD_OUTLINE_ID, idx);
+                }}
+            />
+        );
+
+        // Handle In
+        if (pt.hIn) {
+            const hx = pt.x + pt.hIn.x;
+            const hy = -(pt.y + pt.hIn.y);
+            elements.push(
+                <line 
+                    key={`bo-line-in-${idx}`}
+                    x1={pt.x} y1={-pt.y} x2={hx} y2={hy}
+                    stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke"
+                />,
+                <circle 
+                    key={`bo-handle-in-${idx}`}
+                    cx={hx} cy={hy} r={2.5/strokeWidth}
+                    fill="#646cff"
+                    vectorEffect="non-scaling-stroke"
+                    style={{cursor: 'crosshair'}}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      onHandleDown(e, BOARD_OUTLINE_ID, idx, 'in');
+                    }}
+                />
+            );
+        }
+
+        // Handle Out
+        if (pt.hOut) {
+            const hx = pt.x + pt.hOut.x;
+            const hy = -(pt.y + pt.hOut.y);
+            elements.push(
+                <line 
+                    key={`bo-line-out-${idx}`}
+                    x1={pt.x} y1={-pt.y} x2={hx} y2={hy}
+                    stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke"
+                />,
+                <circle 
+                    key={`bo-handle-out-${idx}`}
+                    cx={hx} cy={hy} r={2.5/strokeWidth}
+                    fill="#646cff"
+                    vectorEffect="non-scaling-stroke"
+                    style={{cursor: 'crosshair'}}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      onHandleDown(e, BOARD_OUTLINE_ID, idx, 'out');
+                    }}
+                />
+            );
+        }
+        return elements;
+    }) : null;
+
+    return (
+        <g>
+            {/* Invisible Hit Area (Thicker) */}
+            <path 
+                d={d}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={10}
+                vectorEffect="non-scaling-stroke"
+                style={{ cursor: "pointer" }}
+                onMouseDown={(e) => onMouseDown(e, BOARD_OUTLINE_ID)}
+            />
+            {/* Visible Line */}
+            <path 
+                d={d}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={strokeWidth}
+                strokeDasharray={strokeDasharray}
+                vectorEffect="non-scaling-stroke"
+                style={{ pointerEvents: "none" }}
+            />
+            {handles}
+        </g>
+    );
+};
+
 // 2. PROPERTIES PANEL
 const PropertiesPanel = ({
-  shape,
+  footprint,
+  selectedId,
   updateShape,
+  updateFootprint,
   params,
   stackup,
 }: {
-  shape: FootprintShape;
+  footprint: Footprint;
+  selectedId: string | null;
   updateShape: (id: string, field: string, val: any) => void;
+  updateFootprint: (field: string, val: any) => void;
   params: Parameter[];
   stackup: StackupLayer[];
 }) => {
+  // SPECIAL CASE: Board Outline
+  if (selectedId === BOARD_OUTLINE_ID && footprint.isBoard && footprint.boardOutline) {
+      const points = footprint.boardOutline;
+      return (
+          <div className="properties-panel">
+            <h3>Board Outline</h3>
+            <div className="prop-group">
+                <label>Outline Points</label>
+                <div className="points-list-container">
+                    {points.map((p, idx) => (
+                        <div key={p.id} className="point-block">
+                             <div className="point-header">
+                                <span>Point {idx + 1}</span>
+                                <button 
+                                    className="icon-btn danger" 
+                                    onClick={() => {
+                                        const newPoints = points.filter((_, i) => i !== idx);
+                                        updateFootprint("boardOutline", newPoints);
+                                    }}
+                                    disabled={points.length <= 3}
+                                    title="Remove Point"
+                                >×</button>
+                            </div>
+
+                            <div className="point-row full">
+                                <span className="label">X</span>
+                                <ExpressionEditor 
+                                    value={p.x}
+                                    onChange={(val) => {
+                                        const newPoints = [...points];
+                                        newPoints[idx] = { ...p, x: val };
+                                        updateFootprint("boardOutline", newPoints);
+                                    }}
+                                    params={params}
+                                    placeholder="X"
+                                />
+                            </div>
+                            <div className="point-row full">
+                                <span className="label">Y</span>
+                                <ExpressionEditor 
+                                    value={p.y}
+                                    onChange={(val) => {
+                                        const newPoints = [...points];
+                                        newPoints[idx] = { ...p, y: val };
+                                        updateFootprint("boardOutline", newPoints);
+                                    }}
+                                    params={params}
+                                    placeholder="Y"
+                                />
+                            </div>
+
+                             <div className="point-controls-toggles">
+                                <label className="checkbox-label">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={!!p.handleIn}
+                                        onChange={(e) => {
+                                            const newPoints = [...points];
+                                            if (e.target.checked) {
+                                                newPoints[idx] = { ...p, handleIn: { x: "-5", y: "0" } };
+                                            } else {
+                                                const pt = { ...p };
+                                                delete pt.handleIn;
+                                                newPoints[idx] = pt;
+                                            }
+                                            updateFootprint("boardOutline", newPoints);
+                                        }}
+                                    /> In Handle
+                                </label>
+                                <label className="checkbox-label">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={!!p.handleOut}
+                                        onChange={(e) => {
+                                            const newPoints = [...points];
+                                            if (e.target.checked) {
+                                                newPoints[idx] = { ...p, handleOut: { x: "5", y: "0" } };
+                                            } else {
+                                                const pt = { ...p };
+                                                delete pt.handleOut;
+                                                newPoints[idx] = pt;
+                                            }
+                                            updateFootprint("boardOutline", newPoints);
+                                        }}
+                                    /> Out Handle
+                                </label>
+                            </div>
+
+                            {/* Handle In Logic */}
+                            {p.handleIn && (
+                                <div className="handle-sub-block">
+                                    <div className="sub-label">Handle In (Relative)</div>
+                                    <div className="handle-inputs">
+                                        <div className="mini-input">
+                                            <span>dX</span>
+                                            <ExpressionEditor 
+                                                value={p.handleIn.x}
+                                                onChange={(val) => {
+                                                    const newPoints = [...points];
+                                                    if (newPoints[idx].handleIn) {
+                                                        newPoints[idx].handleIn!.x = val;
+                                                        updateFootprint("boardOutline", newPoints);
+                                                    }
+                                                }}
+                                                params={params}
+                                            />
+                                        </div>
+                                        <div className="mini-input">
+                                            <span>dY</span>
+                                            <ExpressionEditor 
+                                                value={p.handleIn.y}
+                                                onChange={(val) => {
+                                                    const newPoints = [...points];
+                                                    if (newPoints[idx].handleIn) {
+                                                        newPoints[idx].handleIn!.y = val;
+                                                        updateFootprint("boardOutline", newPoints);
+                                                    }
+                                                }}
+                                                params={params}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                             {p.handleOut && (
+                                <div className="handle-sub-block">
+                                    <div className="sub-label">Handle Out (Relative)</div>
+                                    <div className="handle-inputs">
+                                        <div className="mini-input">
+                                            <span>dX</span>
+                                            <ExpressionEditor 
+                                                value={p.handleOut.x}
+                                                onChange={(val) => {
+                                                    const newPoints = [...points];
+                                                    if (newPoints[idx].handleOut) {
+                                                        newPoints[idx].handleOut!.x = val;
+                                                        updateFootprint("boardOutline", newPoints);
+                                                    }
+                                                }}
+                                                params={params}
+                                            />
+                                        </div>
+                                        <div className="mini-input">
+                                            <span>dY</span>
+                                            <ExpressionEditor 
+                                                value={p.handleOut.y}
+                                                onChange={(val) => {
+                                                    const newPoints = [...points];
+                                                    if (newPoints[idx].handleOut) {
+                                                        newPoints[idx].handleOut!.y = val;
+                                                        updateFootprint("boardOutline", newPoints);
+                                                    }
+                                                }}
+                                                params={params}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    ))}
+                    <button 
+                        className="secondary small-btn" 
+                        onClick={() => {
+                            const newPoints = [...points];
+                            const last = newPoints[newPoints.length - 1] || { x: "0", y: "0" };
+                            newPoints.push({
+                                id: crypto.randomUUID(),
+                                x: modifyExpression(last.x, 10),
+                                y: modifyExpression(last.y, 0),
+                            });
+                            updateFootprint("boardOutline", newPoints);
+                        }}
+                    >
+                        + Add Point
+                    </button>
+                </div>
+            </div>
+          </div>
+      );
+  }
+
+  const shape = footprint.shapes.find(s => s.id === selectedId);
+  if (!shape) return null;
+
   return (
     <div className="properties-panel">
       <h3>{shape.type.toUpperCase()} Properties</h3>
@@ -724,7 +1061,7 @@ const PropertiesPanel = ({
   );
 };
 
-// 3. LAYER VISIBILITY PANEL (NEW)
+// 3. LAYER VISIBILITY PANEL
 const LayerVisibilityPanel = ({
   stackup,
   visibility,
@@ -779,31 +1116,76 @@ const LayerVisibilityPanel = ({
   );
 };
 
-// 4. SHAPE LIST PANEL
+// 4. SHAPE LIST PANEL (RENAMED TO OBJECTS)
 const ShapeListPanel = ({
-  shapes,
+  footprint,
   selectedShapeId,
   onSelect,
   onDelete,
   onRename,
   onMove,
+  updateFootprint,
   stackup,
   isShapeVisible,
 }: {
-  shapes: FootprintShape[];
+  footprint: Footprint;
   selectedShapeId: string | null;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onMove: (index: number, direction: -1 | 1) => void;
+  updateFootprint: (field: string, val: any) => void;
   stackup: StackupLayer[];
   isShapeVisible: (shape: FootprintShape) => boolean;
 }) => {
+  
+  const handleBoardToggle = (checked: boolean) => {
+      updateFootprint("isBoard", checked);
+      if (checked && (!footprint.boardOutline || footprint.boardOutline.length === 0)) {
+          // Initialize default outline
+          const defaultOutline = [
+             { id: crypto.randomUUID(), x: "-10", y: "-10" },
+             { id: crypto.randomUUID(), x: "10", y: "-10" },
+             { id: crypto.randomUUID(), x: "10", y: "10" },
+             { id: crypto.randomUUID(), x: "-10", y: "10" },
+          ];
+          updateFootprint("boardOutline", defaultOutline);
+      }
+  };
+
   return (
     <div className="fp-left-subpanel">
-      <h3 style={{ marginTop: 0 }}>Shapes</h3>
+      <h3 style={{ marginTop: 0 }}>Objects</h3>
+      
+      {/* Standalone Board Toggle */}
+      <div style={{ marginBottom: "10px", paddingBottom: "10px", borderBottom: "1px solid #333" }}>
+          <label className="checkbox-label" style={{ fontWeight: "bold", color: "#fff" }}>
+              <input 
+                type="checkbox"
+                checked={!!footprint.isBoard}
+                onChange={(e) => handleBoardToggle(e.target.checked)}
+              />
+              Standalone Board
+          </label>
+      </div>
+
       <div className="shape-list-container">
-        {shapes.map((shape, index) => {
+        
+        {/* Special Board Outline Object */}
+        {footprint.isBoard && (
+            <div
+                className={`shape-item ${selectedShapeId === BOARD_OUTLINE_ID ? "selected" : ""}`}
+                onClick={() => onSelect(BOARD_OUTLINE_ID)}
+            >
+                <div className="shape-layer-indicators">
+                    {/* Always white for board outline */}
+                    <div className="layer-indicator-dot" style={{ backgroundColor: '#fff' }} />
+                </div>
+                <span className="shape-name-edit" style={{ fontWeight: 'bold' }}>Board Outline</span>
+            </div>
+        )}
+
+        {footprint.shapes.map((shape, index) => {
           const visible = isShapeVisible(shape);
           return (
           <div
@@ -846,7 +1228,7 @@ const ShapeListPanel = ({
                 <button 
                     className="icon-btn btn-down" 
                     onClick={(e) => { e.stopPropagation(); onMove(index, 1); }}
-                    disabled={index === shapes.length - 1}
+                    disabled={index === footprint.shapes.length - 1}
                     style={{ width: '24px', height: '24px', fontSize: '0.9em' }}
                     title="Move Down"
                 >↓</button>
@@ -864,7 +1246,7 @@ const ShapeListPanel = ({
             </div>
           </div>
         )})}
-        {shapes.length === 0 && <div className="empty-state-small">No shapes added.</div>}
+        {footprint.shapes.length === 0 && !footprint.isBoard && <div className="empty-state-small">No shapes added.</div>}
       </div>
     </div>
   );
@@ -877,7 +1259,6 @@ const ShapeListPanel = ({
 export default function FootprintEditor({ footprint, onUpdate, onClose, params, stackup }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   
-  // Keep a ref to the latest footprint to access it inside event listeners without staleness
   const footprintRef = useRef(footprint);
   useEffect(() => {
     footprintRef.current = footprint;
@@ -886,68 +1267,52 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   // Layer Visibility State: undefined/true = visible, false = hidden
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
 
-  // Viewport state for zooming/panning
   const [viewBox, setViewBox] = useState({ x: -50, y: -50, width: 100, height: 100 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
   
-  // PERFORMANCE: Debounced State for 3D View
-  // We maintain a separate footprint object for the 3D view which updates less frequently.
   const [deferredFootprint, setDeferredFootprint] = useState(footprint);
 
-  // Effect to debounce updates to the 3D view state
   useEffect(() => {
-    // If we are currently in 2D mode, we don't need to burn CPU updating the 3D view in the background.
-    // However, when switching tabs, we'll want it up to date.
     if (viewMode === "2D") return;
-
     const timer = setTimeout(() => {
         setDeferredFootprint(footprint);
-    }, 600); // 600ms delay to allow typing/dragging to finish before expensive CSG calc
-
+    }, 600);
     return () => clearTimeout(timer);
   }, [footprint, viewMode]);
 
-  // Effect to ensure immediate update when switching TO 3D view
   useEffect(() => {
       if (viewMode === "3D") {
           setDeferredFootprint(footprint);
       }
-  }, [viewMode]); // intentionally omit footprint from deps to avoid double-update logic
+  }, [viewMode]);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const viewBoxRef = useRef(viewBox);
   
-  // Ref for 3D View to control camera
   const footprint3DRef = useRef<Footprint3DViewHandle>(null);
 
-  // Dragging State Refs (Canvas Pan)
   const isDragging = useRef(false);
   const hasMoved = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const dragStartViewBox = useRef({ x: 0, y: 0 });
   const clickedShapeId = useRef<string | null>(null);
 
-  // Shape Dragging State Refs (Moving Components)
   const isShapeDragging = useRef(false);
   const shapeDragStartPos = useRef({ x: 0, y: 0 });
-  // Store the FULL shape object state at start of drag
-  const shapeDragStartData = useRef<FootprintShape | null>(null);
+  // Used for both Shape and Board Outline drags
+  const shapeDragStartData = useRef<FootprintShape | Point[] | null>(null);
   
-  // Drag Target Info
   const dragTargetRef = useRef<{ 
       id: string; 
       pointIdx?: number; 
       handleType?: 'in' | 'out'; 
   } | null>(null);
 
-
-  // Sync ref with state
   useEffect(() => {
     viewBoxRef.current = viewBox;
   }, [viewBox]);
 
-  // --- RESIZE OBSERVER (Adaptive Grid/Fill) ---
   useLayoutEffect(() => {
     if (!wrapperRef.current || viewMode !== "2D") return;
     
@@ -959,10 +1324,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
         setViewBox(prev => {
             const currentRatio = prev.width / prev.height;
             const newRatio = width / height;
-            
             const newHeight = prev.width / newRatio;
-            
-            // Keep center
             const centerX = prev.x + prev.width / 2;
             const centerY = prev.y + prev.height / 2;
             
@@ -985,7 +1347,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     return () => observer.disconnect();
   }, [viewMode]);
 
-  // --- ZOOM HANDLER ---
   useEffect(() => {
     if (viewMode !== "2D") return;
     const element = wrapperRef.current; 
@@ -993,29 +1354,20 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
     const onWheel = (e: WheelEvent) => {
         e.preventDefault();
-        
-        const currentVB = viewBoxRef.current;
         const rect = element.getBoundingClientRect();
-        
         const mouseX = e.clientX - rect.left;
         const mouseY = e.clientY - rect.top;
-        
         const ratioX = mouseX / rect.width;
         const ratioY = mouseY / rect.height;
-        
-        const userX = currentVB.x + ratioX * currentVB.width;
-        const userY = currentVB.y + ratioY * currentVB.height;
-        
+        const userX = viewBoxRef.current.x + ratioX * viewBoxRef.current.width;
+        const userY = viewBoxRef.current.y + ratioY * viewBoxRef.current.height;
         const ZOOM_SPEED = 1.1;
         const delta = Math.sign(e.deltaY); 
         const scale = delta > 0 ? ZOOM_SPEED : 1 / ZOOM_SPEED;
-        
-        const newWidth = currentVB.width * scale;
-        const newHeight = currentVB.height * scale;
-        
+        const newWidth = viewBoxRef.current.width * scale;
+        const newHeight = viewBoxRef.current.height * scale;
         const newX = userX - ratioX * newWidth;
         const newY = userY - ratioY * newHeight;
-        
         setViewBox({ x: newX, y: newY, width: newWidth, height: newHeight });
     };
 
@@ -1025,8 +1377,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     };
   }, [viewMode]);
 
-  // --- PAN HANDLERS ---
-  
   const handleMouseDown = (e: React.MouseEvent) => {
     if (viewMode !== "2D") return;
     if (e.button !== 0) return;
@@ -1082,28 +1432,30 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   // --- SHAPE DRAG HANDLERS ---
 
   const handleShapeMouseDown = (e: React.MouseEvent, id: string, pointIndex?: number) => {
-      // Stop propagation to prevent Panning from starting
       e.stopPropagation(); 
       e.preventDefault();
 
       if (viewMode !== "2D") return;
 
-      // Select the shape
       setSelectedShapeId(id);
       
-      const shape = footprint.shapes.find(s => s.id === id);
-      if (!shape) return;
+      // Board Outline Logic
+      if (id === BOARD_OUTLINE_ID) {
+          if (!footprint.boardOutline) return;
+          isShapeDragging.current = true;
+          dragTargetRef.current = { id, pointIdx: pointIndex }; 
+          shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+          shapeDragStartData.current = JSON.parse(JSON.stringify(footprint.boardOutline)); // Store points array
+      } else {
+          // Regular Shape Logic
+          const shape = footprint.shapes.find(s => s.id === id);
+          if (!shape) return;
+          isShapeDragging.current = true;
+          dragTargetRef.current = { id, pointIdx: pointIndex };
+          shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+          shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
+      }
 
-      // Initialize Drag State
-      isShapeDragging.current = true;
-      dragTargetRef.current = { id, pointIdx: pointIndex }; // type undefined = entire shape/anchor
-
-      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
-      
-      // Deep clone to store initial state
-      shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
-
-      // Attach Global Listeners for Dragging
       window.addEventListener('mousemove', handleShapeMouseMove);
       window.addEventListener('mouseup', handleShapeMouseUp);
   };
@@ -1115,13 +1467,22 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       if (viewMode !== "2D") return;
 
       setSelectedShapeId(id);
-      const shape = footprint.shapes.find(s => s.id === id);
-      if (!shape) return;
 
-      isShapeDragging.current = true;
-      dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
-      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
-      shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
+      if (id === BOARD_OUTLINE_ID) {
+           if (!footprint.boardOutline) return;
+           isShapeDragging.current = true;
+           dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
+           shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+           shapeDragStartData.current = JSON.parse(JSON.stringify(footprint.boardOutline));
+      } else {
+          const shape = footprint.shapes.find(s => s.id === id);
+          if (!shape) return;
+
+          isShapeDragging.current = true;
+          dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
+          shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+          shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
+      }
 
       window.addEventListener('mousemove', handleShapeMouseMove);
       window.addEventListener('mouseup', handleShapeMouseUp);
@@ -1138,75 +1499,116 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       const dyPx = e.clientY - shapeDragStartPos.current.y;
 
       const dxWorld = dxPx * scaleX;
-      // In Y-up mode, moving mouse down (dyPx > 0) means moving "down" in world Y (negative direction)
       const dyWorld = -dyPx * scaleY;
 
       const currentFP = footprintRef.current;
       const { id, pointIdx, handleType } = dragTargetRef.current;
-      const startShape = shapeDragStartData.current;
+      
+      // Handle Board Outline Drag
+      if (id === BOARD_OUTLINE_ID) {
+          const startPoints = shapeDragStartData.current as Point[];
+          const newPoints = [...startPoints];
 
-      const updatedShapes = currentFP.shapes.map(s => {
-          if (s.id === id) {
-              
-              if (s.type === "line" && startShape.type === "line") {
-                  const newPoints = [...startShape.points];
+          if (handleType && pointIdx !== undefined) {
+               const p = newPoints[pointIdx];
+               if (handleType === 'in' && p.handleIn) {
+                   newPoints[pointIdx] = {
+                       ...p,
+                       handleIn: {
+                           x: modifyExpression(p.handleIn.x, dxWorld),
+                           y: modifyExpression(p.handleIn.y, dyWorld)
+                       }
+                   };
+               } else if (handleType === 'out' && p.handleOut) {
+                   newPoints[pointIdx] = {
+                       ...p,
+                       handleOut: {
+                           x: modifyExpression(p.handleOut.x, dxWorld),
+                           y: modifyExpression(p.handleOut.y, dyWorld)
+                       }
+                   };
+               }
+          } else if (pointIdx !== undefined) {
+               // Vertex Drag
+               const p = newPoints[pointIdx];
+               newPoints[pointIdx] = {
+                   ...p,
+                   x: modifyExpression(p.x, dxWorld),
+                   y: modifyExpression(p.y, dyWorld)
+               };
+          } else {
+               // Drag Whole Outline (All Points)
+               for(let i=0; i<newPoints.length; i++) {
+                   newPoints[i] = {
+                       ...newPoints[i],
+                       x: modifyExpression(newPoints[i].x, dxWorld),
+                       y: modifyExpression(newPoints[i].y, dyWorld)
+                   };
+               }
+          }
+          onUpdate({ ...currentFP, boardOutline: newPoints });
+
+      } else {
+          // Regular Shape Drag
+          const startShape = shapeDragStartData.current as FootprintShape;
+          const updatedShapes = currentFP.shapes.map(s => {
+              if (s.id === id) {
                   
-                  if (handleType && pointIdx !== undefined) {
-                      // Dragging a Control Handle (Relative update)
-                      const p = newPoints[pointIdx];
-                      if (handleType === 'in' && p.handleIn) {
+                  if (s.type === "line" && startShape.type === "line") {
+                      const newPoints = [...startShape.points];
+                      
+                      if (handleType && pointIdx !== undefined) {
+                          const p = newPoints[pointIdx];
+                          if (handleType === 'in' && p.handleIn) {
+                              newPoints[pointIdx] = {
+                                  ...p,
+                                  handleIn: {
+                                      x: modifyExpression(p.handleIn.x, dxWorld),
+                                      y: modifyExpression(p.handleIn.y, dyWorld)
+                                  }
+                              };
+                          } else if (handleType === 'out' && p.handleOut) {
+                              newPoints[pointIdx] = {
+                                  ...p,
+                                  handleOut: {
+                                      x: modifyExpression(p.handleOut.x, dxWorld),
+                                      y: modifyExpression(p.handleOut.y, dyWorld)
+                                  }
+                              };
+                          }
+                      } else if (pointIdx !== undefined) {
+                          const p = newPoints[pointIdx];
                           newPoints[pointIdx] = {
                               ...p,
-                              handleIn: {
-                                  x: modifyExpression(p.handleIn.x, dxWorld),
-                                  y: modifyExpression(p.handleIn.y, dyWorld)
-                              }
+                              x: modifyExpression(p.x, dxWorld),
+                              y: modifyExpression(p.y, dyWorld)
                           };
-                      } else if (handleType === 'out' && p.handleOut) {
-                          newPoints[pointIdx] = {
+                      } else {
+                          const allMoved = newPoints.map(p => ({
                               ...p,
-                              handleOut: {
-                                  x: modifyExpression(p.handleOut.x, dxWorld),
-                                  y: modifyExpression(p.handleOut.y, dyWorld)
-                              }
+                              x: modifyExpression(p.x, dxWorld),
+                              y: modifyExpression(p.y, dyWorld)
+                          }));
+                          return { ...s, points: allMoved };
+                      }
+                      return { ...s, points: newPoints };
+                  } 
+                  
+                  // Standard Shapes
+                  if (pointIdx === undefined && !handleType) {
+                       if (startShape.type === "circle" || startShape.type === "rect") {
+                          return { 
+                              ...s, 
+                              x: modifyExpression(startShape.x, dxWorld), 
+                              y: modifyExpression(startShape.y, dyWorld) 
                           };
                       }
-                  } else if (pointIdx !== undefined) {
-                      // Dragging a specific Point (Line vertex)
-                      const p = newPoints[pointIdx];
-                      newPoints[pointIdx] = {
-                          ...p,
-                          x: modifyExpression(p.x, dxWorld),
-                          y: modifyExpression(p.y, dyWorld)
-                      };
-                  } else {
-                      // Dragging entire Line shape (all points)
-                      const allMoved = newPoints.map(p => ({
-                          ...p,
-                          x: modifyExpression(p.x, dxWorld),
-                          y: modifyExpression(p.y, dyWorld)
-                      }));
-                      return { ...s, points: allMoved };
-                  }
-
-                  return { ...s, points: newPoints };
-              } 
-              
-              // Standard Shapes (Circle/Rect)
-              if (pointIdx === undefined && !handleType) {
-                   if (startShape.type === "circle" || startShape.type === "rect") {
-                      return { 
-                          ...s, 
-                          x: modifyExpression(startShape.x, dxWorld), 
-                          y: modifyExpression(startShape.y, dyWorld) 
-                      };
                   }
               }
-          }
-          return s;
-      });
-
-      onUpdate({ ...currentFP, shapes: updatedShapes });
+              return s;
+          });
+          onUpdate({ ...currentFP, shapes: updatedShapes });
+      }
   };
 
   const handleShapeMouseUp = (e: MouseEvent) => {
@@ -1233,7 +1635,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     } else if (type === "rect") {
       newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0", cornerRadius: "0" };
     } else {
-      // Line: default 2 points
       newShape = { 
           ...base, 
           type: "line", 
@@ -1263,6 +1664,13 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     });
   };
 
+  const updateFootprintField = (field: string, val: any) => {
+      onUpdate({
+          ...footprint,
+          [field]: val
+      });
+  };
+
   const deleteShape = (shapeId: string) => {
      onUpdate({
         ...footprint,
@@ -1277,8 +1685,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
     const newShapes = [...footprint.shapes];
     const targetIndex = index + direction;
-    
-    // Swap
     [newShapes[index], newShapes[targetIndex]] = [newShapes[targetIndex], newShapes[index]];
     
     onUpdate({ ...footprint, shapes: newShapes });
@@ -1291,7 +1697,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
   const toggleLayerVisibility = (id: string) => {
     setLayerVisibility(prev => ({
         ...prev,
-        [id]: prev[id] === undefined ? false : !prev[id] // toggle between true/undefined (visible) and false (hidden)
+        [id]: prev[id] === undefined ? false : !prev[id]
     }));
   };
 
@@ -1321,25 +1727,19 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
     }
   };
 
-  // --- DERIVED STATE ---
   const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
+  const isBoardSelected = selectedShapeId === BOARD_OUTLINE_ID;
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
-  // VISIBILITY CHECK FOR 2D
   const isShapeVisible = (shape: FootprintShape) => {
       const assignedIds = Object.keys(shape.assignedLayers || {});
-      
       if (assignedIds.length === 0) {
-          // If assigned to no layers, use "unassigned" visibility
           return layerVisibility["unassigned"] !== false;
       }
-      
-      // If assigned to layers, visible if NOT ALL of them are hidden.
       const allAssignedLayersHidden = assignedIds.every(id => layerVisibility[id] === false);
       return !allAssignedLayersHidden;
   };
 
-  // --- RENDER: EDITOR VIEW ---
   return (
     <div className="footprint-editor-container">
       {/* Header Toolbar */}
@@ -1370,12 +1770,13 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                 onToggle={toggleLayerVisibility}
             />
             <ShapeListPanel
-                shapes={footprint.shapes}
+                footprint={footprint}
                 selectedShapeId={selectedShapeId}
                 onSelect={setSelectedShapeId}
                 onDelete={deleteShape}
                 onRename={(id, name) => updateShape(id, "name", name)}
                 onMove={moveShape}
+                updateFootprint={updateFootprintField}
                 stackup={stackup}
                 isShapeVisible={isShapeVisible}
             />
@@ -1403,7 +1804,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                 className="fp-canvas-wrapper" 
                 ref={wrapperRef}
             >
-                {/* Home Button handles both views now */}
                 <button 
                     className="canvas-home-btn" 
                     onClick={handleHomeClick}
@@ -1412,7 +1812,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                     🏠
                 </button>
 
-            {/* 2D View Container - Persist when hidden */}
             <div style={{ display: viewMode === "2D" ? 'contents' : 'none' }}>
                 <svg 
                     ref={svgRef}
@@ -1457,6 +1856,17 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                         stroke="#444" strokeWidth="2" 
                         vectorEffect="non-scaling-stroke" 
                     />
+                    
+                    {/* Render Board Outline if enabled */}
+                    {footprint.isBoard && footprint.boardOutline && (
+                        <BoardOutlineRenderer
+                            points={footprint.boardOutline}
+                            isSelected={selectedShapeId === BOARD_OUTLINE_ID}
+                            params={params}
+                            onMouseDown={handleShapeMouseDown}
+                            onHandleDown={handleHandleMouseDown}
+                        />
+                    )}
 
                     {[...footprint.shapes].reverse().map((shape) => {
                         if (!isShapeVisible(shape)) return null;
@@ -1476,16 +1886,15 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
                 <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan | Drag Handles</div>
             </div>
             
-            {/* 3D VIEW - Persist when hidden */}
-            {/* Note: We use deferredFootprint here to avoid lagging 2D interactions with heavy CSG updates */}
+            {/* 3D VIEW */}
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
                 <Footprint3DView 
                     ref={footprint3DRef}
                     footprint={deferredFootprint}
                     params={params}
                     stackup={stackup}
-                    visibleLayers={layerVisibility} // Pass visibility
-                    is3DActive={viewMode === "3D"} // Pass active state to pause rendering
+                    visibleLayers={layerVisibility} 
+                    is3DActive={viewMode === "3D"} 
                 />
             </div>
             </div>
@@ -1493,23 +1902,27 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
 
         {/* RIGHT: PROPERTIES PANEL */}
         <div className="fp-sidebar">
-          {activeShape ? (
+          {activeShape || isBoardSelected ? (
             <>
               <PropertiesPanel 
-                shape={activeShape} 
+                footprint={footprint}
+                selectedId={selectedShapeId}
                 updateShape={updateShape} 
+                updateFootprint={updateFootprintField}
                 params={params} 
                 stackup={stackup}
               />
-              <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
-                <button className="danger" style={{width: '100%'}} onClick={() => deleteShape(activeShape.id)}>
-                    Delete Shape
-                </button>
-              </div>
+              {activeShape && (
+                <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
+                    <button className="danger" style={{width: '100%'}} onClick={() => deleteShape(activeShape.id)}>
+                        Delete Shape
+                    </button>
+                </div>
+              )}
             </>
           ) : (
             <div className="empty-state">
-              <p>Select a shape to edit properties.</p>
+              <p>Select a shape or board outline to edit properties.</p>
             </div>
           )}
         </div>
