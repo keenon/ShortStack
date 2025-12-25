@@ -72,7 +72,7 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
        shape.lineTo(x + width - r, y + height);
-       shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
+       shape.quadraticCurveTo(x + width, y, x + width, y + height - r);
        shape.lineTo(x + width, y + r);
        shape.quadraticCurveTo(x + width, y, x + width - r, y);
        shape.lineTo(x + r, y);
@@ -530,26 +530,84 @@ const Unified3DView = forwardRef<Unified3DViewHandle, Props>(({ items, footprint
             minX = -50; maxX = 50; minY = -50; maxY = 50;
         } else {
             items.forEach(item => {
-                let x = 0, y = 0, r = 0;
                 if (item.type === 'shape') {
-                    x = evaluate(item.data.x, params);
-                    y = evaluate(item.data.y, params);
-                    if (item.data.type === 'circle') r = evaluate(item.data.diameter, params)/2;
-                    else if (item.data.type === 'rect') r = Math.max(evaluate(item.data.width, params), evaluate(item.data.height, params))/2;
-                    else r = 10; // line approx
+                    const sx = evaluate(item.data.x, params);
+                    const sy = evaluate(item.data.y, params);
+
+                    if (item.data.type === 'line') {
+                        const pts = (item.data as FootprintLine).points;
+                        const thickness = evaluate(item.data.thickness, params);
+                        const halfT = thickness / 2;
+                        
+                        if (pts.length > 0) {
+                            pts.forEach(p => {
+                                const px = evaluate(p.x, params);
+                                const py = evaluate(p.y, params);
+                                // Point in world (relative to shape origin sx, sy)
+                                const wx = sx + px;
+                                const wy = sy + py;
+                                
+                                const check = (cx: number, cy: number) => {
+                                    if (cx - halfT < minX) minX = cx - halfT;
+                                    if (cx + halfT > maxX) maxX = cx + halfT;
+                                    if (cy - halfT < minY) minY = cy - halfT;
+                                    if (cy + halfT > maxY) maxY = cy + halfT;
+                                };
+                                
+                                check(wx, wy);
+
+                                if (p.handleIn) {
+                                    const hx = evaluate(p.handleIn.x, params);
+                                    const hy = evaluate(p.handleIn.y, params);
+                                    check(wx + hx, wy + hy);
+                                }
+                                if (p.handleOut) {
+                                    const hx = evaluate(p.handleOut.x, params);
+                                    const hy = evaluate(p.handleOut.y, params);
+                                    check(wx + hx, wy + hy);
+                                }
+                            });
+                        } else {
+                            // Empty line, just use origin
+                            if (sx < minX) minX = sx;
+                            if (sx > maxX) maxX = sx;
+                            if (sy < minY) minY = sy;
+                            if (sy > maxY) maxY = sy;
+                        }
+                    } else {
+                        // Circle or Rect
+                        let r = 0;
+                        if (item.data.type === 'circle') {
+                             r = evaluate(item.data.diameter, params) / 2;
+                        } else {
+                             const w = evaluate((item.data as FootprintRect).width, params);
+                             const h = evaluate((item.data as FootprintRect).height, params);
+                             // Use semi-diagonal for safe rotation bounds
+                             r = Math.sqrt(w*w + h*h) / 2;
+                        }
+                        
+                        if (sx - r < minX) minX = sx - r;
+                        if (sx + r > maxX) maxX = sx + r;
+                        if (sy - r < minY) minY = sy - r;
+                        if (sy + r > maxY) maxY = sy + r;
+                    }
                 } else {
-                    x = evaluate(item.data.x, params);
-                    y = evaluate(item.data.y, params);
-                    r = 20; // Instance approx
+                    // Instance
+                    const x = evaluate(item.data.x, params);
+                    const y = evaluate(item.data.y, params);
+                    const r = 20; // Instance approx
+                    if (x - r < minX) minX = x - r;
+                    if (x + r > maxX) maxX = x + r;
+                    if (y - r < minY) minY = y - r;
+                    if (y + r > maxY) maxY = y + r;
                 }
-                if (x - r < minX) minX = x - r;
-                if (x + r > maxX) maxX = x + r;
-                if (y - r < minY) minY = y - r;
-                if (y + r > maxY) maxY = y + r;
             });
             minX -= PADDING; maxX += PADDING;
             minY -= PADDING; maxY += PADDING;
         }
+
+        // Safety if still infinite
+        if (minX === Infinity) { minX = -50; maxX = 50; minY = -50; maxY = 50; }
 
         shape.moveTo(minX, minY);
         shape.lineTo(maxX, minY);
