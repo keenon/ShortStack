@@ -6,7 +6,7 @@ import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/dr
 import { Geometry, Base, Subtraction, Addition } from "@react-three/csg";
 import * as THREE from "three";
 import * as math from "mathjs";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point } from "../types";
 
 interface Props {
   footprint: Footprint;
@@ -65,7 +65,7 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
        shape.lineTo(x + width - r, y + height);
-       shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
+       shape.quadraticCurveTo(x + width, y, x + width - r, y);
        shape.lineTo(x + width, y + r);
        shape.quadraticCurveTo(x + width, y, x + width - r, y);
        shape.lineTo(x + r, y);
@@ -203,6 +203,43 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
   return shape2D;
 }
 
+/**
+ * Creates a THREE.Shape from board outline points, supporting lines and cubic bezier curves.
+ */
+function createBoardShape(points: Point[], params: Parameter[]): THREE.Shape | null {
+    if (!points || points.length < 3) return null;
+    const shape = new THREE.Shape();
+
+    // Move to first point
+    const p0 = points[0];
+    shape.moveTo(evaluate(p0.x, params), evaluate(p0.y, params));
+    
+    // Loop through all points to close the shape
+    for(let i = 0; i < points.length; i++) {
+        const curr = points[i];
+        const next = points[(i + 1) % points.length];
+        
+        const x2 = evaluate(next.x, params);
+        const y2 = evaluate(next.y, params);
+
+        if (curr.handleOut || next.handleIn) {
+            const x1 = evaluate(curr.x, params);
+            const y1 = evaluate(curr.y, params);
+            
+            const cp1x = x1 + (curr.handleOut ? evaluate(curr.handleOut.x, params) : 0);
+            const cp1y = y1 + (curr.handleOut ? evaluate(curr.handleOut.y, params) : 0);
+            
+            const cp2x = x2 + (next.handleIn ? evaluate(next.handleIn.x, params) : 0);
+            const cp2y = y2 + (next.handleIn ? evaluate(next.handleIn.y, params) : 0);
+            
+            shape.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+        } else {
+            shape.lineTo(x2, y2);
+        }
+    }
+    return shape;
+}
+
 // ------------------------------------------------------------------
 // COMPONENTS
 // ------------------------------------------------------------------
@@ -216,6 +253,7 @@ interface LayerCSGProps {
     depth: number;
     centerX: number;
     centerZ: number;
+    boardShape: THREE.Shape | null;
 }
 
 /**
@@ -231,20 +269,37 @@ const CSGLayerGeometry = memo(({
     width,
     depth,
     centerX,
-    centerZ
+    centerZ,
+    boardShape
 }: LayerCSGProps) => {
 
     const CSG_EPSILON = 0.01;
 
-    // Optimization: If no cuts, just return a simple boxGeometry (handled via early exit inside Geometry usually, but here for clarity)
-    // However, react-three-csg <Geometry> container handles base + empty ops fine.
+    // Determine Base Geometry: Box vs Board Outline
+    // If boardShape is present, we extrude it.
+    // Box is centered (0,0,0) by default.
+    // Extrude is 0 to depth in Z.
+    // We must rotate Extrude to match Box orientation (X, Y=Thick, Z=Depth).
+    // Rotation X -90 => Z becomes Y, Y becomes -Z.
+    // So Extrusion (Z) becomes Thickness (Y).
+    // Shape (X, Y) becomes (X, -Z).
+    // Subtractions use localZ = -sy, which matches -Z. Perfect.
+    // We center extrusion vertically by offsetting Y by -thickness/2.
     
+    const baseGeometry = boardShape ? (
+        <Base rotation={[-Math.PI / 2, 0, 0]} position={[0, -thickness / 2, 0]}>
+            <extrudeGeometry args={[boardShape, { depth: thickness, bevelEnabled: false }]} />
+        </Base>
+    ) : (
+        <Base>
+            <boxGeometry args={[width, thickness, depth]} />
+        </Base>
+    );
+
     return (
         <Geometry>
             {/* Base Positive Shape */}
-            <Base>
-                <boxGeometry args={[width, thickness, depth]} />
-            </Base>
+            {baseGeometry}
 
             {/* Operations */}
             {shapes.map((shape) => {
@@ -481,14 +536,15 @@ const CSGLayerGeometry = memo(({
     if (prev.depth !== next.depth) return false;
     if (prev.centerX !== next.centerX) return false;
     if (prev.centerZ !== next.centerZ) return false;
-    if (prev.params !== next.params) return false; // Params change rarely, but if they do, re-render
+    if (prev.params !== next.params) return false; // Params change rarely
     
+    // Check if board shape changed (simple reference check, mostly)
+    if (prev.boardShape !== next.boardShape) return false;
+
     // Check shapes array
     if (prev.shapes.length !== next.shapes.length) return false;
     
     // Check shape references. 
-    // In FootprintEditor, we only create new shape objects when that specific shape is modified.
-    // So if the shapes assigned to this layer haven't changed, their references will be identical.
     for (let i = 0; i < prev.shapes.length; i++) {
         if (prev.shapes[i] !== next.shapes[i]) return false;
     }
@@ -506,7 +562,8 @@ const LayerSolid = ({
   params,
   bottomZ,
   thickness,
-  bounds
+  bounds,
+  boardShape
 }: {
   layer: StackupLayer;
   footprint: Footprint;
@@ -514,27 +571,25 @@ const LayerSolid = ({
   bottomZ: number;
   thickness: number;
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
+  boardShape: THREE.Shape | null;
 }) => {
-  // Dimensions of the base plate
+  // Dimensions of the base plate (used if boardShape is null)
   const width = bounds.maxX - bounds.minX;
   const depth = bounds.maxY - bounds.minY; // 2D Y becomes 3D Depth (Z)
   
   // Center in 3D Space
-  const centerX = (bounds.minX + bounds.maxX) / 2;
-  const centerZ = (bounds.minY + bounds.maxY) / 2;
+  // If we have a board shape, we rely on absolute coordinates (0,0), so we set CenterX/Z to 0.
+  // Otherwise we center the box based on calculated bounds.
+  const centerX = boardShape ? 0 : (bounds.minX + bounds.maxX) / 2;
+  const centerZ = boardShape ? 0 : (bounds.minY + bounds.maxY) / 2;
   const centerY = bottomZ + thickness / 2;
 
   // Identify shapes affecting this layer.
-  // We use useMemo to derive the list. If `footprint.shapes` changes (new array ref), this runs.
-  // However, `CSGLayerGeometry` is memoized and checks the *contents* of this list.
   const orderedShapes = useMemo(() => {
     return [...footprint.shapes].reverse().filter(s => 
       s.assignedLayers && s.assignedLayers[layer.id] !== undefined
     );
   }, [footprint.shapes, layer.id]);
-
-  // Optimization: If no cuts, we could skip CSG, but CSGLayerGeometry handles it efficiently.
-  // We'll just render the mesh wrapper and delegate geometry.
 
   return (
     <mesh position={[centerX, centerY, centerZ]}>
@@ -547,6 +602,7 @@ const LayerSolid = ({
           depth={depth}
           centerX={centerX}
           centerZ={centerZ}
+          boardShape={boardShape}
       />
       <meshStandardMaterial color={layer.color} transparent opacity={0.9} />
     </mesh>
@@ -564,10 +620,55 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
     }
   }));
 
-  // 1. Calculate Bounding Box of all shapes + Padding
+  // Create Board Shape from Outline if applicable
+  const boardShape = useMemo(() => {
+      if (footprint.isBoard && footprint.boardOutline && footprint.boardOutline.length >= 3) {
+          return createBoardShape(footprint.boardOutline, params);
+      }
+      return null;
+  }, [footprint, params]);
+
+  // 1. Calculate Bounding Box of all shapes (or board outline) + Padding
   const bounds = useMemo(() => {
     const PADDING = 10;
     
+    // If Board Outline exists, use its bounds
+    if (footprint.isBoard && footprint.boardOutline && footprint.boardOutline.length >= 3) {
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        footprint.boardOutline.forEach(p => {
+             const x = evaluate(p.x, params);
+             const y = evaluate(p.y, params);
+             if (x < minX) minX = x;
+             if (x > maxX) maxX = x;
+             if (y < minY) minY = y;
+             if (y > maxY) maxY = y;
+             
+             // Rough approximation for handles if present
+             if (p.handleIn) {
+                 const hx = x + evaluate(p.handleIn.x, params);
+                 const hy = y + evaluate(p.handleIn.y, params);
+                 if (hx < minX) minX = hx;
+                 if (hx > maxX) maxX = hx;
+                 if (hy < minY) minY = hy;
+                 if (hy > maxY) maxY = hy;
+             }
+             if (p.handleOut) {
+                 const hx = x + evaluate(p.handleOut.x, params);
+                 const hy = y + evaluate(p.handleOut.y, params);
+                 if (hx < minX) minX = hx;
+                 if (hx > maxX) maxX = hx;
+                 if (hy < minY) minY = hy;
+                 if (hy > maxY) maxY = hy;
+             }
+        });
+        return {
+            minX: minX - PADDING,
+            maxX: maxX + PADDING,
+            minY: minY - PADDING,
+            maxY: maxY + PADDING
+        };
+    }
+
     if (!footprint.shapes || footprint.shapes.length === 0) {
         return { minX: -PADDING, maxX: PADDING, minY: -PADDING, maxY: PADDING };
     }
@@ -651,7 +752,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
               const isVisible = visibleLayers ? visibleLayers[layer.id] !== false : true;
               
               // PERFORMANCE OPTIMIZATION: 
-              // If layer is hidden, render null. This unmounts LayerSolid, skipping CSGLayerGeometry calculation.
               const node = isVisible ? (
                 <LayerSolid 
                   key={layer.id}
@@ -661,6 +761,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
                   bottomZ={currentZ}
                   thickness={thickness}
                   bounds={bounds}
+                  boardShape={boardShape}
                 />
               ) : null;
 
