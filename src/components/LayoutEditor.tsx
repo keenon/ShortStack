@@ -1,10 +1,10 @@
 // src/components/LayoutEditor.tsx
-import { useState, useRef, useEffect, Fragment } from "react";
+import { useState, useRef, useEffect, Fragment, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point, FootprintRect, FootprintCircle } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import Layout3DView, { Layout3DViewHandle } from "./Layout3DView";
+import Unified3DView, { Unified3DViewHandle, RenderItem } from "./Unified3DView";
 import Viewer2D, { Viewer2DItem, evaluateExpression, modifyExpression } from "./Viewer2D";
 import './LayoutEditor.css';
 
@@ -18,11 +18,12 @@ interface Props {
   stackup: StackupLayer[];
 }
 
+// ... (Sub-components LayerVisibilityPanel, BoardOutlineProperties remain unchanged) ...
 // ------------------------------------------------------------------
-// SUB-COMPONENTS
+// SUB-COMPONENTS (Keep original implementations)
 // ------------------------------------------------------------------
 
-// 1. LAYER VISIBILITY PANEL
+// 1. LAYER VISIBILITY PANEL (Unchanged)
 const LayerVisibilityPanel = ({
   stackup,
   visibility,
@@ -117,7 +118,7 @@ const LayerVisibilityPanel = ({
   );
 };
 
-// 2. BOARD OUTLINE PROPERTIES
+// 2. BOARD OUTLINE PROPERTIES (Unchanged)
 const BoardOutlineProperties = ({ 
     boardOutline, 
     setBoardOutline, 
@@ -284,7 +285,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
   const wrapperRef = useRef<HTMLDivElement>(null);
   
-  const layout3DRef = useRef<Layout3DViewHandle>(null);
+  const layout3DRef = useRef<Unified3DViewHandle>(null);
 
   // Dragging State Refs for Instances
   const isInstanceDragging = useRef(false);
@@ -298,8 +299,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   const pointDragStartPos = useRef({ x: 0, y: 0 });
   const pointDragStartExpr = useRef({ x: "0", y: "0" });
 
-  // --- ACTIONS ---
-
+  // --- ACTIONS (Unchanged) ---
   const addInstance = (footprintId: string) => {
     const fp = footprints.find(f => f.id === footprintId);
     const newInstance: FootprintInstance = {
@@ -438,8 +438,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
     }
   };
 
-  // --- UNIFIED HANDLERS for Viewer2D ---
-  
+  // --- UNIFIED HANDLERS for Viewer2D (Unchanged) ---
   const handleItemMouseDown = (e: React.MouseEvent, item: Viewer2DItem, subId?: string | number) => {
       e.stopPropagation();
       e.preventDefault();
@@ -460,7 +459,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
       }
 
       if (item.type === "board") {
-          // If subId is present, we are dragging a point handle
           if (subId && typeof subId === "string") {
             const point = boardOutline.points.find(p => p.id === subId);
             if (!point) return;
@@ -558,7 +556,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
   // PREPARE VIEWER ITEMS
   const viewerItems: Viewer2DItem[] = [];
 
-  // 1. Board Outline
   viewerItems.push({
       type: "board",
       id: "BOARD_OUTLINE",
@@ -567,7 +564,6 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
       visible: true
   });
 
-  // 2. Instances
   layout.forEach(inst => {
       const fp = footprints.find(f => f.id === inst.footprintId);
       if (fp) {
@@ -577,10 +573,18 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
               data: inst,
               footprint: fp,
               selected: inst.id === selectedId,
-              visible: true // We can filter this if we want specific instances hidden
+              visible: true
           });
       }
   });
+
+  // PREPARE 3D ITEMS
+  const renderItems: RenderItem[] = useMemo(() => 
+    layout.map(inst => ({
+        type: 'instance' as const,
+        data: inst
+    }))
+  , [layout]);
 
   return (
     <div className="layout-editor-container">
@@ -591,7 +595,7 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
             onToggle={toggleLayerVisibility}
             onExport={handleExport}
         />
-
+        {/* ... (Instance list panel remains same) ... */}
         <div className="layout-left-subpanel">
             <div className="sidebar-header-row">
                 <h3>Layout Objects</h3>
@@ -683,14 +687,15 @@ export default function LayoutEditor({ layout, setLayout, boardOutline, setBoard
           </div>
           
           <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
-            <Layout3DView 
+            <Unified3DView 
                 ref={layout3DRef}
-                layout={layout}
-                boardOutline={boardOutline}
+                items={renderItems}
                 footprints={footprints}
+                boardOutline={boardOutline}
                 params={params}
                 stackup={stackup}
                 visibleLayers={layerVisibility} 
+                is3DActive={viewMode === "3D"}
             />
           </div>
         </div>

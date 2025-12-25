@@ -1,8 +1,8 @@
 // src/components/FootprintEditor.tsx
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, FootprintLine, StackupLayer, Point, LayerAssignment } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
+import Unified3DView, { Unified3DViewHandle, RenderItem } from "./Unified3DView";
 import Viewer2D, { Viewer2DItem, evaluateExpression, modifyExpression } from "./Viewer2D";
 import './FootprintEditor.css';
 
@@ -17,11 +17,14 @@ interface Props {
   stackup: StackupLayer[];
 }
 
+// ... (Sub-components PropertiesPanel, LayerVisibilityPanel, ShapeListPanel remain unchanged) ...
+// (I will retain them exactly as in the original file, just updating imports and main component logic)
+
 // ------------------------------------------------------------------
-// SUB-COMPONENTS
+// SUB-COMPONENTS (Keep original implementations)
 // ------------------------------------------------------------------
 
-// 1. PROPERTIES PANEL (Unchanged logic, just keeping it here)
+// 1. PROPERTIES PANEL (Unchanged)
 const PropertiesPanel = ({
   shape,
   updateShape,
@@ -382,7 +385,7 @@ const PropertiesPanel = ({
   );
 };
 
-// 2. LAYER VISIBILITY PANEL
+// 2. LAYER VISIBILITY PANEL (Unchanged)
 const LayerVisibilityPanel = ({
   stackup,
   visibility,
@@ -435,7 +438,7 @@ const LayerVisibilityPanel = ({
   );
 };
 
-// 3. SHAPE LIST PANEL
+// 3. SHAPE LIST PANEL (Unchanged)
 const ShapeListPanel = ({
   shapes,
   selectedShapeId,
@@ -532,7 +535,6 @@ const ShapeListPanel = ({
 export default function FootprintEditor({ footprint, onUpdate, onClose, params, stackup }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   
-  // Keep a ref to the latest footprint to access it inside event listeners without staleness
   const footprintRef = useRef(footprint);
   useEffect(() => {
     footprintRef.current = footprint;
@@ -561,7 +563,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       }
   }, [viewMode]); 
 
-  const footprint3DRef = useRef<Footprint3DViewHandle>(null);
+  const footprint3DRef = useRef<Unified3DViewHandle>(null);
 
   // Shape Dragging State Refs
   const isShapeDragging = useRef(false);
@@ -574,10 +576,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       handleType?: 'in' | 'out'; 
   } | null>(null);
 
-  // --- ZOOM & PAN managed by Viewer2D via viewBox state ---
-  // The Viewer2D component takes `viewBox` and `setViewBox`.
-
-  // --- SHAPE DRAG HANDLERS ---
+  // --- SHAPE DRAG HANDLERS (Unchanged logic) ---
   const handleItemMouseDown = (e: React.MouseEvent, item: Viewer2DItem, subId?: string | number, handleType?: 'in' | 'out') => {
       if (viewMode !== "2D") return;
       if (item.type !== "shape") return;
@@ -685,8 +684,7 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       window.removeEventListener('mouseup', handleShapeMouseUp);
   };
 
-  // --- ACTIONS ---
-
+  // --- ACTIONS (Unchanged) ---
   const addShape = (type: "circle" | "rect" | "line") => {
     const base = {
       id: crypto.randomUUID(),
@@ -797,8 +795,6 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       return !allAssignedLayersHidden;
   };
 
-  // Viewer2D expects items. Footprint editor renders shapes.
-  // Note: We reverse the array for display so index 0 (top) is drawn last (on top).
   const viewerItems: Viewer2DItem[] = [...footprint.shapes].reverse().map(shape => ({
       type: "shape",
       id: shape.id,
@@ -806,6 +802,19 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
       selected: shape.id === selectedShapeId,
       visible: isShapeVisible(shape)
   }));
+
+  // --- PREPARE ITEMS FOR 3D VIEW ---
+  // We use the DEFERRED footprint to avoid stutter during drag
+  // Reverse shapes because Painter's algo (Viewer2D) draws Last on Top.
+  // CSG Order (Union/Subtraction) is usually handled by layer logic, 
+  // but if we want consistent ordering, we pass them as is or reversed.
+  // Footprint3DView processed `orderedShapes` as `[...footprint.shapes].reverse()`.
+  const renderItems: RenderItem[] = useMemo(() => 
+    [...deferredFootprint.shapes].reverse().map(s => ({
+        type: 'shape' as const,
+        data: s
+    }))
+  , [deferredFootprint.shapes]);
 
   return (
     <div className="footprint-editor-container">
@@ -886,9 +895,9 @@ export default function FootprintEditor({ footprint, onUpdate, onClose, params, 
             </div>
             
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
-                <Footprint3DView 
+                <Unified3DView 
                     ref={footprint3DRef}
-                    footprint={deferredFootprint}
+                    items={renderItems}
                     params={params}
                     stackup={stackup}
                     visibleLayers={layerVisibility}
