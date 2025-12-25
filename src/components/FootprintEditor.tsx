@@ -1,5 +1,5 @@
 // src/components/FootprintEditor.tsx
-import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, Fragment } from "react";
 import * as math from "mathjs";
 import { Footprint, FootprintShape, Parameter, FootprintCircle, FootprintRect, FootprintLine, StackupLayer, Point, LayerAssignment } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
@@ -135,6 +135,20 @@ function interpolateColor(hex: string, ratio: number): string {
   const f = 1 - r;
   return `rgb(${Math.round(red * f)}, ${Math.round(green * f)}, ${Math.round(blue * f)})`;
 }
+
+// Helper for Midpoint calculation
+const isNumeric = (str: string) => {
+    const s = str.trim();
+    if (s === "") return false;
+    return !isNaN(Number(s));
+};
+
+const calcMid = (v1: string, v2: string) => {
+    if (isNumeric(v1) && isNumeric(v2)) {
+        return parseFloat(((Number(v1) + Number(v2)) / 2).toFixed(4)).toString();
+    }
+    return `(${v1} + ${v2}) / 2`;
+};
 
 // ------------------------------------------------------------------
 // SUB-COMPONENTS
@@ -527,6 +541,23 @@ const PropertiesPanel = ({
   // SPECIAL CASE: Board Outline
   if (selectedId === BOARD_OUTLINE_ID && footprint.isBoard && footprint.boardOutline) {
       const points = footprint.boardOutline;
+      
+      const addMidpoint = (index: number) => {
+          const p1 = points[index];
+          const p2 = points[index + 1];
+          if (!p1 || !p2) return;
+
+          const newPoint: Point = {
+              id: crypto.randomUUID(),
+              x: calcMid(p1.x, p2.x),
+              y: calcMid(p1.y, p2.y)
+          };
+
+          const newPoints = [...points];
+          newPoints.splice(index + 1, 0, newPoint);
+          updateFootprint("boardOutline", newPoints);
+      };
+
       return (
           <div className="properties-panel">
             <h3>Board Outline</h3>
@@ -534,7 +565,8 @@ const PropertiesPanel = ({
                 <label>Outline Points</label>
                 <div className="points-list-container">
                     {points.map((p, idx) => (
-                        <div key={p.id} className="point-block">
+                        <Fragment key={p.id}>
+                        <div className="point-block">
                              <div className="point-header">
                                 <span>Point {idx + 1}</span>
                                 <button 
@@ -685,6 +717,27 @@ const PropertiesPanel = ({
                                 </div>
                             )}
                         </div>
+                        
+                        {idx < points.length - 1 && (
+                            <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
+                                <button 
+                                    onClick={() => addMidpoint(idx)}
+                                    style={{ 
+                                        cursor: "pointer", 
+                                        padding: "4px 8px", 
+                                        fontSize: "0.8rem", 
+                                        background: "#333", 
+                                        border: "1px solid #555", 
+                                        color: "#fff", 
+                                        borderRadius: "4px" 
+                                    }}
+                                    title="Insert Midpoint"
+                                >
+                                    + Midpoint
+                                </button>
+                            </div>
+                        )}
+                        </Fragment>
                     ))}
                     <button 
                         className="secondary small-btn" 
@@ -885,7 +938,8 @@ const PropertiesPanel = ({
                 <label>Points</label>
                 <div className="points-list-container">
                     {(shape as FootprintLine).points.map((p, idx) => (
-                        <div key={p.id} className="point-block">
+                        <Fragment key={p.id}>
+                        <div className="point-block">
                             <div className="point-header">
                                 <span>Point {idx + 1}</span>
                                 <button 
@@ -1036,6 +1090,37 @@ const PropertiesPanel = ({
                             )}
 
                         </div>
+                        {idx < (shape as FootprintLine).points.length - 1 && (
+                            <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
+                                <button 
+                                    onClick={() => {
+                                        const newPoints = [...(shape as FootprintLine).points];
+                                        const p1 = newPoints[idx];
+                                        const p2 = newPoints[idx + 1];
+                                        const newPoint = {
+                                            id: crypto.randomUUID(),
+                                            x: calcMid(p1.x, p2.x),
+                                            y: calcMid(p1.y, p2.y)
+                                        };
+                                        newPoints.splice(idx + 1, 0, newPoint);
+                                        updateShape(shape.id, "points", newPoints);
+                                    }}
+                                    style={{ 
+                                        cursor: "pointer", 
+                                        padding: "4px 8px", 
+                                        fontSize: "0.8rem", 
+                                        background: "#333", 
+                                        border: "1px solid #555", 
+                                        color: "#fff", 
+                                        borderRadius: "4px" 
+                                    }}
+                                    title="Insert Midpoint"
+                                >
+                                    + Midpoint
+                                </button>
+                            </div>
+                        )}
+                        </Fragment>
                     ))}
                     <button 
                         className="secondary small-btn" 
@@ -1177,10 +1262,7 @@ const ShapeListPanel = ({
                 className={`shape-item ${selectedShapeId === BOARD_OUTLINE_ID ? "selected" : ""}`}
                 onClick={() => onSelect(BOARD_OUTLINE_ID)}
             >
-                <div className="shape-layer-indicators">
-                    {/* Always white for board outline */}
-                    <div className="layer-indicator-dot" style={{ backgroundColor: '#fff' }} />
-                </div>
+                {/* No indicator square for Board Outline as requested */}
                 <span className="shape-name-edit" style={{ fontWeight: 'bold' }}>Board Outline</span>
             </div>
         )}
