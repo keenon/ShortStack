@@ -623,7 +623,7 @@ const LayerSolid = ({
         if (mesh.vertProperties && mesh.triVerts) {
              bufferGeom.setAttribute('position', new THREE.BufferAttribute(mesh.vertProperties, 3));
              bufferGeom.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
-             bufferGeom.computeVertexNormals();
+             // bufferGeom.computeVertexNormals(); // REMOVED: Smoothed normals cause artifacts on sharp CSG edges
              setGeometry(bufferGeom);
         } else {
              setGeometry(null);
@@ -645,7 +645,7 @@ const LayerSolid = ({
         ref={(ref) => registerMesh && registerMesh(layer.id, ref)}
         geometry={geometry || undefined}
     >
-      <meshStandardMaterial color={layer.color} transparent opacity={0.9} />
+      <meshStandardMaterial color={layer.color} transparent opacity={0.9} flatShading />
     </mesh>
   );
 };
