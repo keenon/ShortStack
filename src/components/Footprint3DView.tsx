@@ -312,6 +312,7 @@ function geometryToManifold(geometry: THREE.BufferGeometry, Manifold: any) {
         return new Manifold({ vertProperties, triVerts });
     } catch(e) {
         // Don't log here, let caller handle or ignore
+        console.warn("geometryToManifold conversion failed", e);
         return null;
     }
 }
