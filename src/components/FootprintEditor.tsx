@@ -151,6 +151,35 @@ const calcMid = (v1: string, v2: string) => {
     return `(${v1} + ${v2}) / 2`;
 };
 
+function getRecursiveLayers(
+  footprintId: string, 
+  allFootprints: Footprint[], 
+  stackup: StackupLayer[], 
+  visited = new Set<string>()
+): StackupLayer[] {
+    if (visited.has(footprintId)) return [];
+    visited.add(footprintId);
+    
+    const fp = allFootprints.find(f => f.id === footprintId);
+    if (!fp) return [];
+
+    const layerIds = new Set<string>();
+    
+    // Find layers in current footprint
+    fp.shapes.forEach(s => {
+        if (s.type === "footprint") {
+            const childRef = s as FootprintReference;
+            const childLayers = getRecursiveLayers(childRef.footprintId, allFootprints, stackup, visited);
+            childLayers.forEach(l => layerIds.add(l.id));
+        } else {
+            Object.keys(s.assignedLayers || {}).forEach(k => layerIds.add(k));
+        }
+    });
+
+    // Return unique layers sorted by stackup order
+    return stackup.filter(l => layerIds.has(l.id));
+}
+
 // ------------------------------------------------------------------
 // RECURSIVE CHECKER
 // ------------------------------------------------------------------
@@ -203,6 +232,7 @@ const RecursiveShapeRenderer = ({
   isParentSelected,
   onMouseDown,
   onHandleDown,
+  handleRadius, // NEW PROP: Scaled radius for constant screen size
 }: {
   shape: FootprintShape;
   allFootprints: Footprint[];
@@ -212,6 +242,7 @@ const RecursiveShapeRenderer = ({
   isParentSelected: boolean;
   onMouseDown: (e: React.MouseEvent, id: string, pointIndex?: number) => void;
   onHandleDown: (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => void;
+  handleRadius: number;
 }) => {
   // If this is a reference to another footprint, we render that footprint's shapes inside a group
   if (shape.type === "footprint") {
@@ -254,7 +285,7 @@ const RecursiveShapeRenderer = ({
             style={containerStyle}
           >
               {/* Optional: Selection Indicator for the Group */}
-              {isSelected && <circle cx={0} cy={0} r={2} fill="#646cff" vectorEffect="non-scaling-stroke"/>}
+              {isSelected && <circle cx={0} cy={0} r={handleRadius} fill="#646cff" vectorEffect="non-scaling-stroke"/>}
               
               {/* Render Children */}
               {/* Reverse to maintain Top-First visual order (SVG draws painter's algo, last is top) */}
@@ -272,6 +303,7 @@ const RecursiveShapeRenderer = ({
                          onMouseDown(e, shape.id);
                     }}
                     onHandleDown={() => {}} // Handles inside child footprints are not editable here
+                    handleRadius={handleRadius}
                   />
               ))}
               
@@ -396,7 +428,8 @@ const RecursiveShapeRenderer = ({
           elements.push(
               <circle 
                   key={`anchor-${idx}`}
-                  cx={pt.x} cy={-pt.y} r={3/strokeWidth}
+                  cx={pt.x} cy={-pt.y} 
+                  r={handleRadius} // Use scaled radius
                   fill="#fff" stroke="#646cff" strokeWidth={1}
                   vectorEffect="non-scaling-stroke"
                   onMouseDown={(e) => {
@@ -411,7 +444,9 @@ const RecursiveShapeRenderer = ({
               const hy = -(pt.y + pt.hIn.y);
               elements.push(
                   <line key={`line-in-${idx}`} x1={pt.x} y1={-pt.y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" />,
-                  <circle key={`handle-in-${idx}`} cx={hx} cy={hy} r={2.5/strokeWidth} fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
+                  <circle key={`handle-in-${idx}`} cx={hx} cy={hy} 
+                      r={handleRadius * 0.8} // Slightly smaller handle for controls
+                      fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
                       onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'in'); }} />
               );
           }
@@ -420,7 +455,9 @@ const RecursiveShapeRenderer = ({
               const hy = -(pt.y + pt.hOut.y);
               elements.push(
                   <line key={`line-out-${idx}`} x1={pt.x} y1={-pt.y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" />,
-                  <circle key={`handle-out-${idx}`} cx={hx} cy={hy} r={2.5/strokeWidth} fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
+                  <circle key={`handle-out-${idx}`} cx={hx} cy={hy} 
+                      r={handleRadius * 0.8} 
+                      fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
                       onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'out'); }} />
               );
           }
@@ -454,12 +491,14 @@ const BoardOutlineRenderer = ({
   params,
   onMouseDown,
   onHandleDown,
+  handleRadius, // NEW PROP
 }: {
   points: Point[];
   isSelected: boolean;
   params: Parameter[];
   onMouseDown: (e: React.MouseEvent, id: string, idx?: number) => void;
   onHandleDown: (e: React.MouseEvent, id: string, idx: number, type: 'in' | 'out') => void;
+  handleRadius: number;
 }) => {
     const stroke = isSelected ? "#646cff" : "#555";
     const strokeWidth = isSelected ? 3 : 2;
@@ -496,7 +535,9 @@ const BoardOutlineRenderer = ({
     const handles = isSelected ? pts.map((pt, idx) => {
         const elements = [];
         elements.push(
-            <circle key={`bo-anchor-${idx}`} cx={pt.x} cy={-pt.y} r={3/strokeWidth} fill="#fff" stroke="#646cff" strokeWidth={1} vectorEffect="non-scaling-stroke"
+            <circle key={`bo-anchor-${idx}`} cx={pt.x} cy={-pt.y} 
+                r={handleRadius} // Use scaled radius
+                fill="#fff" stroke="#646cff" strokeWidth={1} vectorEffect="non-scaling-stroke"
                 onMouseDown={(e) => { e.stopPropagation(); onMouseDown(e, BOARD_OUTLINE_ID, idx); }} />
         );
         if (pt.hIn) {
@@ -504,7 +545,9 @@ const BoardOutlineRenderer = ({
             const hy = -(pt.y + pt.hIn.y);
             elements.push(
                 <line key={`bo-line-in-${idx}`} x1={pt.x} y1={-pt.y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" />,
-                <circle key={`bo-handle-in-${idx}`} cx={hx} cy={hy} r={2.5/strokeWidth} fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
+                <circle key={`bo-handle-in-${idx}`} cx={hx} cy={hy} 
+                    r={handleRadius * 0.8} // Smaller control handles
+                    fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
                     onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, BOARD_OUTLINE_ID, idx, 'in'); }} />
             );
         }
@@ -513,7 +556,9 @@ const BoardOutlineRenderer = ({
             const hy = -(pt.y + pt.hOut.y);
             elements.push(
                 <line key={`bo-line-out-${idx}`} x1={pt.x} y1={-pt.y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" />,
-                <circle key={`bo-handle-out-${idx}`} cx={hx} cy={hy} r={2.5/strokeWidth} fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
+                <circle key={`bo-handle-out-${idx}`} cx={hx} cy={hy} 
+                    r={handleRadius * 0.8}
+                    fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
                     onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, BOARD_OUTLINE_ID, idx, 'out'); }} />
             );
         }
@@ -1078,6 +1123,14 @@ const ShapeListPanel = ({
               }
           }
 
+          // Determine which layers are used (recursively for footprints)
+          let usedLayers: StackupLayer[] = [];
+          if (shape.type === "footprint") {
+              usedLayers = getRecursiveLayers((shape as FootprintReference).footprintId, allFootprints, stackup);
+          } else {
+              usedLayers = stackup.filter(l => shape.assignedLayers && shape.assignedLayers[l.id] !== undefined);
+          }
+
           return (
           <div key={shape.id}
             className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""} ${!visible ? "is-hidden" : ""} ${hasError ? "error-item" : ""}`}
@@ -1085,13 +1138,13 @@ const ShapeListPanel = ({
             style={hasError ? { border: '1px solid red' } : {}}
           >
             <div className="shape-layer-indicators">
-              {shape.type !== "footprint" && stackup.map(layer => {
-                 if (shape.assignedLayers?.[layer.id] !== undefined) {
-                     return <div key={layer.id} className="layer-indicator-dot" style={{ backgroundColor: layer.color }} title={layer.name} />;
-                 }
-                 return null;
-              })}
-              {shape.type === "footprint" && <div className="layer-indicator-dot" style={{ backgroundColor: "#888", borderRadius: '50%' }} title="Recursive Footprint" />}
+              {usedLayers.map(layer => (
+                 <div key={layer.id} className="layer-indicator-dot" style={{ backgroundColor: layer.color }} title={layer.name} />
+              ))}
+              {/* Show gray dot only if recursive footprint is valid but has no layers? Or just showing nothing is fine. */}
+              {shape.type === "footprint" && usedLayers.length === 0 && !hasError && (
+                 <div className="layer-indicator-dot" style={{ backgroundColor: "#555", borderRadius: '50%' }} title="Empty Footprint" />
+              )}
             </div>
 
             <input type="text" value={shape.name} onChange={(e) => onRename(shape.id, e.target.value)} className="shape-name-edit" />
@@ -1417,6 +1470,12 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       return !assignedIds.every(id => layerVisibility[id] === false);
   };
 
+  // NEW: Calculate Scale for Constant Handle Size
+  // We want handles to be approx 6px radius on screen.
+  // Scale = viewBox.width / assumed_canvas_width (e.g. 150)
+  // This is a heuristic. If viewBox width is small (zoomed in), handles are small in units.
+  const handleRadius = viewBox.width / 100;
+
   return (
     <div className="footprint-editor-container">
       <div className="fp-toolbar">
@@ -1504,6 +1563,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                             params={params}
                             onMouseDown={handleShapeMouseDown}
                             onHandleDown={handleHandleMouseDown}
+                            handleRadius={handleRadius}
                         />
                     )}
 
@@ -1523,6 +1583,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                                 isParentSelected={false}
                                 onMouseDown={handleShapeMouseDown}
                                 onHandleDown={handleHandleMouseDown}
+                                handleRadius={handleRadius}
                             />
                         );
                     })}
