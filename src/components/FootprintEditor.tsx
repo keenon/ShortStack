@@ -4,7 +4,7 @@ import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintRef
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { BOARD_OUTLINE_ID, modifyExpression, isFootprintOptionValid, getRecursiveLayers } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer, BoardOutlineRenderer } from "./FootprintRenderers";
-import PropertiesPanel from "./PropertiesPanel";
+import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import './FootprintEditor.css';
 
 interface Props {
@@ -614,7 +614,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         <div className="fp-sidebar">
           {activeShape || isBoardSelected ? (
             <>
-              <PropertiesPanel 
+              <FootprintPropertiesPanel 
                 footprint={footprint}
                 allFootprints={allFootprints}
                 selectedId={selectedShapeId}

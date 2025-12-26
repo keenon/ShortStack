@@ -4,7 +4,7 @@ import { Footprint, FootprintShape, Parameter, StackupLayer, Point, LayerAssignm
 import ExpressionEditor from "./ExpressionEditor";
 import { BOARD_OUTLINE_ID, modifyExpression, calcMid } from "../utils/footprintUtils";
 
-const PropertiesPanel = ({
+const FootprintPropertiesPanel = ({
   footprint,
   allFootprints,
   selectedId,
@@ -442,4 +442,4 @@ const PropertiesPanel = ({
   );
 };
 
-export default PropertiesPanel;
+export default FootprintPropertiesPanel;
