@@ -97,8 +97,6 @@ function App() {
         let rawParams: any[] = [];
         let rawStackup: any[] = [];
         let rawFootprints: any[] = [];
-        let rawLayout: any[] = [];
-        let rawBoard: any = null;
 
         if (Array.isArray(rawData)) {
             rawParams = rawData;
@@ -107,9 +105,7 @@ function App() {
             rawParams = rawData.params || [];
             rawStackup = rawData.stackup || [];
             rawFootprints = rawData.footprints || [];
-            rawLayout = rawData.layout || [];
-            rawBoard = rawData.boardOutline;
-            if (!rawData.params || !rawData.stackup || !rawData.footprints || !rawData.layout || !rawData.boardOutline) needsUpgrade = true;
+            if (!rawData.params || !rawData.stackup || !rawData.footprints) needsUpgrade = true;
         }
 
         // Sanitize Parameters
@@ -180,24 +176,6 @@ function App() {
           });
           return { ...fp, id: fp.id || crypto.randomUUID(), shapes: sanitizedShapes };
         });
-
-        // Sanitize Layout
-        const newLayout: FootprintInstance[] = rawLayout.map((inst: any) => {
-          if (!inst.id || !inst.footprintId || inst.name === undefined) needsUpgrade = true;
-          const fp = newFootprints.find(f => f.id === inst.footprintId);
-          return {
-            ...inst,
-            id: inst.id || crypto.randomUUID(),
-            footprintId: inst.footprintId || "",
-            name: inst.name || fp?.name || "Unnamed Instance",
-            x: inst.x ?? "0",
-            y: inst.y ?? "0",
-            angle: inst.angle ?? "0"
-          };
-        });
-
-        // Sanitize Board Outline
-        const newBoard: BoardOutline = rawBoard || DEFAULT_BOARD;
 
         if (needsUpgrade) {
           alert("This file was created with an older version of the editor. Some missing properties have been initialized to default values.");

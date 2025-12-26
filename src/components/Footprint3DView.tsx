@@ -1,12 +1,14 @@
 // src/components/Footprint3DView.tsx
-import React, { useMemo, forwardRef, useImperativeHandle, useRef, memo } from "react";
+import React, { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
-import { Geometry, Base, Subtraction, Addition } from "@react-three/csg";
 import * as THREE from "three";
 import * as math from "mathjs";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference } from "../types";
 import { mergeVertices } from "three-stdlib";
+import Module from "manifold-3d";
+// @ts-ignore
+import wasmUrl from "manifold-3d/manifold.wasm?url";
 
 interface Props {
   footprint: Footprint;
@@ -65,7 +67,6 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
        shape.lineTo(x + width - r, y + height);
-       // Fixed: Correctly target top-right corner coordinates (y + height)
        shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
        shape.lineTo(x + width, y + r);
        shape.quadraticCurveTo(x + width, y, x + width - r, y);
@@ -243,8 +244,6 @@ function flattenShapes(
         const globalX = transform.x + (localX * cos - localY * sin);
         const globalY = transform.y + (localX * sin + localY * cos);
         
-        // Rects and Refs have own angle. Circle/Line usually don't have rotation that affects bounding box center same way,
-        // but Rect angle is local rotation.
         let localRotation = 0;
         if (shape.type === "rect" || shape.type === "footprint") {
             localRotation = evaluate((shape as any).angle, params);
@@ -264,7 +263,6 @@ function flattenShapes(
                 result = result.concat(children);
             }
         } else {
-            // It's a primitive (Circle, Rect, Line)
             result.push({
                 shape: shape,
                 x: globalX,
@@ -279,272 +277,51 @@ function flattenShapes(
 }
 
 // ------------------------------------------------------------------
+// MANIFOLD UTILS
+// ------------------------------------------------------------------
+
+function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
+    const points = shape.getPoints(resolution).map(p => [p.x, p.y]);
+    // Handle holes
+    const holes = shape.holes.map(h => h.getPoints(resolution).map(p => [p.x, p.y]));
+    // Manifold expects [contour, hole, hole, ...] or [contour]
+    const contours = [points, ...holes];
+    // Use string literal "EvenOdd"
+    return new wasm.CrossSection(contours, "EvenOdd");
+}
+
+function geometryToManifold(geometry: THREE.BufferGeometry, Manifold: any) {
+    const pos = geometry.getAttribute('position');
+    const index = geometry.getIndex();
+    if (!pos) return null;
+
+    // Convert attributes to typed arrays
+    const vertProperties = new Float32Array(pos.array);
+    let triVerts: Uint32Array;
+
+    if (index) {
+        triVerts = new Uint32Array(index.array);
+    } else {
+        // If unindexed, generate sequential indices
+        triVerts = new Uint32Array(pos.count);
+        for(let i=0; i<pos.count; i++) triVerts[i] = i;
+    }
+
+    try {
+        // Construct manifold from mesh data
+        return new Manifold({ vertProperties, triVerts });
+    } catch(e) {
+        // Don't log here, let caller handle or ignore
+        return null;
+    }
+}
+
+// ------------------------------------------------------------------
 // COMPONENTS
 // ------------------------------------------------------------------
 
-interface LayerCSGProps {
-    layer: StackupLayer;
-    flatShapes: FlatShape[];
-    params: Parameter[];
-    thickness: number;
-    width: number;
-    depth: number;
-    centerX: number;
-    centerZ: number;
-    boardShape: THREE.Shape | null;
-}
-
-const CSGLayerGeometry = memo(({
-    layer,
-    flatShapes,
-    params,
-    thickness,
-    width,
-    depth,
-    centerX,
-    centerZ,
-    boardShape
-}: LayerCSGProps) => {
-
-    const CSG_EPSILON = 0.01;
-
-    // Base geometry
-    const baseGeometry = boardShape ? (
-        <Base rotation={[-Math.PI / 2, 0, 0]} position={[0, -thickness / 2, 0]}>
-            <extrudeGeometry args={[boardShape, { depth: thickness, bevelEnabled: false }]} />
-        </Base>
-    ) : (
-        <Base>
-            <boxGeometry args={[width, thickness, depth]} />
-        </Base>
-    );
-
-    return (
-        <Geometry>
-            {baseGeometry}
-
-            {flatShapes.map((item, idx) => { // ADDED idx here
-                const shape = item.shape;
-
-                // Check Assignment
-                if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return null;
-
-                // 1. Calculate Target Depth & Radius
-                let actualDepth = thickness;
-                let endmillRadius = 0;
-
-                if (layer.type === "Cut") {
-                    actualDepth = thickness; 
-                } else {
-                    const assignment = shape.assignedLayers[layer.id];
-                    const valExpr = (typeof assignment === 'object') ? assignment.depth : (assignment as string);
-                    const radiusExpr = (typeof assignment === 'object') ? assignment.endmillRadius : "0";
-
-                    const val = evaluate(valExpr, params);
-                    endmillRadius = evaluate(radiusExpr, params);
-                    actualDepth = Math.max(0, Math.min(val, thickness));
-                }
-
-                const isPartialCut = actualDepth < thickness - 0.001;
-                const hasRadius = endmillRadius > 0.001;
-                const shouldRound = isPartialCut && hasRadius;
-
-                // 2. Calculate Vertical Geometry
-                const throughHeight = thickness + 0.2; 
-                const throughY = 0; 
-
-                // Fill logic
-                let fillHeight = thickness - actualDepth;
-                if (shouldRound) fillHeight += endmillRadius;
-
-                let fillY = 0;
-                const shouldFill = fillHeight > 0.001;
-                if (shouldFill) {
-                    fillY = layer.carveSide === "Top" 
-                        ? (-thickness / 2 + fillHeight / 2) 
-                        : (thickness / 2 - fillHeight / 2);
-                }
-
-                // 3. Local Position in CSG Space
-                // Transform Global 2D (item.x, item.y) to Local 3D (X, Z) relative to center
-                const localX = item.x - centerX;
-                const localZ = centerZ - item.y; // Y-flip
-
-                // 4. Generate Shapes / Args
-                let argsThrough: any[] = [];
-                let typeThrough: "cylinder" | "box" | "extrude" | null = null;
-                let rotThrough: [number, number, number] = [0, 0, 0];
-                
-                let roundedCutArgs: any[] = [];
-                let roundedCutRot: [number, number, number] = [0, 0, 0];
-                let roundedCutPos: [number, number, number] = [0, 0, 0];
-
-                const globalRotRad = (item.rotation * Math.PI) / 180;
-
-                const getShapeObj = (extraOffset: number = 0): THREE.Shape | null => {
-                    if (shape.type === "circle") {
-                        const d = evaluate((shape as any).diameter, params);
-                        if (d <= 0) return null;
-                        const s = new THREE.Shape();
-                        s.absarc(0, 0, d/2 + extraOffset, 0, Math.PI*2, true);
-                        return s;
-                    } else if (shape.type === "rect") {
-                        const w = evaluate((shape as FootprintRect).width, params);
-                        const h = evaluate((shape as FootprintRect).height, params);
-                        const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
-                        const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
-                        return createRoundedRectShape(w + extraOffset, h + extraOffset, cr + extraOffset/2);
-                    } else if (shape.type === "line") {
-                        const t = evaluate((shape as FootprintLine).thickness, params);
-                        const validT = t > 0 ? t : 0.01;
-                        return createLineShape(shape as FootprintLine, params, validT + extraOffset);
-                    }
-                    return null;
-                };
-
-                // --- Geometry Setup ---
-                if (shape.type === "circle") {
-                    const d = evaluate((shape as any).diameter, params);
-                    if (d > 0) {
-                        argsThrough = [d/2, d/2, throughHeight, 32];
-                        typeThrough = "cylinder";
-                    }
-                } else if (shape.type === "rect") {
-                    const w = evaluate((shape as FootprintRect).width, params);
-                    const h = evaluate((shape as FootprintRect).height, params);
-                    const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
-                    const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
-
-                    if (w > 0 && h > 0) {
-                        if (cr > 0.001) {
-                            const s = createRoundedRectShape(w, h, cr);
-                            argsThrough = [s, { depth: throughHeight, bevelEnabled: false }];
-                            typeThrough = "extrude";
-                            rotThrough = [-Math.PI/2, 0, globalRotRad];
-                        } else {
-                            argsThrough = [w, throughHeight, h];
-                            typeThrough = "box";
-                            rotThrough = [0, globalRotRad, 0];
-                        }
-                    }
-                } else if (shape.type === "line") {
-                    const s = createLineShape(shape as FootprintLine, params);
-                    if (s) {
-                        argsThrough = [s, { depth: throughHeight, bevelEnabled: false }];
-                        typeThrough = "extrude";
-                        rotThrough = [-Math.PI/2, 0, globalRotRad];
-                    }
-                }
-
-                if (!typeThrough) return null; 
-
-                const extrudeCenterOffset = -throughHeight / 2;
-
-                // --- Rounded Cut Geometry ---
-                if (shouldRound) {
-                    const s = getShapeObj(CSG_EPSILON);
-                    if (s) {
-                        const options: THREE.ExtrudeGeometryOptions = {
-                            depth: throughHeight, 
-                            bevelEnabled: true,
-                            bevelThickness: endmillRadius,
-                            bevelSize: endmillRadius,
-                            bevelOffset: -endmillRadius,
-                            bevelSegments: 10,
-                            curveSegments: 32
-                        };
-                        roundedCutArgs = [s, options];
-                        roundedCutRot = [-Math.PI/2, 0, globalRotRad];
-
-                        if (layer.carveSide === "Top") {
-                            const floorY = (thickness / 2) - actualDepth;
-                            roundedCutPos = [localX, floorY + endmillRadius, localZ];
-                        } else {
-                            const floorY = (-thickness / 2) + actualDepth;
-                            roundedCutPos = [localX, floorY - (throughHeight + endmillRadius), localZ];
-                        }
-                    }
-                }
-
-                return (
-                    <React.Fragment key={`${item.originalId}-${idx}`}>
-                        {/* 1. THROUGH CUT */}
-                        <Subtraction 
-                            position={[localX, throughY + (typeThrough === 'extrude' ? extrudeCenterOffset : 0), localZ]} 
-                            rotation={rotThrough}
-                        >
-                            {typeThrough === "cylinder" ? (
-                                <cylinderGeometry args={argsThrough as any} />
-                            ) : typeThrough === "box" ? (
-                                <boxGeometry args={argsThrough as any} />
-                            ) : (
-                                <extrudeGeometry args={argsThrough as any} />
-                            )}
-                        </Subtraction>
-
-                        {/* 2. ADD BACK MATERIAL (Floor) */}
-                        {shouldFill && (
-                            <Addition 
-                                position={[
-                                    localX, 
-                                    (typeThrough === 'extrude') ? (fillY - fillHeight/2) : fillY, 
-                                    localZ
-                                ]} 
-                                rotation={rotThrough}
-                            >
-                                {(() => {
-                                    if (typeThrough === "cylinder") {
-                                        const [rt, rb, h, s] = argsThrough;
-                                        return <cylinderGeometry args={[rt + CSG_EPSILON, rb + CSG_EPSILON, fillHeight, s]} />;
-                                    }
-                                    if (typeThrough === "box") {
-                                        const [w, h, d] = argsThrough;
-                                        return <boxGeometry args={[w + CSG_EPSILON, fillHeight, d + CSG_EPSILON]} />;
-                                    }
-                                    if (typeThrough === "extrude") {
-                                        // Re-generate shape with epsilon
-                                        const s = getShapeObj(CSG_EPSILON);
-                                        if (!s) return null;
-                                        return <extrudeGeometry args={[s, { depth: fillHeight, bevelEnabled: false }]} />;
-                                    }
-                                    return null;
-                                })()}
-                            </Addition>
-                        )}
-
-                        {/* 3. ROUNDED CUT (Fillet) */}
-                        {shouldRound && roundedCutArgs.length > 0 && (
-                            <Subtraction position={roundedCutPos} rotation={roundedCutRot}>
-                                <extrudeGeometry args={roundedCutArgs as any} />
-                            </Subtraction>
-                        )}
-                    </React.Fragment>
-                );
-            })}
-        </Geometry>
-    );
-
-}, (prev, next) => {
-    if (prev.layer.id !== next.layer.id) return false;
-    if (prev.thickness !== next.thickness) return false;
-    if (prev.width !== next.width) return false;
-    if (prev.depth !== next.depth) return false;
-    // Deep check shapes
-    if (prev.flatShapes.length !== next.flatShapes.length) return false;
-    for (let i = 0; i < prev.flatShapes.length; i++) {
-        const p = prev.flatShapes[i];
-        const n = next.flatShapes[i];
-        if (p.x !== n.x || p.y !== n.y || p.rotation !== n.rotation || p.originalId !== n.originalId) return false;
-        if (p.shape !== n.shape) return false; 
-    }
-    // Check board shape ref
-    if (prev.boardShape !== next.boardShape) return false;
-    return true;
-});
-
-
 /**
- * Renders a single layer as a solid block with cuts subtracted (CSG).
+ * Renders a single layer as a solid block with cuts subtracted (using manifold-3d).
  */
 const LayerSolid = ({
   layer,
@@ -555,7 +332,8 @@ const LayerSolid = ({
   thickness,
   bounds,
   boardShape,
-  registerMesh, // NEW
+  registerMesh,
+  manifoldModule
 }: {
   layer: StackupLayer;
   footprint: Footprint;
@@ -565,7 +343,8 @@ const LayerSolid = ({
   thickness: number;
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
   boardShape: THREE.Shape | null;
-  registerMesh?: (id: string, mesh: THREE.Mesh | null) => void; // NEW
+  registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
+  manifoldModule: any;
 }) => {
   const width = bounds.maxX - bounds.minX;
   const depth = bounds.maxY - bounds.minY; 
@@ -579,22 +358,293 @@ const LayerSolid = ({
     return flattenShapes(footprint.shapes, allFootprints, params);
   }, [footprint, allFootprints, params]);
 
+  // Compute Geometry using Manifold
+  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
+
+  useEffect(() => {
+    if (!manifoldModule || thickness <= 0.0001) return;
+
+    const garbage: any[] = [];
+    const collect = <T extends unknown>(obj: T): T => {
+        if (obj && typeof (obj as any).delete === 'function') {
+            garbage.push(obj);
+        }
+        return obj;
+    };
+
+    try {
+        const { Manifold } = manifoldModule;
+        const CSG_EPSILON = 0.01;
+
+        // 1. Create Base
+        let base;
+        if (boardShape) {
+            const cs = collect(shapeToManifold(manifoldModule, boardShape));
+            // Extrude along Z, then rotate to match Y-up convention if needed, 
+            // but here we just produce the volume relative to center.
+            const ext = collect(cs.extrude(thickness));
+            const rotated = collect(ext.rotate([-90, 0, 0]));
+            base = collect(rotated.translate([0, -thickness/2, 0]));
+        } else {
+            // Box
+            base = collect(Manifold.cube([width, thickness, depth], true));
+        }
+
+        const throughCuts: any[] = [];
+        const fills: any[] = [];
+        const fillets: any[] = [];
+
+        flatShapes.forEach((item) => {
+            const shape = item.shape;
+            if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;
+
+            // 1. Calculate Target Depth & Radius
+            let actualDepth = thickness;
+            let endmillRadius = 0;
+
+            if (layer.type === "Cut") {
+                actualDepth = thickness; 
+            } else {
+                const assignment = shape.assignedLayers[layer.id];
+                const valExpr = (typeof assignment === 'object') ? assignment.depth : (assignment as string);
+                const radiusExpr = (typeof assignment === 'object') ? assignment.endmillRadius : "0";
+
+                const val = evaluate(valExpr, params);
+                endmillRadius = evaluate(radiusExpr, params);
+                actualDepth = Math.max(0, Math.min(val, thickness));
+            }
+
+            // SAFETY: Clamp radius to avoid self-intersection inside ExtrudeGeometry
+            // This is a heuristic. For arbitrary shapes, it is hard to know the perfect limit.
+            let safeRadius = endmillRadius;
+            if (shape.type === "circle") {
+                 const d = evaluate((shape as any).diameter, params);
+                 safeRadius = Math.min(safeRadius, d/2 - 0.01);
+            } else if (shape.type === "rect") {
+                 const w = evaluate((shape as FootprintRect).width, params);
+                 const h = evaluate((shape as FootprintRect).height, params);
+                 safeRadius = Math.min(safeRadius, Math.min(w, h)/2 - 0.01);
+            } else if (shape.type === "line") {
+                 const t = evaluate((shape as FootprintLine).thickness, params);
+                 safeRadius = Math.min(safeRadius, t/2 - 0.01);
+            }
+            if (safeRadius < 0) safeRadius = 0;
+
+            const isPartialCut = actualDepth < thickness - 0.001;
+            const hasRadius = safeRadius > 0.001;
+            const shouldRound = isPartialCut && hasRadius;
+
+            // 2. Vertical Logic
+            const throughHeight = thickness + 0.2; 
+            const throughY = 0; // Center
+
+            // If rounding is enabled, the "fill" part needs to account for the fillet
+            let fillHeight = thickness - actualDepth;
+            if (shouldRound) fillHeight += safeRadius;
+
+            let fillY = 0;
+            const shouldFill = fillHeight > 0.001;
+            if (shouldFill) {
+                fillY = layer.carveSide === "Top" 
+                    ? (-thickness / 2 + fillHeight / 2) 
+                    : (thickness / 2 - fillHeight / 2);
+            }
+
+            // 3. Position Logic
+            const localX = item.x - centerX;
+            const localZ = centerZ - item.y;
+            const globalRot = item.rotation; // Degrees
+
+            // 4. Create Shape Functions
+            const createTool = (extraOffset = 0, height: number) => {
+                let tool = null;
+
+                if (shape.type === "circle") {
+                    const d = evaluate((shape as any).diameter, params);
+                    if (d > 0) {
+                        const r = d/2 + extraOffset;
+                        tool = collect(Manifold.cylinder(height, r, r, 32, true));
+                        tool = collect(tool.rotate([90, 0, 0])); 
+                    }
+                } else if (shape.type === "rect") {
+                    const w = evaluate((shape as FootprintRect).width, params);
+                    const h = evaluate((shape as FootprintRect).height, params);
+                    const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+                    const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                    
+                    if (w > 0 && h > 0) {
+                        const rw = w + extraOffset * 2;
+                        const rh = h + extraOffset * 2;
+                        const rcr = cr + extraOffset;
+
+                        if (rcr > 0.001) {
+                            const s = createRoundedRectShape(rw, rh, rcr);
+                            const cs = collect(shapeToManifold(manifoldModule, s));
+                            const csRot = collect(cs.rotate(globalRot));
+                            const ext = collect(csRot.extrude(height));
+                            const centered = collect(ext.translate([0, 0, -height/2]));
+                            tool = collect(centered.rotate([-90, 0, 0]));
+                        } else {
+                            tool = collect(Manifold.cube([rw, height, rh], true));
+                            tool = collect(tool.rotate([0, globalRot, 0]));
+                        }
+                    }
+                } else if (shape.type === "line") {
+                    const t = evaluate((shape as FootprintLine).thickness, params);
+                    const validT = (t > 0 ? t : 0.01) + extraOffset * 2;
+                    const s = createLineShape(shape as FootprintLine, params, validT);
+                    if (s) {
+                        const cs = collect(shapeToManifold(manifoldModule, s));
+                        const csRot = collect(cs.rotate(globalRot));
+                        const ext = collect(csRot.extrude(height));
+                        const centered = collect(ext.translate([0, 0, -height/2]));
+                        tool = collect(centered.rotate([-90, 0, 0]));
+                    }
+                }
+
+                return tool;
+            };
+
+            // A. THROUGH CUT
+            const toolCut = createTool(0, throughHeight);
+            if (toolCut) {
+                const moved = collect(toolCut.translate([localX, throughY, localZ]));
+                throughCuts.push(moved);
+            }
+
+            // B. FILL
+            if (shouldFill) {
+                // Use epsilon for fill to ensure overlap
+                const toolFill = createTool(CSG_EPSILON, fillHeight);
+                if (toolFill) {
+                    const moved = collect(toolFill.translate([localX, fillY, localZ]));
+                    fills.push(moved);
+                }
+            }
+
+            // C. ROUNDED CUT (FILLET)
+            // If the fillet fails generation (non-manifold), we simply SKIP it.
+            // This leaves a "sharp" corner (box/cylinder cut + fill) rather than crashing.
+            if (shouldRound) {
+                try {
+                    // Reconstruct Three.js Shape for ExtrudeGeometry
+                    let s: THREE.Shape | null = null;
+                    if (shape.type === "circle") {
+                        const d = evaluate((shape as any).diameter, params);
+                        if (d > 0) {
+                            s = new THREE.Shape();
+                            s.absarc(0, 0, d/2 + CSG_EPSILON, 0, Math.PI*2, true);
+                        }
+                    } else if (shape.type === "rect") {
+                        const w = evaluate((shape as FootprintRect).width, params);
+                        const h = evaluate((shape as FootprintRect).height, params);
+                        const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+                        const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                        s = createRoundedRectShape(w + CSG_EPSILON, h + CSG_EPSILON, cr + CSG_EPSILON/2);
+                    } else if (shape.type === "line") {
+                        const t = evaluate((shape as FootprintLine).thickness, params);
+                        const validT = t > 0 ? t : 0.01;
+                        s = createLineShape(shape as FootprintLine, params, validT + CSG_EPSILON);
+                    }
+
+                    if (s) {
+                        const options: THREE.ExtrudeGeometryOptions = {
+                            depth: throughHeight, 
+                            bevelEnabled: true,
+                            bevelThickness: safeRadius,
+                            bevelSize: safeRadius,
+                            bevelOffset: -safeRadius,
+                            bevelSegments: 8, // Reduce segments to reduce chance of degenerate triangles
+                            curveSegments: 16
+                        };
+                        
+                        const geomRaw = new THREE.ExtrudeGeometry(s, options);
+                        
+                        // Clean
+                        geomRaw.deleteAttribute('uv');
+                        geomRaw.deleteAttribute('normal');
+                        
+                        // Weld
+                        const geom = mergeVertices(geomRaw, 1e-4);
+                        geomRaw.dispose();
+                        
+                        // Convert
+                        const toolFillet = collect(geometryToManifold(geom, Manifold));
+                        geom.dispose();
+
+                        if (toolFillet) {
+                            // 1. Rotate
+                            const r = collect(toolFillet.rotate([-90, 0, globalRot]));
+
+                            // 2. Position
+                            let floorY = 0;
+                            if (layer.carveSide === "Top") {
+                                floorY = (thickness / 2) - actualDepth;
+                                const final = collect(r.translate([localX, floorY + safeRadius, localZ]));
+                                fillets.push(final);
+                            } else {
+                                floorY = (-thickness / 2) + actualDepth;
+                                const final = collect(r.translate([localX, floorY - (throughHeight + safeRadius), localZ]));
+                                fillets.push(final);
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.warn("Failed to generate fillet geometry for shape:", shape.id, err);
+                    // Fallback: Do nothing, just don't add the fillet. 
+                    // The 'throughCut' and 'fill' already exist, so it will look like a sharp flat-bottom pocket.
+                }
+            }
+        });
+
+        // 5. Apply Booleans
+        if (throughCuts.length > 0) {
+            const unionCuts = collect(Manifold.compose(throughCuts));
+            const diff = collect(Manifold.difference(base, unionCuts));
+            base = diff;
+        }
+
+        if (fills.length > 0) {
+            const unionFills = collect(Manifold.compose(fills));
+            const added = collect(Manifold.union(base, unionFills));
+            base = added;
+        }
+
+        if (fillets.length > 0) {
+            const unionFillets = collect(Manifold.compose(fillets));
+            const diff = collect(Manifold.difference(base, unionFillets));
+            base = diff;
+        }
+
+        // 6. Convert to Mesh
+        const mesh = base.getMesh();
+        const bufferGeom = new THREE.BufferGeometry();
+        
+        if (mesh.vertProperties && mesh.triVerts) {
+             bufferGeom.setAttribute('position', new THREE.BufferAttribute(mesh.vertProperties, 3));
+             bufferGeom.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
+             bufferGeom.computeVertexNormals();
+             setGeometry(bufferGeom);
+        } else {
+             setGeometry(null);
+        }
+
+    } catch (e) {
+        console.error("Manifold Error", e);
+    } finally {
+        garbage.forEach(g => {
+            try { g.delete(); } catch(e) {}
+        });
+    }
+
+  }, [manifoldModule, thickness, width, depth, layer, flatShapes, params, boardShape, centerX, centerZ, bounds]);
+
   return (
     <mesh 
         position={[centerX, centerY, centerZ]}
         ref={(ref) => registerMesh && registerMesh(layer.id, ref)}
+        geometry={geometry || undefined}
     >
-      <CSGLayerGeometry 
-          layer={layer}
-          flatShapes={flatShapes}
-          params={params}
-          thickness={thickness}
-          width={width}
-          depth={depth}
-          centerX={centerX}
-          centerZ={centerZ}
-          boardShape={boardShape}
-      />
       <meshStandardMaterial color={layer.color} transparent opacity={0.9} />
     </mesh>
   );
@@ -603,6 +653,25 @@ const LayerSolid = ({
 const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
+  
+  // Initialize Manifold
+  const [manifoldModule, setManifoldModule] = useState<any>(null);
+  
+  useEffect(() => {
+    // Load WASM
+    // We explicitly locate the file using Vite's imported URL to prevent 404/MIME errors
+    Module({
+        locateFile: ((path: string) => {
+            if (path.endsWith('.wasm')) {
+                return wasmUrl;
+            }
+            return path;
+        }) as any
+    }).then((m) => {
+        m.setup();
+        setManifoldModule(m);
+    });
+  }, []);
 
 useImperativeHandle(ref, () => ({
     resetCamera: () => {
@@ -612,36 +681,28 @@ useImperativeHandle(ref, () => ({
     },
     getLayerSTL: (layerId: string) => {
         const mesh = meshRefs.current[layerId];
-        if (!mesh) return null;
+        if (!mesh || !mesh.geometry) return null;
 
-        // 1. Clone the geometry so we don't mess up the live view
+        // 1. Clone the geometry
         let geom = mesh.geometry.clone();
 
-        // 2. Bake the mesh's world transform (position, rotation) into the geometry vertices
-        // This ensures the STL aligns with where it is visually on screen (respecting stackup height)
+        // 2. Apply transform
         mesh.updateMatrixWorld();
         geom.applyMatrix4(mesh.matrixWorld);
 
-        // 3. Clean up attributes we don't need for STL to ensure clean merging
-        // Deleting UVs allows vertices to merge even if their texture mapping differs
+        // 3. Clean
         geom.deleteAttribute('uv');
-        geom.deleteAttribute('normal'); // We will recompute these
+        geom.deleteAttribute('normal');
 
-        // 4. WELD VERTICES (The Fix for Non-Manifold Edges)
-        // tolerance of 1e-4 (0.0001) is usually enough to snap CSG cracks
+        // 4. Merge
         try {
             geom = mergeVertices(geom, 1e-4);
         } catch (e) {
-            console.warn("Vertex merge failed, exporting raw geometry", e);
+            console.warn("Vertex merge failed", e);
         }
 
-        // 5. Recompute normals after merging to ensure smooth/correct shading in slicer
         geom.computeVertexNormals();
-
-        // 6. Convert to binary STL
         const data = geometryToSTL(geom);
-        
-        // Cleanup
         geom.dispose();
         
         return data;
@@ -725,6 +786,7 @@ useImperativeHandle(ref, () => ({
                   thickness={thickness}
                   bounds={bounds}
                   boardShape={boardShape}
+                  manifoldModule={manifoldModule}
                   registerMesh={(id, mesh) => { 
                       if (mesh) meshRefs.current[id] = mesh; 
                       else delete meshRefs.current[id]; 
