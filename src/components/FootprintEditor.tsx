@@ -213,7 +213,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
   useEffect(() => {
     if (viewMode === "2D") return;
-    const timer = setTimeout(() => { setDeferredFootprint(footprint); }, 600);
+    const timer = setTimeout(() => { setDeferredFootprint(footprint); }, 100);
     return () => clearTimeout(timer);
   }, [footprint, viewMode]);
 
