@@ -5,7 +5,7 @@ import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/dr
 import { Geometry, Base, Subtraction, Addition } from "@react-three/csg";
 import * as THREE from "three";
 import { Footprint, Parameter, StackupLayer, FootprintInstance, BoardOutline, FootprintRect } from "../types";
-import { evaluateExpression } from "./FootprintEditor";
+import { evaluateExpression } from "../utils/footprintUtils";
 
 interface Props {
   layout: FootprintInstance[];

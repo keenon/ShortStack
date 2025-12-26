@@ -3,7 +3,7 @@ import { useState, useRef, useEffect, useLayoutEffect, Fragment } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintInstance, Parameter, StackupLayer, FootprintShape, BoardOutline, Point, FootprintRect, FootprintCircle } from "../types";
-import { evaluateExpression, modifyExpression } from "./FootprintEditor";
+import { evaluateExpression, modifyExpression } from "../utils/footprintUtils";
 import ExpressionEditor from "./ExpressionEditor";
 import Layout3DView, { Layout3DViewHandle } from "./Layout3DView";
 import './LayoutEditor.css';
