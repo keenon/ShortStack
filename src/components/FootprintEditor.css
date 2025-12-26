@@ -195,6 +195,8 @@
     border-radius: 3px;
     min-width: 50px;
     text-align: center;
+    border: none; /* Added for consistency with LayoutEditor */
+    cursor: pointer; /* Added for better UX */
 }
 
 .vis-toggle-btn.visible {

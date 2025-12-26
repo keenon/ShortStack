@@ -1,8 +1,10 @@
 // src/components/FootprintEditor.tsx
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference } from "../types";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { BOARD_OUTLINE_ID, modifyExpression, isFootprintOptionValid, getRecursiveLayers } from "../utils/footprintUtils";
+import { BOARD_OUTLINE_ID, modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer, BoardOutlineRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import './FootprintEditor.css';
@@ -25,10 +27,14 @@ const LayerVisibilityPanel = ({
   stackup,
   visibility,
   onToggle,
+  onExport,
+  isBoard,
 }: {
   stackup: StackupLayer[];
   visibility: Record<string, boolean>;
   onToggle: (id: string) => void;
+  onExport: (id: string, type: "SVG" | "DXF" | "STL") => void;
+  isBoard: boolean;
 }) => {
   return (
     <div className="fp-left-subpanel">
@@ -44,14 +50,33 @@ const LayerVisibilityPanel = ({
             </button>
         </div>
         {stackup.map((layer) => (
-             <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`}>
-                <div className="layer-vis-info">
+             <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`} style={{flexWrap: 'wrap'}}>
+                <div className="layer-vis-info" style={{width: '100%', marginBottom: '5px'}}>
                     <div className="layer-color-square" style={{ backgroundColor: layer.color }} />
                     <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
                 </div>
-                <button className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`} onClick={() => onToggle(layer.id)}>
-                    {visibility[layer.id] !== false ? "Hide" : "Show"}
-                </button>
+                
+                <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-end' }}>
+                    <button className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`} onClick={() => onToggle(layer.id)} style={{ marginRight: 'auto' }}>
+                        {visibility[layer.id] !== false ? "Hide" : "Show"}
+                    </button>
+                    
+                    {isBoard && (
+                        <>
+                            {layer.type === "Cut" ? (
+                                <>
+                                    <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "SVG")}>SVG</button>
+                                    <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "DXF")}>DXF</button>
+                                </>
+                            ) : (
+                                <>
+                                    <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "STL")}>STL</button>
+                                    <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "SVG")}>SVG</button>
+                                </>
+                            )}
+                        </>
+                    )}
+                </div>
              </div>
         ))}
         {stackup.length === 0 && <div className="empty-state-small">No stackup layers.</div>}
@@ -463,6 +488,73 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     }
   };
 
+  const handleExport = async (layerId: string, format: "SVG" | "DXF" | "STL") => {
+    const layer = stackup.find(l => l.id === layerId);
+    if (!layer) return;
+
+    // 1. Open Save Dialog
+    const path = await save({
+        defaultPath: `${footprint.name.replace(/[^a-zA-Z0-9]/g, '_')}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_${format.toLowerCase()}.${format.toLowerCase()}`,
+        filters: [{
+            name: `${format} File`,
+            extensions: [format.toLowerCase()]
+        }]
+    });
+
+    if (!path) return;
+
+    // 2. Prepare Data
+    const layerThickness = evaluateExpression(layer.thicknessExpression, params);
+
+    // Evaluate Board Outline
+    const outline = (footprint.boardOutline || []).map(p => ({
+        x: evaluateExpression(p.x, params),
+        y: evaluateExpression(p.y, params)
+    }));
+
+    // Gather Shapes (Recursive)
+    // We start with identity transform
+    const shapes = collectExportShapes(
+        footprint.shapes,
+        allFootprints,
+        params,
+        layer,
+        layerThickness
+    );
+
+    // 3. Prepare STL Data if needed
+    let stlContent: number[] | null = null;
+    if (format === "STL") {
+        const raw = footprint3DRef.current?.getLayerSTL(layerId);
+        if (raw) {
+            stlContent = Array.from(raw);
+        } else {
+             alert("Warning: Could not retrieve 3D mesh for STL export. Ensure the layer is visible in the 3D preview.");
+             return;
+        }
+    }
+
+    // 4. Send to Rust
+    try {
+        await invoke("export_layer_files", {
+            request: {
+                filepath: path,
+                file_type: format,
+                machining_type: layer.type,
+                cut_direction: layer.carveSide,
+                outline,
+                shapes,
+                layer_thickness: layerThickness,
+                stl_content: stlContent
+            }
+        });
+        alert(`Export initiated for ${path}`);
+    } catch (e) {
+        console.error("Export failed", e);
+        alert("Export failed: " + e);
+    }
+  };
+
   const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
   const isBoardSelected = selectedShapeId === BOARD_OUTLINE_ID;
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
@@ -522,7 +614,13 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
       <div className="fp-workspace">
         <div className="fp-left-panel">
-            <LayerVisibilityPanel stackup={stackup} visibility={layerVisibility} onToggle={toggleLayerVisibility} />
+            <LayerVisibilityPanel 
+                stackup={stackup} 
+                visibility={layerVisibility} 
+                onToggle={toggleLayerVisibility} 
+                onExport={handleExport}
+                isBoard={!!footprint.isBoard}
+            />
             <ShapeListPanel
                 footprint={footprint}
                 allFootprints={allFootprints}
@@ -640,4 +738,140 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       </div>
     </div>
   );
+}
+
+// ------------------------------------------------------------------
+// HELPER: Collect Export Shapes Recursively
+// ------------------------------------------------------------------
+function collectExportShapes(
+    shapes: FootprintShape[],
+    allFootprints: Footprint[],
+    params: Parameter[],
+    layer: StackupLayer,
+    layerThickness: number,
+    transform = { x: 0, y: 0, angle: 0 }
+): any[] {
+    let result: any[] = [];
+
+    // Process shapes from Bottom to Top (forward order) or Top to Bottom?
+    // The renderer reverses them to draw top last.
+    // LayoutEditor exports reversed (visual top to bottom).
+    // Let's stick to LayoutEditor logic: Iterate array, but typically one should iterate reversed if we want visual stack order.
+    // However, for CSG union, order doesn't matter much unless we do subtractions.
+    // LayoutEditor does: [...fp.shapes].reverse().forEach...
+    // Let's iterate reversed to match "Visual Top on top of list"
+    const reversedShapes = [...shapes].reverse();
+
+    reversedShapes.forEach(shape => {
+        // 1. Calculate Local Transform
+        const lx = evaluateExpression(shape.x, params);
+        const ly = evaluateExpression(shape.y, params);
+        
+        // Parent Transform application
+        const rad = (transform.angle * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        // Global Position
+        // Rotate (lx, ly) then add parent pos
+        // Wait, typical transform is Translate Parent -> Rotate Parent.
+        // If parent is at (Px, Py) rotated by Pa.
+        // Child at (Cx, Cy) means P + Rotate(C)
+        // Here transform.x/y is parent position.
+        const gx = transform.x + (lx * cos - ly * sin);
+        const gy = transform.y + (lx * sin + ly * cos);
+
+        if (shape.type === "footprint") {
+             const ref = shape as FootprintReference;
+             const target = allFootprints.find(f => f.id === ref.footprintId);
+             if (target) {
+                 const localAngle = evaluateExpression(ref.angle, params);
+                 const globalAngle = transform.angle + localAngle;
+                 
+                 result = result.concat(collectExportShapes(
+                     target.shapes,
+                     allFootprints,
+                     params,
+                     layer,
+                     layerThickness,
+                     { x: gx, y: gy, angle: globalAngle }
+                 ));
+             }
+        } else {
+             // Check assignment
+             if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;
+             
+             // Calculate Depth
+             let depth = 0;
+             if (layer.type === "Cut") {
+                 depth = layerThickness;
+             } else {
+                 const assign = shape.assignedLayers[layer.id];
+                 const val = evaluateExpression(assign, params);
+                 depth = Math.max(0, val);
+             }
+             if (depth <= 0.0001) return;
+
+             // Prepare Export Object
+             const exportObj: any = {
+                 x: gx,
+                 y: gy,
+                 depth: depth
+             };
+
+             if (shape.type === "circle") {
+                 exportObj.shape_type = "circle";
+                 exportObj.diameter = evaluateExpression((shape as FootprintCircle).diameter, params);
+             } else if (shape.type === "rect") {
+                 exportObj.shape_type = "rect";
+                 exportObj.width = evaluateExpression((shape as FootprintRect).width, params);
+                 exportObj.height = evaluateExpression((shape as FootprintRect).height, params);
+                 const localAngle = evaluateExpression((shape as FootprintRect).angle, params);
+                 exportObj.angle = transform.angle + localAngle;
+             } else if (shape.type === "line") {
+                 exportObj.shape_type = "line";
+                 exportObj.thickness = evaluateExpression((shape as FootprintLine).thickness, params);
+                 
+                 // Points are relative to shape origin (0,0) which is locally (lx, ly)
+                 // We need to transform them to global coords
+                 // Global Point = GlobalOrigin + Rotate(Pt)
+                 // GlobalOrigin is (gx, gy)
+                 // Rotate is by transform.angle (parent angle)
+                 // NOTE: Lines do NOT have their own rotation property in FootprintLine type, 
+                 // so they rotate only with parent.
+                 
+                 const points = (shape as FootprintLine).points.map(p => {
+                     const px = evaluateExpression(p.x, params);
+                     const py = evaluateExpression(p.y, params);
+                     // Rotate point by parent transform angle
+                     const prx = px * cos - py * sin;
+                     const pry = px * sin + py * cos;
+                     
+                     // Handles
+                     const transformHandle = (h: {x:string, y:string} | undefined) => {
+                         if (!h) return undefined;
+                         const hx = evaluateExpression(h.x, params);
+                         const hy = evaluateExpression(h.y, params);
+                         // Handles are vectors, rotate only
+                         return {
+                             x: hx * cos - hy * sin,
+                             y: hx * sin + hy * cos
+                         };
+                     };
+
+                     return {
+                         x: gx + prx,
+                         y: gy + pry,
+                         handleIn: transformHandle(p.handleIn),
+                         handleOut: transformHandle(p.handleOut)
+                     };
+                 });
+                 exportObj.points = points;
+             }
+
+             result.push(exportObj);
+        }
+    });
+
+    return result;
 }
