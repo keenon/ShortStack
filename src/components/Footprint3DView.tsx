@@ -280,6 +280,199 @@ function flattenShapes(
 // MANIFOLD UTILS
 // ------------------------------------------------------------------
 
+function analyzeGeometry(geometry: THREE.BufferGeometry) {
+  const pos = geometry.getAttribute('position');
+  const index = geometry.getIndex();
+  if (!pos) return;
+
+  console.group("Mesh Analysis Detailed");
+  
+  const vCount = pos.count;
+  const iCount = index ? index.count : vCount;
+  const triCount = iCount / 3;
+  console.log(`Vertices: ${vCount}, Triangles: ${triCount}`);
+
+  // 1. NaN Check
+  let hasNaN = false;
+  // @ts-ignore
+  const arr = pos.array;
+  for(let i=0; i<pos.count * 3; i++) {
+      if (isNaN(arr[i])) {
+          hasNaN = true;
+          break;
+      }
+  }
+  if (hasNaN) console.error("FATAL: Mesh contains NaN positions.");
+
+  // 2. Degenerate Triangles (Area) & Topology Build
+  let zeroArea = 0;
+  let smallArea = 0;
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3();
+  
+  // Track directed edges to check winding: "u_v" means edge u -> v
+  const directedEdges = new Map<string, number>();
+  // Track vertex-to-face adjacency for singularity check
+  const vertexFaces: number[][] = Array.from({ length: vCount }, () => []);
+
+  for (let i = 0; i < triCount; i++) {
+      const i0 = index ? index.getX(i*3) : i*3;
+      const i1 = index ? index.getX(i*3+1) : i*3+1;
+      const i2 = index ? index.getX(i*3+2) : i*3+2;
+
+      // Bounds check
+      if (i0 >= vCount || i1 >= vCount || i2 >= vCount) {
+         console.error(`Index out of bounds at tri ${i}: ${i0}, ${i1}, ${i2} (max ${vCount-1})`);
+         continue;
+      }
+
+      // Area Check
+      a.fromBufferAttribute(pos, i0);
+      b.fromBufferAttribute(pos, i1);
+      c.fromBufferAttribute(pos, i2);
+      ab.subVectors(b, a);
+      ac.subVectors(c, a);
+      const areaSq = new THREE.Vector3().crossVectors(ab, ac).lengthSq();
+      
+      if (areaSq <= 1e-12) zeroArea++;
+      else if (areaSq <= 1e-6) smallArea++;
+
+      // Register Directed Edges
+      const addEdge = (u: number, v: number) => {
+          const key = `${u}_${v}`;
+          directedEdges.set(key, (directedEdges.get(key) || 0) + 1);
+      };
+      addEdge(i0, i1);
+      addEdge(i1, i2);
+      addEdge(i2, i0);
+
+      // Register Vertex Adjacency
+      vertexFaces[i0].push(i);
+      vertexFaces[i1].push(i);
+      vertexFaces[i2].push(i);
+  }
+
+  if (zeroArea > 0) console.error(`Found ${zeroArea} degenerate triangles (zero area).`);
+  if (smallArea > 0) console.warn(`Found ${smallArea} very small triangles (potential precision issues).`);
+
+  // 3. Topology Analysis (Manifoldness & Winding)
+  let boundaryEdges = 0;
+  let reversedEdges = 0;    // Edges where neighbors traverse in same direction
+  let nonManifoldEdges = 0; // Edges shared by > 2 faces
+
+  // Consolidate directed edges into undirected edges to check consistency
+  const undirectedMap = new Map<string, { fwd: number, rev: number }>();
+  
+  for (const [key, count] of directedEdges.entries()) {
+      const [u, v] = key.split('_').map(Number);
+      const undirKey = u < v ? `${u}_${v}` : `${v}_${u}`;
+      
+      if (!undirectedMap.has(undirKey)) undirectedMap.set(undirKey, { fwd: 0, rev: 0 });
+      const entry = undirectedMap.get(undirKey)!;
+      
+      if (u < v) entry.fwd += count;
+      else entry.rev += count;
+  }
+
+  for (const { fwd, rev } of undirectedMap.values()) {
+      const total = fwd + rev;
+      if (total === 1) {
+          boundaryEdges++;
+      } else if (total > 2) {
+          nonManifoldEdges++;
+      } else if (total === 2) {
+          // For a closed oriented manifold, one face must be fwd (u->v) and one rev (v->u)
+          // relative to the sorted key.
+          if (fwd !== 1 || rev !== 1) {
+              reversedEdges++;
+          }
+      }
+  }
+
+  if (boundaryEdges > 0) console.error(`Mesh is open (not watertight): ${boundaryEdges} boundary edges.`);
+  if (nonManifoldEdges > 0) console.error(`Mesh is non-manifold: ${nonManifoldEdges} edges shared by >2 faces.`);
+  if (reversedEdges > 0) console.error(`Mesh has inconsistent winding: ${reversedEdges} edges have mismatched normals (flipped faces).`);
+
+  // 4. Singular Vertex Check (Bowtie / Hourglass)
+  // A vertex is singular if its incident faces do not form a single connected component
+  // (i.e. the vertex connects two otherwise disjoint volumes).
+  let singularVertices = 0;
+  // Limit check to reasonable size to prevent UI freeze on huge meshes
+  if (vCount < 20000) {
+      for(let v = 0; v < vCount; v++) {
+          const faces = vertexFaces[v];
+          if (faces.length === 0) continue; // Isolated vertex
+          
+          const components = countConnectedComponentsAtVertex(v, faces, index);
+          if (components > 1) {
+              singularVertices++;
+          }
+      }
+  }
+  
+  if (singularVertices > 0) console.error(`Found ${singularVertices} singular vertices (bowtie/hourglass). This causes "Not Manifold".`);
+
+  if (boundaryEdges === 0 && nonManifoldEdges === 0 && reversedEdges === 0 && singularVertices === 0 && zeroArea === 0 && !hasNaN) {
+      console.log("Topology checks passed. The issue is likely Self-Intersection (geometry overlaps without nodes).");
+  }
+
+  console.groupEnd();
+}
+
+// Helper to count connected components of faces around a vertex v
+function countConnectedComponentsAtVertex(vIdx: number, faces: number[], index: THREE.BufferAttribute | null): number {
+    if (faces.length <= 1) return 1;
+
+    // We define two faces as connected if they share an edge INCIDENT to v.
+    // Faces are triangles. If they share an edge connected to v, they share v AND one other vertex.
+    
+    // 1. Get the "other" vertices for each face
+    const faceOthers = new Map<number, number[]>();
+    for(const f of faces) {
+        const i0 = index ? index.getX(f*3) : f*3;
+        const i1 = index ? index.getX(f*3+1) : f*3+1;
+        const i2 = index ? index.getX(f*3+2) : f*3+2;
+        // Filter out vIdx
+        const others = [i0, i1, i2].filter(x => x !== vIdx);
+        // Should be 2 others. If <2, it's degenerate (handled elsewhere).
+        faceOthers.set(f, others);
+    }
+
+    // 2. BFS / Union-Find
+    const visited = new Set<number>();
+    let components = 0;
+
+    for(const f of faces) {
+        if (visited.has(f)) continue;
+        components++;
+        
+        const queue = [f];
+        visited.add(f);
+        
+        while(queue.length > 0) {
+            const curr = queue.pop()!;
+            const others = faceOthers.get(curr);
+            if (!others) continue;
+
+            // Find neighbors in the 'link' of v
+            for(const neighbor of faces) {
+                if (visited.has(neighbor)) continue;
+                const neighborOthers = faceOthers.get(neighbor);
+                if (!neighborOthers) continue;
+
+                // Check if they share any vertex in 'others'
+                // If they share a vertex u in 'others', then they share edge (v, u).
+                const share = others.some(o => neighborOthers.includes(o));
+                if (share) {
+                    visited.add(neighbor);
+                    queue.push(neighbor);
+                }
+            }
+        }
+    }
+    return components;
+}
+
 function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
     const points = shape.getPoints(resolution).map(p => [p.x, p.y]);
     // Handle holes
@@ -310,9 +503,11 @@ function geometryToManifold(geometry: THREE.BufferGeometry, Manifold: any) {
     try {
         // Construct manifold from mesh data
         return new Manifold({ vertProperties, triVerts });
-    } catch(e) {
-        // Don't log here, let caller handle or ignore
+    } catch(e: any) {
         console.warn("geometryToManifold conversion failed", e);
+        if (e && e.code) console.warn("Error Code:", e.code);
+        // Automatically analyze to see why it failed
+        analyzeGeometry(geometry);
         return null;
     }
 }
