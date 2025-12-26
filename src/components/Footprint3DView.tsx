@@ -6,6 +6,7 @@ import { Geometry, Base, Subtraction, Addition } from "@react-three/csg";
 import * as THREE from "three";
 import * as math from "mathjs";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference } from "../types";
+import { mergeVertices } from "three-stdlib";
 
 interface Props {
   footprint: Footprint;
@@ -603,7 +604,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
 
-  useImperativeHandle(ref, () => ({
+useImperativeHandle(ref, () => ({
     resetCamera: () => {
         if (controlsRef.current) {
             controlsRef.current.reset();
@@ -612,7 +613,38 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     getLayerSTL: (layerId: string) => {
         const mesh = meshRefs.current[layerId];
         if (!mesh) return null;
-        return geometryToSTL(mesh.geometry);
+
+        // 1. Clone the geometry so we don't mess up the live view
+        let geom = mesh.geometry.clone();
+
+        // 2. Bake the mesh's world transform (position, rotation) into the geometry vertices
+        // This ensures the STL aligns with where it is visually on screen (respecting stackup height)
+        mesh.updateMatrixWorld();
+        geom.applyMatrix4(mesh.matrixWorld);
+
+        // 3. Clean up attributes we don't need for STL to ensure clean merging
+        // Deleting UVs allows vertices to merge even if their texture mapping differs
+        geom.deleteAttribute('uv');
+        geom.deleteAttribute('normal'); // We will recompute these
+
+        // 4. WELD VERTICES (The Fix for Non-Manifold Edges)
+        // tolerance of 1e-4 (0.0001) is usually enough to snap CSG cracks
+        try {
+            geom = mergeVertices(geom, 1e-4);
+        } catch (e) {
+            console.warn("Vertex merge failed, exporting raw geometry", e);
+        }
+
+        // 5. Recompute normals after merging to ensure smooth/correct shading in slicer
+        geom.computeVertexNormals();
+
+        // 6. Convert to binary STL
+        const data = geometryToSTL(geom);
+        
+        // Cleanup
+        geom.dispose();
+        
+        return data;
     }
   }));
 
