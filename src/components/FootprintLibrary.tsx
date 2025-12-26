@@ -53,6 +53,7 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
     return (
       <FootprintEditor
         footprint={activeFootprint}
+        allFootprints={footprints} 
         onUpdate={handleFootprintUpdate}
         onClose={() => setEditingId(null)}
         params={params}
