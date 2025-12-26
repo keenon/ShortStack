@@ -2,14 +2,14 @@
 import React, { useMemo, forwardRef, useImperativeHandle, useRef, memo } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
-// Note: Requires @react-three/csg and three-bvh-csg installed
 import { Geometry, Base, Subtraction, Addition } from "@react-three/csg";
 import * as THREE from "three";
 import * as math from "mathjs";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference } from "../types";
 
 interface Props {
   footprint: Footprint;
+  allFootprints: Footprint[]; // Required for recursion
   params: Parameter[];
   stackup: StackupLayer[];
   visibleLayers?: Record<string, boolean>;
@@ -29,7 +29,7 @@ function evaluate(expression: string, params: Parameter[]): number {
   try {
     const scope: Record<string, any> = {};
     params.forEach((p) => {
-      // Treat parameters as pure numbers in mm to allow mixed arithmetic (e.g. "Width + 5")
+      // Treat parameters as pure numbers in mm
       const val = p.unit === "in" ? p.value * 25.4 : p.value;
       scope[p.key] = val;
     });
@@ -44,13 +44,11 @@ function evaluate(expression: string, params: Parameter[]): number {
 
 function createRoundedRectShape(width: number, height: number, radius: number): THREE.Shape {
   const shape = new THREE.Shape();
-  // Ensure valid dimensions
   if (width <= 0 || height <= 0) return shape;
 
   const x = -width / 2;
   const y = -height / 2;
   
-  // Clamp radius to prevent self-intersection
   const maxR = Math.min(width, height) / 2;
   const r = Math.max(0, Math.min(radius, maxR));
   
@@ -74,10 +72,6 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
   return shape;
 }
 
-/**
- * Generates a 2D THREE.Shape representing the outline of the thick line.
- * Handles Bezier curves and thickness.
- */
 function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOverride?: number): THREE.Shape | null {
   const points = shape.points;
   if (points.length < 2) return null;
@@ -87,7 +81,6 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
   
   const halfThick = thickVal / 2;
 
-  // 1. Sample the path into a dense polyline of Vector2
   const pathPoints: THREE.Vector2[] = [];
 
   for (let i = 0; i < points.length - 1; i++) {
@@ -99,8 +92,6 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
       const x2 = evaluate(next.x, params);
       const y2 = evaluate(next.y, params);
 
-      // Check for handles to determine if this segment is a curve
-      // HandleIn is for the 'next' point (approaching it), HandleOut is for 'curr' point (leaving it)
       const hasCurve = (curr.handleOut || next.handleIn);
 
       if (hasCurve) {
@@ -116,15 +107,11 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
               new THREE.Vector2(x2, y2)
           );
 
-          // Sample points
           const divisions = 24; 
           const sp = curve.getPoints(divisions);
-          
-          // If not the first segment, remove the first point to avoid duplicate
           if (pathPoints.length > 0) sp.shift();
           sp.forEach(p => pathPoints.push(p));
       } else {
-          // Straight Line
           if (pathPoints.length === 0) pathPoints.push(new THREE.Vector2(x1, y1));
           pathPoints.push(new THREE.Vector2(x2, y2));
       }
@@ -132,14 +119,11 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
 
   if (pathPoints.length < 2) return null;
 
-  // 2. Compute Offset Polygon (Outline)
   const leftPts: THREE.Vector2[] = [];
   const rightPts: THREE.Vector2[] = [];
 
   for (let i = 0; i < pathPoints.length; i++) {
       const p = pathPoints[i];
-
-      // Calculate tangent/normal
       let tangent: THREE.Vector2;
       
       if (i === 0) {
@@ -149,7 +133,6 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
           const prev = pathPoints[i-1];
           tangent = new THREE.Vector2().subVectors(p, prev).normalize();
       } else {
-          // Miter-ish average
           const prev = pathPoints[i-1];
           const next = pathPoints[i+1];
           const t1 = new THREE.Vector2().subVectors(p, prev).normalize();
@@ -158,63 +141,44 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
       }
 
       const normal = new THREE.Vector2(-tangent.y, tangent.x);
-
-      // Simple normal offset (could be improved with true miter join logic)
       leftPts.push(new THREE.Vector2(p.x + normal.x * halfThick, p.y + normal.y * halfThick));
       rightPts.push(new THREE.Vector2(p.x - normal.x * halfThick, p.y - normal.y * halfThick));
   }
 
-  // 3. Build THREE.Shape with Rounded Ends
   const shape2D = new THREE.Shape();
-  
-  // Start at the first Left point
   shape2D.moveTo(leftPts[0].x, leftPts[0].y);
   
-  // Traverse Left side forward
   for (let i = 1; i < leftPts.length; i++) {
       shape2D.lineTo(leftPts[i].x, leftPts[i].y);
   }
 
-  // End Cap: Rounded Arc from Left[end] to Right[end]
   const lastIdx = pathPoints.length - 1;
   const pLast = pathPoints[lastIdx];
-  // Calculate angle of the vector from center to the current point (Left[end])
   const vLast = new THREE.Vector2().subVectors(leftPts[lastIdx], pLast);
   const angLast = Math.atan2(vLast.y, vLast.x);
   
-  // Draw clockwise arc to the opposite side (Left -> Right)
   shape2D.absarc(pLast.x, pLast.y, halfThick, angLast, angLast + Math.PI, true);
 
-  // Traverse Right side backward
-  // We start from the second-to-last point because the arc lands us on the last Right point
   for (let i = rightPts.length - 2; i >= 0; i--) {
       shape2D.lineTo(rightPts[i].x, rightPts[i].y);
   }
 
-  // Start Cap: Rounded Arc from Right[0] to Left[0]
   const pFirst = pathPoints[0];
-  // Calculate angle of the vector from center to the current point (Right[0])
   const vFirst = new THREE.Vector2().subVectors(rightPts[0], pFirst);
   const angFirst = Math.atan2(vFirst.y, vFirst.x);
   
-  // Draw clockwise arc back to the start point (Right -> Left)
   shape2D.absarc(pFirst.x, pFirst.y, halfThick, angFirst, angFirst + Math.PI, true);
 
   return shape2D;
 }
 
-/**
- * Creates a THREE.Shape from board outline points, supporting lines and cubic bezier curves.
- */
 function createBoardShape(points: Point[], params: Parameter[]): THREE.Shape | null {
     if (!points || points.length < 3) return null;
     const shape = new THREE.Shape();
 
-    // Move to first point
     const p0 = points[0];
     shape.moveTo(evaluate(p0.x, params), evaluate(p0.y, params));
     
-    // Loop through all points to close the shape
     for(let i = 0; i < points.length; i++) {
         const curr = points[i];
         const next = points[(i + 1) % points.length];
@@ -241,12 +205,83 @@ function createBoardShape(points: Point[], params: Parameter[]): THREE.Shape | n
 }
 
 // ------------------------------------------------------------------
+// FLATTENING LOGIC
+// ------------------------------------------------------------------
+
+interface FlatShape {
+    shape: FootprintShape; // The actual primitive shape
+    x: number;             // Global X in mm
+    y: number;             // Global Y in mm
+    rotation: number;      // Global Rotation in degrees
+    originalId: string;
+}
+
+// Recursively traverse footprint references to build a flat list of primitives with absolute transforms
+function flattenShapes(
+    shapes: FootprintShape[], 
+    allFootprints: Footprint[], 
+    params: Parameter[],
+    transform = { x: 0, y: 0, rotation: 0 },
+    depth = 0
+): FlatShape[] {
+    if (depth > 10) return []; // Safety break
+
+    let result: FlatShape[] = [];
+
+    shapes.forEach(shape => {
+        // Calculate Global Transform for this specific shape
+        const localX = evaluate(shape.x, params);
+        const localY = evaluate(shape.y, params);
+        
+        const rad = (transform.rotation * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        const globalX = transform.x + (localX * cos - localY * sin);
+        const globalY = transform.y + (localX * sin + localY * cos);
+        
+        // Rects and Refs have own angle. Circle/Line usually don't have rotation that affects bounding box center same way,
+        // but Rect angle is local rotation.
+        let localRotation = 0;
+        if (shape.type === "rect" || shape.type === "footprint") {
+            localRotation = evaluate((shape as any).angle, params);
+        }
+        const globalRotation = transform.rotation + localRotation;
+
+        if (shape.type === "footprint") {
+            const ref = shape as FootprintReference;
+            const target = allFootprints.find(f => f.id === ref.footprintId);
+            if (target) {
+                // Recurse
+                const children = flattenShapes(target.shapes, allFootprints, params, {
+                    x: globalX,
+                    y: globalY,
+                    rotation: globalRotation
+                }, depth + 1);
+                result = result.concat(children);
+            }
+        } else {
+            // It's a primitive (Circle, Rect, Line)
+            result.push({
+                shape: shape,
+                x: globalX,
+                y: globalY,
+                rotation: globalRotation,
+                originalId: shape.id
+            });
+        }
+    });
+
+    return result;
+}
+
+// ------------------------------------------------------------------
 // COMPONENTS
 // ------------------------------------------------------------------
 
 interface LayerCSGProps {
     layer: StackupLayer;
-    shapes: FootprintShape[];
+    flatShapes: FlatShape[];
     params: Parameter[];
     thickness: number;
     width: number;
@@ -256,14 +291,9 @@ interface LayerCSGProps {
     boardShape: THREE.Shape | null;
 }
 
-/**
- * Memoized Component for the expensive CSG Geometry calculation.
- * It will only re-render if the 'shapes' array changes in a way that affects THIS layer.
- * We rely on checking if the shape objects themselves have changed reference.
- */
 const CSGLayerGeometry = memo(({
     layer,
-    shapes,
+    flatShapes,
     params,
     thickness,
     width,
@@ -275,17 +305,7 @@ const CSGLayerGeometry = memo(({
 
     const CSG_EPSILON = 0.01;
 
-    // Determine Base Geometry: Box vs Board Outline
-    // If boardShape is present, we extrude it.
-    // Box is centered (0,0,0) by default.
-    // Extrude is 0 to depth in Z.
-    // We must rotate Extrude to match Box orientation (X, Y=Thick, Z=Depth).
-    // Rotation X -90 => Z becomes Y, Y becomes -Z.
-    // So Extrusion (Z) becomes Thickness (Y).
-    // Shape (X, Y) becomes (X, -Z).
-    // Subtractions use localZ = -sy, which matches -Z. Perfect.
-    // We center extrusion vertically by offsetting Y by -thickness/2.
-    
+    // Base geometry
     const baseGeometry = boardShape ? (
         <Base rotation={[-Math.PI / 2, 0, 0]} position={[0, -thickness / 2, 0]}>
             <extrudeGeometry args={[boardShape, { depth: thickness, bevelEnabled: false }]} />
@@ -298,11 +318,14 @@ const CSGLayerGeometry = memo(({
 
     return (
         <Geometry>
-            {/* Base Positive Shape */}
             {baseGeometry}
 
-            {/* Operations */}
-            {shapes.map((shape) => {
+            {flatShapes.map((item, idx) => { // ADDED idx here
+                const shape = item.shape;
+
+                // Check Assignment
+                if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return null;
+
                 // 1. Calculate Target Depth & Radius
                 let actualDepth = thickness;
                 let endmillRadius = 0;
@@ -311,7 +334,6 @@ const CSGLayerGeometry = memo(({
                     actualDepth = thickness; 
                 } else {
                     const assignment = shape.assignedLayers[layer.id];
-                    // Handle both legacy string and object assignment
                     const valExpr = (typeof assignment === 'object') ? assignment.depth : (assignment as string);
                     const radiusExpr = (typeof assignment === 'object') ? assignment.endmillRadius : "0";
 
@@ -324,34 +346,26 @@ const CSGLayerGeometry = memo(({
                 const hasRadius = endmillRadius > 0.001;
                 const shouldRound = isPartialCut && hasRadius;
 
-                // 2. Calculate Geometry Parameters
+                // 2. Calculate Vertical Geometry
                 const throughHeight = thickness + 0.2; 
                 const throughY = 0; 
 
-                // Fill (Addition)
-                // If rounding, we add extra material to allow the ball nose to "carve" the fillet
+                // Fill logic
                 let fillHeight = thickness - actualDepth;
-                if (shouldRound) {
-                    fillHeight += endmillRadius;
-                }
+                if (shouldRound) fillHeight += endmillRadius;
 
                 let fillY = 0;
                 const shouldFill = fillHeight > 0.001;
-
-                // Align Fill Block
                 if (shouldFill) {
-                    if (layer.carveSide === "Top") {
-                        fillY = -thickness / 2 + fillHeight / 2;
-                    } else {
-                        fillY = thickness / 2 - fillHeight / 2;
-                    }
+                    fillY = layer.carveSide === "Top" 
+                        ? (-thickness / 2 + fillHeight / 2) 
+                        : (thickness / 2 - fillHeight / 2);
                 }
 
-                // 3. Local Position
-                const sx = evaluate(shape.x, params);
-                const sy = evaluate(shape.y, params);
-                const localX = sx - centerX;
-                const localZ = centerZ - sy; 
+                // 3. Local Position in CSG Space
+                // Transform Global 2D (item.x, item.y) to Local 3D (X, Z) relative to center
+                const localX = item.x - centerX;
+                const localZ = centerZ - item.y; // Y-flip
 
                 // 4. Generate Shapes / Args
                 let argsThrough: any[] = [];
@@ -362,39 +376,39 @@ const CSGLayerGeometry = memo(({
                 let roundedCutRot: [number, number, number] = [0, 0, 0];
                 let roundedCutPos: [number, number, number] = [0, 0, 0];
 
+                const globalRotRad = (item.rotation * Math.PI) / 180;
+
                 const getShapeObj = (extraOffset: number = 0): THREE.Shape | null => {
                     if (shape.type === "circle") {
-                        const d = evaluate(shape.diameter, params);
+                        const d = evaluate((shape as any).diameter, params);
                         if (d <= 0) return null;
                         const s = new THREE.Shape();
                         s.absarc(0, 0, d/2 + extraOffset, 0, Math.PI*2, true);
                         return s;
                     } else if (shape.type === "rect") {
-                        const w = evaluate(shape.width, params);
-                        const h = evaluate(shape.height, params);
+                        const w = evaluate((shape as FootprintRect).width, params);
+                        const h = evaluate((shape as FootprintRect).height, params);
                         const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
                         const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
                         return createRoundedRectShape(w + extraOffset, h + extraOffset, cr + extraOffset/2);
                     } else if (shape.type === "line") {
-                        const t = evaluate(shape.thickness, params);
+                        const t = evaluate((shape as FootprintLine).thickness, params);
                         const validT = t > 0 ? t : 0.01;
                         return createLineShape(shape as FootprintLine, params, validT + extraOffset);
                     }
                     return null;
                 };
 
-                // --- Through Cut Geometry ---
+                // --- Geometry Setup ---
                 if (shape.type === "circle") {
-                    const d = evaluate(shape.diameter, params);
+                    const d = evaluate((shape as any).diameter, params);
                     if (d > 0) {
                         argsThrough = [d/2, d/2, throughHeight, 32];
                         typeThrough = "cylinder";
                     }
                 } else if (shape.type === "rect") {
-                    const w = evaluate(shape.width, params);
-                    const h = evaluate(shape.height, params);
-                    const angle = evaluate((shape as FootprintRect).angle, params);
-                    const rad = (angle * Math.PI) / 180;
+                    const w = evaluate((shape as FootprintRect).width, params);
+                    const h = evaluate((shape as FootprintRect).height, params);
                     const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
                     const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
 
@@ -403,14 +417,11 @@ const CSGLayerGeometry = memo(({
                             const s = createRoundedRectShape(w, h, cr);
                             argsThrough = [s, { depth: throughHeight, bevelEnabled: false }];
                             typeThrough = "extrude";
-                            // For extruded shape (XY plane), rotate X -90 puts it on XZ plane.
-                            // The local Z axis then points along World -Y.
-                            // To rotate the shape on the floor (XZ), we must rotate around local Z.
-                            rotThrough = [-Math.PI/2, 0, rad];
+                            rotThrough = [-Math.PI/2, 0, globalRotRad];
                         } else {
                             argsThrough = [w, throughHeight, h];
                             typeThrough = "box";
-                            rotThrough = [0, rad, 0];
+                            rotThrough = [0, globalRotRad, 0];
                         }
                     }
                 } else if (shape.type === "line") {
@@ -418,7 +429,7 @@ const CSGLayerGeometry = memo(({
                     if (s) {
                         argsThrough = [s, { depth: throughHeight, bevelEnabled: false }];
                         typeThrough = "extrude";
-                        rotThrough = [-Math.PI/2, 0, 0];
+                        rotThrough = [-Math.PI/2, 0, globalRotRad];
                     }
                 }
 
@@ -439,13 +450,8 @@ const CSGLayerGeometry = memo(({
                             bevelSegments: 10,
                             curveSegments: 32
                         };
-                        
                         roundedCutArgs = [s, options];
-
-                        let angleRad = 0;
-                        if (shape.type === "rect") angleRad = (evaluate((shape as FootprintRect).angle, params) * Math.PI) / 180;
-
-                        roundedCutRot = [-Math.PI/2, 0, angleRad];
+                        roundedCutRot = [-Math.PI/2, 0, globalRotRad];
 
                         if (layer.carveSide === "Top") {
                             const floorY = (thickness / 2) - actualDepth;
@@ -458,7 +464,7 @@ const CSGLayerGeometry = memo(({
                 }
 
                 return (
-                    <React.Fragment key={shape.id}>
+                    <React.Fragment key={`${item.originalId}-${idx}`}>
                         {/* 1. THROUGH CUT */}
                         <Subtraction 
                             position={[localX, throughY + (typeThrough === 'extrude' ? extrudeCenterOffset : 0), localZ]} 
@@ -493,22 +499,10 @@ const CSGLayerGeometry = memo(({
                                         return <boxGeometry args={[w + CSG_EPSILON, fillHeight, d + CSG_EPSILON]} />;
                                     }
                                     if (typeThrough === "extrude") {
-                                        if (shape.type === "line") {
-                                            const baseThick = evaluate((shape as FootprintLine).thickness, params);
-                                            const validThick = baseThick > 0 ? baseThick : 0.01;
-                                            const thickShape = createLineShape(shape as FootprintLine, params, validThick + CSG_EPSILON);
-                                            if (!thickShape) return null;
-                                            return <extrudeGeometry args={[thickShape, { depth: fillHeight, bevelEnabled: false }]} />;
-                                        } 
-                                        else if (shape.type === "rect") {
-                                            const w = evaluate((shape as FootprintRect).width, params);
-                                            const h = evaluate((shape as FootprintRect).height, params);
-                                            const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
-                                            const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
-                                            
-                                            const expandedShape = createRoundedRectShape(w + CSG_EPSILON, h + CSG_EPSILON, cr + CSG_EPSILON/2);
-                                            return <extrudeGeometry args={[expandedShape, { depth: fillHeight, bevelEnabled: false }]} />;
-                                        }
+                                        // Re-generate shape with epsilon
+                                        const s = getShapeObj(CSG_EPSILON);
+                                        if (!s) return null;
+                                        return <extrudeGeometry args={[s, { depth: fillHeight, bevelEnabled: false }]} />;
                                     }
                                     return null;
                                 })()}
@@ -528,27 +522,20 @@ const CSGLayerGeometry = memo(({
     );
 
 }, (prev, next) => {
-    // Custom Comparator for React.memo
-    // Returns true if props are equivalent (DO NOT RE-RENDER)
     if (prev.layer.id !== next.layer.id) return false;
     if (prev.thickness !== next.thickness) return false;
     if (prev.width !== next.width) return false;
     if (prev.depth !== next.depth) return false;
-    if (prev.centerX !== next.centerX) return false;
-    if (prev.centerZ !== next.centerZ) return false;
-    if (prev.params !== next.params) return false; // Params change rarely
-    
-    // Check if board shape changed (simple reference check, mostly)
-    if (prev.boardShape !== next.boardShape) return false;
-
-    // Check shapes array
-    if (prev.shapes.length !== next.shapes.length) return false;
-    
-    // Check shape references. 
-    for (let i = 0; i < prev.shapes.length; i++) {
-        if (prev.shapes[i] !== next.shapes[i]) return false;
+    // Deep check shapes
+    if (prev.flatShapes.length !== next.flatShapes.length) return false;
+    for (let i = 0; i < prev.flatShapes.length; i++) {
+        const p = prev.flatShapes[i];
+        const n = next.flatShapes[i];
+        if (p.x !== n.x || p.y !== n.y || p.rotation !== n.rotation || p.originalId !== n.originalId) return false;
+        if (p.shape !== n.shape) return false; 
     }
-
+    // Check board shape ref
+    if (prev.boardShape !== next.boardShape) return false;
     return true;
 });
 
@@ -559,6 +546,7 @@ const CSGLayerGeometry = memo(({
 const LayerSolid = ({
   layer,
   footprint,
+  allFootprints,
   params,
   bottomZ,
   thickness,
@@ -567,35 +555,30 @@ const LayerSolid = ({
 }: {
   layer: StackupLayer;
   footprint: Footprint;
+  allFootprints: Footprint[];
   params: Parameter[];
   bottomZ: number;
   thickness: number;
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
   boardShape: THREE.Shape | null;
 }) => {
-  // Dimensions of the base plate (used if boardShape is null)
   const width = bounds.maxX - bounds.minX;
-  const depth = bounds.maxY - bounds.minY; // 2D Y becomes 3D Depth (Z)
+  const depth = bounds.maxY - bounds.minY; 
   
-  // Center in 3D Space
-  // If we have a board shape, we rely on absolute coordinates (0,0), so we set CenterX/Z to 0.
-  // Otherwise we center the box based on calculated bounds.
   const centerX = boardShape ? 0 : (bounds.minX + bounds.maxX) / 2;
   const centerZ = boardShape ? 0 : (bounds.minY + bounds.maxY) / 2;
   const centerY = bottomZ + thickness / 2;
 
-  // Identify shapes affecting this layer.
-  const orderedShapes = useMemo(() => {
-    return [...footprint.shapes].reverse().filter(s => 
-      s.assignedLayers && s.assignedLayers[layer.id] !== undefined
-    );
-  }, [footprint.shapes, layer.id]);
+  // Flatten shapes
+  const flatShapes = useMemo(() => {
+    return flattenShapes(footprint.shapes, allFootprints, params);
+  }, [footprint, allFootprints, params]);
 
   return (
     <mesh position={[centerX, centerY, centerZ]}>
       <CSGLayerGeometry 
           layer={layer}
-          shapes={orderedShapes}
+          flatShapes={flatShapes}
           params={params}
           thickness={thickness}
           width={width}
@@ -609,7 +592,7 @@ const LayerSolid = ({
   );
 };
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, params, stackup, visibleLayers, is3DActive }, ref) => {
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive }, ref) => {
   const controlsRef = useRef<any>(null);
 
   useImperativeHandle(ref, () => ({
@@ -620,7 +603,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
     }
   }));
 
-  // Create Board Shape from Outline if applicable
   const boardShape = useMemo(() => {
       if (footprint.isBoard && footprint.boardOutline && footprint.boardOutline.length >= 3) {
           return createBoardShape(footprint.boardOutline, params);
@@ -632,7 +614,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
   const bounds = useMemo(() => {
     const PADDING = 10;
     
-    // If Board Outline exists, use its bounds
     if (footprint.isBoard && footprint.boardOutline && footprint.boardOutline.length >= 3) {
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         footprint.boardOutline.forEach(p => {
@@ -642,94 +623,31 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
              if (x > maxX) maxX = x;
              if (y < minY) minY = y;
              if (y > maxY) maxY = y;
-             
-             // Rough approximation for handles if present
-             if (p.handleIn) {
-                 const hx = x + evaluate(p.handleIn.x, params);
-                 const hy = y + evaluate(p.handleIn.y, params);
-                 if (hx < minX) minX = hx;
-                 if (hx > maxX) maxX = hx;
-                 if (hy < minY) minY = hy;
-                 if (hy > maxY) maxY = hy;
-             }
-             if (p.handleOut) {
-                 const hx = x + evaluate(p.handleOut.x, params);
-                 const hy = y + evaluate(p.handleOut.y, params);
-                 if (hx < minX) minX = hx;
-                 if (hx > maxX) maxX = hx;
-                 if (hy < minY) minY = hy;
-                 if (hy > maxY) maxY = hy;
-             }
         });
-        return {
-            minX: minX - PADDING,
-            maxX: maxX + PADDING,
-            minY: minY - PADDING,
-            maxY: maxY + PADDING
-        };
+        return { minX: minX - PADDING, maxX: maxX + PADDING, minY: minY - PADDING, maxY: maxY + PADDING };
     }
 
+    // Basic bounds of root shapes
     if (!footprint.shapes || footprint.shapes.length === 0) {
         return { minX: -PADDING, maxX: PADDING, minY: -PADDING, maxY: PADDING };
     }
 
     let minX = Infinity;
     let maxX = -Infinity;
-    let minY = Infinity; // mapped to 2D Y
+    let minY = Infinity;
     let maxY = -Infinity;
 
     footprint.shapes.forEach(shape => {
         const x = evaluate(shape.x, params);
         const y = evaluate(shape.y, params);
-        
-        let dx = 0;
-        let dy = 0;
-
-        if (shape.type === "circle") {
-            const d = evaluate(shape.diameter, params);
-            const r = d > 0 ? d/2 : 0;
-            dx = r;
-            dy = r;
-        } else if (shape.type === "rect") {
-            const w = evaluate(shape.width, params);
-            const h = evaluate(shape.height, params);
-            const radius = Math.sqrt(Math.pow(w / 2, 2) + Math.pow(h / 2, 2));
-            dx = radius;
-            dy = radius;
-        } else if (shape.type === "line") {
-            // Rough bounds for line
-            const thick = evaluate(shape.thickness, params);
-            const pts = (shape as FootprintLine).points;
-            let lxMin = Infinity, lxMax = -Infinity, lyMin = Infinity, lyMax = -Infinity;
-            pts.forEach(p => {
-                const px = evaluate(p.x, params);
-                const py = evaluate(p.y, params);
-                if (px < lxMin) lxMin = px;
-                if (px > lxMax) lxMax = px;
-                if (py < lyMin) lyMin = py;
-                if (py > lyMax) lyMax = py;
-            });
-            if (lxMin < Infinity) {
-                if (lxMin + x - thick < minX) minX = lxMin + x - thick;
-                if (lxMax + x + thick > maxX) maxX = lxMax + x + thick;
-                if (lyMin + y - thick < minY) minY = lyMin + y - thick;
-                if (lyMax + y + thick > maxY) maxY = lyMax + y + thick;
-            }
-            return;
-        }
-
-        if (x - dx < minX) minX = x - dx;
-        if (x + dx > maxX) maxX = x + dx;
-        if (y - dy < minY) minY = y - dy;
-        if (y + dy > maxY) maxY = y + dy;
+        const MARGIN = 50; 
+        if (x - MARGIN < minX) minX = x - MARGIN;
+        if (x + MARGIN > maxX) maxX = x + MARGIN;
+        if (y - MARGIN < minY) minY = y - MARGIN;
+        if (y + MARGIN > maxY) maxY = y + MARGIN;
     });
 
-    return {
-        minX: minX - PADDING,
-        maxX: maxX + PADDING,
-        minY: minY - PADDING,
-        maxY: maxY + PADDING
-    };
+    return { minX, maxX, minY, maxY };
 
   }, [footprint, params]);
 
@@ -751,12 +669,12 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, p
               
               const isVisible = visibleLayers ? visibleLayers[layer.id] !== false : true;
               
-              // PERFORMANCE OPTIMIZATION: 
               const node = isVisible ? (
                 <LayerSolid 
                   key={layer.id}
                   layer={layer}
                   footprint={footprint}
+                  allFootprints={allFootprints}
                   params={params}
                   bottomZ={currentZ}
                   thickness={thickness}
