@@ -32,9 +32,6 @@ function App() {
   const [params, setParams] = useState<Parameter[]>([]);
   const [stackup, setStackup] = useState<StackupLayer[]>([]);
   const [footprints, setFootprints] = useState<Footprint[]>([]);
-  const [layout, setLayout] = useState<FootprintInstance[]>([]);
-  // NEW: State for Board Outline
-  const [boardOutline, setBoardOutline] = useState<BoardOutline>(DEFAULT_BOARD);
   
   const [activeTab, setActiveTab] = useState<Tab>("stackup");
 
@@ -44,7 +41,7 @@ function App() {
 
     const saveData = async () => {
       try {
-        const projectData: ProjectData = { params, stackup, footprints, layout, boardOutline };
+        const projectData: ProjectData = { params, stackup, footprints };
         const content = JSON.stringify(projectData, null, 2);
         await writeTextFile(currentPath, content);
         console.log("Auto-saved to", currentPath);
@@ -55,7 +52,7 @@ function App() {
     
     const timer = setTimeout(saveData, 500);
     return () => clearTimeout(timer);
-  }, [params, stackup, footprints, layout, boardOutline, currentPath]);
+  }, [params, stackup, footprints, currentPath]);
 
   // CREATE PROJECT
   async function createProject() {
@@ -69,15 +66,11 @@ function App() {
             params: [], 
             stackup: [], 
             footprints: [], 
-            layout: [],
-            boardOutline: DEFAULT_BOARD
         };
         await writeTextFile(path, JSON.stringify(initialData));
         setParams([]);
         setStackup([]);
         setFootprints([]);
-        setLayout([]);
-        setBoardOutline(DEFAULT_BOARD);
         setCurrentPath(path);
         setActiveTab("stackup");
       }
@@ -213,8 +206,6 @@ function App() {
         setParams(newParams);
         setStackup(newStackup);
         setFootprints(newFootprints);
-        setLayout(newLayout);
-        setBoardOutline(newBoard);
         setCurrentPath(path as string);
         setActiveTab("stackup");
       }
@@ -229,8 +220,6 @@ function App() {
     setParams([]);
     setStackup([]);
     setFootprints([]);
-    setLayout([]);
-    setBoardOutline(DEFAULT_BOARD);
   }
 
   if (!currentPath) {
@@ -256,7 +245,7 @@ function App() {
 
       <nav className="tab-nav">
         <button className={`tab-btn ${activeTab === "stackup" ? "active" : ""}`} onClick={() => setActiveTab("stackup")}>Stackup Editor</button>
-        <button className={`tab-btn ${activeTab === "footprint" ? "active" : ""}`} onClick={() => setActiveTab("footprint")}>Footprint Library</button>
+        <button className={`tab-btn ${activeTab === "footprint" ? "active" : ""}`} onClick={() => setActiveTab("footprint")}>Footprint Editor</button>
         <button className={`tab-btn ${activeTab === "parameters" ? "active" : ""}`} onClick={() => setActiveTab("parameters")}>Parameters Editor</button>
       </nav>
 

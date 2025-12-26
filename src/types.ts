@@ -107,6 +107,4 @@ export interface ProjectData {
   params: Parameter[];
   stackup: StackupLayer[];
   footprints: Footprint[];
-  layout: FootprintInstance[];
-  boardOutline: BoardOutline; 
 }
