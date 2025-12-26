@@ -63,7 +63,8 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
        shape.lineTo(x + width - r, y + height);
-       shape.quadraticCurveTo(x + width, y, x + width - r, y);
+       // Fixed: Correctly target top-right corner coordinates (y + height)
+       shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
        shape.lineTo(x + width, y + r);
        shape.quadraticCurveTo(x + width, y, x + width - r, y);
        shape.lineTo(x + r, y);
