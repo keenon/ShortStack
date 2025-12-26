@@ -9,7 +9,6 @@ import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, Footpr
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
 import FootprintLibrary from "./components/FootprintLibrary";
-import LayoutEditor from "./components/LayoutEditor";
 
 const TABLEAU_10 = [
   "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", 
@@ -258,7 +257,6 @@ function App() {
       <nav className="tab-nav">
         <button className={`tab-btn ${activeTab === "stackup" ? "active" : ""}`} onClick={() => setActiveTab("stackup")}>Stackup Editor</button>
         <button className={`tab-btn ${activeTab === "footprint" ? "active" : ""}`} onClick={() => setActiveTab("footprint")}>Footprint Library</button>
-        <button className={`tab-btn ${activeTab === "layout" ? "active" : ""}`} onClick={() => setActiveTab("layout")}>Layout Editor</button>
         <button className={`tab-btn ${activeTab === "parameters" ? "active" : ""}`} onClick={() => setActiveTab("parameters")}>Parameters Editor</button>
       </nav>
 
@@ -274,17 +272,6 @@ function App() {
           <FootprintLibrary 
             footprints={footprints}
             setFootprints={setFootprints}
-            params={params}
-            stackup={stackup}
-          />
-        </div>
-        <div className={`tab-pane ${activeTab === "layout" ? "active" : ""}`}>
-          <LayoutEditor 
-            layout={layout}
-            setLayout={setLayout}
-            boardOutline={boardOutline}
-            setBoardOutline={setBoardOutline}
-            footprints={footprints}
             params={params}
             stackup={stackup}
           />
