@@ -38,13 +38,17 @@ export const RecursiveShapeRenderer = ({
     const vectorEffect = "non-scaling-stroke";
 
     const elements = [];
+    
+    // Constant size markers based on handleRadius, but slightly larger than standard handles
+    const markerSize = handleRadius * 3.0;
+    const circleRadius = handleRadius * 2.0;
 
     // Main marker (Crosshair)
     elements.push(
       <g key="marker" style={{ cursor: "pointer" }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
-        <line x1={x - 4} y1={-y} x2={x + 4} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />
-        <line x1={x} y1={-(y - 4)} x2={x} y2={-(y + 4)} stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />
-        <circle cx={x} cy={-y} r={3} fill="none" stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="1,1" />
+        <line x1={x - markerSize} y1={-y} x2={x + markerSize} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />
+        <line x1={x} y1={-(y - markerSize)} x2={x} y2={-(y + markerSize)} stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />
+        <circle cx={x} cy={-y} r={circleRadius} fill="transparent" stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="1,1" />
       </g>
     );
 
