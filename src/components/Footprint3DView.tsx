@@ -173,6 +173,9 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
   
   shape2D.absarc(pFirst.x, pFirst.y, halfThick, angFirst, angFirst + Math.PI, true);
 
+  // FIXED: Explicitly close the path to ensure getPoints() returns consistent loop
+  shape2D.closePath();
+
   return shape2D;
 }
 
@@ -617,42 +620,28 @@ function countConnectedComponentsAtVertex(vIdx: number, faces: number[], index: 
 }
 
 function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
-    const points = shape.getPoints(resolution).map(p => [p.x, p.y]);
+    let points = shape.getPoints(resolution);
+    
+    // FIXED: Cleanup duplicate end point if present (Manifold prefers implicit close)
+    if (points.length > 1 && points[0].distanceTo(points[points.length-1]) < 0.001) {
+        points.pop();
+    }
+    
+    const contour = points.map(p => [p.x, p.y]);
+
     // Handle holes
-    const holes = shape.holes.map(h => h.getPoints(resolution).map(p => [p.x, p.y]));
+    const holes = shape.holes.map(h => {
+        let hPts = h.getPoints(resolution);
+        if (hPts.length > 1 && hPts[0].distanceTo(hPts[hPts.length-1]) < 0.001) {
+            hPts.pop();
+        }
+        return hPts.map(p => [p.x, p.y]);
+    });
+    
     // Manifold expects [contour, hole, hole, ...] or [contour]
-    const contours = [points, ...holes];
+    const contours = [contour, ...holes];
     // Use string literal "EvenOdd"
     return new wasm.CrossSection(contours, "EvenOdd");
-}
-
-function geometryToManifold(geometry: THREE.BufferGeometry, Manifold: any) {
-    const pos = geometry.getAttribute('position');
-    const index = geometry.getIndex();
-    if (!pos) return null;
-
-    // Convert attributes to typed arrays
-    const vertProperties = new Float32Array(pos.array);
-    let triVerts: Uint32Array;
-
-    if (index) {
-        triVerts = new Uint32Array(index.array);
-    } else {
-        // If unindexed, generate sequential indices
-        triVerts = new Uint32Array(pos.count);
-        for(let i=0; i<pos.count; i++) triVerts[i] = i;
-    }
-
-    try {
-        // Construct manifold from mesh data
-        return new Manifold({ vertProperties, triVerts });
-    } catch(e: any) {
-        console.warn("geometryToManifold conversion failed", e);
-        if (e && e.code) console.warn("Error Code:", e.code);
-        // Automatically analyze to see why it failed
-        analyzeGeometry(geometry);
-        return null;
-    }
 }
 
 /**
@@ -735,8 +724,9 @@ function generateProceduralFillet(
                 const pts = tempShape.getPoints(div);
                 
                 // FIXED: Improve Loop detection consistency
-                // If points are closed, remove the last one to prevent double-vertex at seam
-                if (pts.length > 0 && pts[0].distanceTo(pts[pts.length-1]) < 0.001) {
+                // If points are closed, remove the last one to prevent double-vertex at seam.
+                // increased epsilon slightly for robustness.
+                if (pts.length > 0 && pts[0].distanceTo(pts[pts.length-1]) < 0.01) {
                     pts.pop();
                 }
 
