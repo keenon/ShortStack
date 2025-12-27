@@ -738,14 +738,12 @@ function generateProceduralFillet(
             if (cr > limit) cr = limit;
             
             const segCorner = 6; 
-            
             const quadrants = [
                 { x: halfW - cr, y: halfH - cr, startAng: 0 },         
                 { x: -halfW + cr, y: halfH - cr, startAng: Math.PI/2 },
                 { x: -halfW + cr, y: -halfH + cr, startAng: Math.PI }, 
                 { x: halfW - cr, y: -halfH + cr, startAng: 1.5*Math.PI}
             ];
-
             quadrants.forEach(q => {
                 for(let i=0; i<segCorner; i++) {
                     const ang = q.startAng + (i/segCorner) * (Math.PI/2);
@@ -759,13 +757,10 @@ function generateProceduralFillet(
             const t = evaluate((shape as FootprintLine).thickness, params);
             minDimension = t;
             const effectiveT = Math.max(0.001, t - offset * 2);
-            
-            // FIXED: Use deterministic manual point generation
             rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution);
         }
 
         // --- FILTERING ---
-        // Ensure strictly unique points to avoid manifold errors with zero-length edges
         if (rawPoints.length > 0) {
             const clean: THREE.Vector2[] = [rawPoints[0]];
             for(let i=1; i<rawPoints.length; i++) {
@@ -773,17 +768,30 @@ function generateProceduralFillet(
                     clean.push(rawPoints[i]);
                 }
             }
-            // Check loop closure (last vs first)
             if (clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) {
                 clean.pop();
             }
+            
+            // --- WINDING NORMALIZATION (The Fix) ---
+            // Calculate signed area to detect winding direction
+            let area = 0;
+            for (let i = 0; i < clean.length; i++) {
+                const j = (i + 1) % clean.length;
+                area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
+            }
+            
+            // If area is negative (Clockwise), reverse to make it Counter-Clockwise
+            // This ensures Lines (CW) match Circles/Rects (CCW)
+            if (area < 0) {
+                clean.reverse();
+            }
+
             return clean;
         }
         
         return rawPoints;
     };
 
-    // Pre-calc dimension to clamp radius
     const baseProfile = getContour(0); 
     const vertsPerLayer = baseProfile.length;
     
@@ -816,8 +824,6 @@ function generateProceduralFillet(
     layers.forEach((layer, idx) => {
         const points = getContour(layer.offset);
         
-        // Strictly enforce vertex count. 
-        // With getLineOutlinePoints, this should never trigger unless logic is flawed.
         if (points.length !== vertsPerLayer) {
              console.error(`Topology Mismatch: Layer ${idx} has ${points.length}, expected ${vertsPerLayer}.`);
              topologyValid = false;
@@ -841,14 +847,15 @@ function generateProceduralFillet(
     };
 
     // A. Top Cap
-    // Note: triangulateShape might be slow or flaky for complex non-convex shapes.
-    // For simple thick lines, it's usually fine. 
+    // Standard winding for CCW input
     const topFaces = THREE.ShapeUtils.triangulateShape(baseProfile, []);
     topFaces.forEach(face => {
         pushTri(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2]));
     });
 
     // B. Walls
+    // REVERTED to Standard Logic: (v1, v2, v4) + (v2, v3, v4)
+    // Since we forced inputs to be CCW, this logic (which worked for Circles) now works for Lines too.
     for(let l=0; l<layers.length-1; l++) {
         for(let i=0; i<vertsPerLayer; i++) {
             const curr = i;
@@ -858,17 +865,16 @@ function generateProceduralFillet(
             const v3 = getIdx(l+1, next);
             const v4 = getIdx(l, next);
             
-            // Standard Quad triangulation
             pushTri(v1, v2, v4); 
             pushTri(v2, v3, v4);
         }
     }
 
     // C. Bottom Cap
+    // Standard winding for CCW input
     const lastL = layers.length - 1;
     const botProfile = getContour(layers[lastL].offset);
     
-    // Check collapse
     let isCollapsed = true;
     if (botProfile.length > 0) {
         const p0 = botProfile[0];
@@ -946,6 +952,7 @@ function generateProceduralFillet(
 
     try {
         const mesh = new manifoldModule.Mesh();
+        mesh.numProp = 3;
         mesh.vertProperties = vertProperties;
         mesh.triVerts = triVerts;
         
@@ -1272,22 +1279,39 @@ const LayerSolid = ({
 
   }, [manifoldModule, thickness, width, depth, layer, flatShapes, params, boardShape, centerX, centerZ, bounds]);
 
-  return (
+    return (
     <mesh 
         position={[centerX, centerY, centerZ]}
         ref={(ref) => registerMesh && registerMesh(layer.id, ref)}
         geometry={geometry || undefined}
     >
+      {/* 
+          Main Solid Material 
+          - Logic updated: Always visible.
+          - On Error: Opaque red, FrontSide only (to catch inverted normals).
+          - Normal: Layer color, transparent.
+      */}
       <meshStandardMaterial 
-          color={layer.color} 
-          transparent 
-          opacity={0.9} 
+          color={hasError ? "#ff6666" : layer.color} 
+          transparent={!hasError} 
+          opacity={hasError ? 1.0 : 0.9} 
           flatShading 
-          visible={!hasError}
+          side={THREE.FrontSide} // Strict FrontSide helps identify flipped normals (backfaces won't render or will be dark)
+          visible={true} 
       />
+
+      {/* 
+          Wireframe Overlay (Only on Error)
+          - Renders a slightly larger black/dark-red wireframe on top of the solid
+          - Helps visualize the topology/triangulation
+      */}
       {hasError && geometry && (
         <mesh geometry={geometry}>
-          <meshBasicMaterial color="red" wireframe wireframeLinewidth={2} />
+          <meshBasicMaterial 
+            color="#330000" 
+            wireframe 
+            wireframeLinewidth={1} 
+          />
         </mesh>
       )}
     </mesh>
