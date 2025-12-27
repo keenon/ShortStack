@@ -832,6 +832,17 @@ function collectExportShapes(
                  depth: depth
              };
 
+            // NEW: Capture Endmill Radius for Gradient Generation
+             if (layer.type === "Carved/Printed") {
+                 const assign = shape.assignedLayers[layer.id];
+                 // Handle normalized object or legacy string
+                 const radExpr = (typeof assign === 'object') ? assign.endmillRadius : "0";
+                 const radVal = evaluateExpression(radExpr, params);
+                 if (radVal > 0) {
+                     exportObj.endmill_radius = radVal;
+                 }
+             }
+
              if (shape.type === "circle") {
                  exportObj.shape_type = "circle";
                  exportObj.diameter = evaluateExpression((shape as FootprintCircle).diameter, params);

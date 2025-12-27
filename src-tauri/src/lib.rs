@@ -13,13 +13,13 @@ use csgrs::sketch::Sketch;
 // use csgrs::mesh::Mesh; // Removed unused import
 use csgrs::traits::CSG; 
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 struct ExportVec2 {
     x: f64,
     y: f64,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 struct ExportPoint {
     x: f64,
     y: f64,
@@ -27,7 +27,7 @@ struct ExportPoint {
     handle_out: Option<ExportVec2>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Clone)]
 struct ExportShape {
     shape_type: String, // "circle", "rect", "line"
     x: f64,
@@ -40,6 +40,8 @@ struct ExportShape {
     thickness: Option<f64>,
     points: Option<Vec<ExportPoint>>,
     depth: f64,
+    // NEW: Radius of the ball-nose endmill for gradient generation
+    endmill_radius: Option<f64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -307,6 +309,126 @@ fn stroke_linestring(ls: &LineString<f64>, thickness: f64) -> Polygon<f64> {
     Polygon::new(LineString::new(loop_coords), vec![])
 }
 
+// -----------------------------------------------------------
+//  EXPANSION LOGIC FOR GRADIENTS
+// -----------------------------------------------------------
+
+// Helper that produces an offset version of the shape (shrinks it inwards)
+fn shape_to_polygon_offset(shape: &ExportShape, offset: f64) -> Option<Polygon<f64>> {
+    // Modify a clone of the shape params
+    let mut temp = shape.clone();
+    
+    match temp.shape_type.as_str() {
+        "circle" => {
+            if let Some(d) = temp.diameter {
+                temp.diameter = Some(d - 2.0 * offset);
+                if temp.diameter.unwrap() <= 1e-4 { return None; }
+            }
+        },
+        "rect" => {
+            if let Some(w) = temp.width { temp.width = Some(w - 2.0 * offset); }
+            if let Some(h) = temp.height { temp.height = Some(h - 2.0 * offset); }
+            if temp.width.unwrap_or(0.0) <= 1e-4 || temp.height.unwrap_or(0.0) <= 1e-4 { return None; }
+            
+            if let Some(cr) = temp.corner_radius {
+                temp.corner_radius = Some((cr - offset).max(0.0));
+            }
+        },
+        "line" => {
+            if let Some(t) = temp.thickness {
+                temp.thickness = Some(t - 2.0 * offset);
+                if temp.thickness.unwrap() <= 1e-4 { return None; }
+            }
+        },
+        _ => return None
+    }
+    
+    shape_to_polygon(&temp)
+}
+
+// Expand a shape into multiple slices if it has a ball-nose radius
+fn expand_ball_nose_shape(shape: &ExportShape) -> Vec<(Polygon<f64>, f64)> {
+    let radius = shape.endmill_radius.unwrap_or(0.0);
+    
+    // Standard flat cut (no radius)
+    if radius <= 1e-4 {
+        if let Some(poly) = shape_to_polygon(shape) {
+            return vec![(poly, shape.depth)];
+        }
+        return vec![];
+    }
+    
+    // Safety: ensure radius isn't larger than the shape itself
+    let min_dim = match shape.shape_type.as_str() {
+        "circle" => shape.diameter.unwrap_or(0.0),
+        "rect" => shape.width.unwrap_or(0.0).min(shape.height.unwrap_or(0.0)),
+        "line" => shape.thickness.unwrap_or(0.0),
+        _ => 0.0,
+    };
+    
+    // Clamp radius
+    let safe_radius = radius.min(shape.depth).min(min_dim / 2.0 - 0.001).max(0.0);
+    
+    // If effectively zero after safety check
+    if safe_radius <= 1e-4 {
+        if let Some(poly) = shape_to_polygon(shape) {
+            return vec![(poly, shape.depth)];
+        }
+        return vec![];
+    }
+
+    let mut slices = Vec::new();
+    let steps = 12; // Gradient fidelity (number of steps in the curve)
+
+    // 1. Base Vertical Hole (Top of Fillet)
+    // Depth: Total - Radius
+    // Offset: 0 (Full width)
+    let base_depth = shape.depth - safe_radius;
+    if base_depth > 1e-4 {
+        if let Some(poly) = shape_to_polygon_offset(shape, 0.0) {
+            slices.push((poly, base_depth));
+        }
+    }
+
+    // 2. Fillet Slices (Curving inwards to bottom)
+    for i in 1..=steps {
+        let ratio = i as f64 / steps as f64;
+        let theta = ratio * std::f64::consts::FRAC_PI_2; // 0..90 deg
+        
+        // Z Depth increases from base_depth to shape.depth
+        let z = base_depth + theta.sin() * safe_radius;
+        
+        // Offset increases from 0 to radius
+        // Circular profile: offset = R - R*cos(theta)
+        let offset = safe_radius * (1.0 - theta.cos());
+        
+        if let Some(poly) = shape_to_polygon_offset(shape, offset) {
+            slices.push((poly, z));
+        }
+    }
+
+    slices
+}
+
+// Helper to get raw polygon list for depth maps (no union), with EXPANSION logic
+fn get_board_and_shapes_expanded(request: &ExportRequest) -> Option<(Polygon<f64>, Vec<(Polygon<f64>, f64)>)> {
+    if request.outline.is_empty() { return None; }
+
+    let board_ls = discretize_path_closed(&request.outline);
+    let board_poly = Polygon::new(board_ls, vec![]);
+
+    // Convert Shapes to List of (Polygon, Depth)
+    let mut shape_list = Vec::new();
+
+    for shape in &request.shapes {
+        // Here we expand the shape into potential multiple slices
+        let slices = expand_ball_nose_shape(shape);
+        shape_list.extend(slices);
+    }
+
+    Some((board_poly, shape_list))
+}
+
 // Helper to get unioned geometry for profile cuts
 fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f64>)> {
     if request.outline.is_empty() { return None; }
@@ -351,23 +473,7 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
 }
 
 // Helper to get raw polygon list for depth maps (no union)
-fn get_board_and_shapes_raw(request: &ExportRequest) -> Option<(Polygon<f64>, Vec<(Polygon<f64>, f64)>)> {
-    if request.outline.is_empty() { return None; }
-
-    let board_ls = discretize_path_closed(&request.outline);
-    let board_poly = Polygon::new(board_ls, vec![]);
-
-    // 2. Convert Shapes to List of (Polygon, Depth)
-    let mut shape_list = Vec::new();
-
-    for shape in &request.shapes {
-        if let Some(poly) = shape_to_polygon(shape) {
-            shape_list.push((poly, shape.depth));
-        }
-    }
-
-    Some((board_poly, shape_list))
-}
+// [REMOVED/REPLACED by get_board_and_shapes_expanded for the new feature]
 
 fn generate_profile_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
     let (board_poly_raw, united_shapes_raw) = match get_geometry_unioned(request) {
@@ -427,7 +533,8 @@ fn generate_profile_svg(request: &ExportRequest) -> Result<(), Box<dyn std::erro
 }
 
 fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
-    let (board_poly_raw, shapes_raw) = match get_board_and_shapes_raw(request) {
+    // UPDATED: Use expanded shape generator which handles ball-nose gradients
+    let (board_poly_raw, shapes_raw) = match get_board_and_shapes_expanded(request) {
         Some(g) => g,
         None => return Ok(()),
     };
