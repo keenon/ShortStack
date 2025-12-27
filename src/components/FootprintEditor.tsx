@@ -383,6 +383,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
           const newPoints = [...startPoints];
           if (handleType && pointIdx !== undefined) {
                const p = newPoints[pointIdx];
+               if (p.snapTo) return; // Cannot drag handles of a point snapped to a guide
                if (handleType === 'in' && p.handleIn) {
                    newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorld) } };
                } else if (handleType === 'out' && p.handleOut) {
@@ -390,6 +391,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                }
           } else if (pointIdx !== undefined) {
                const p = newPoints[pointIdx];
+               if (p.snapTo) return; // Cannot drag position of a point snapped to a guide
                newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) };
           } else {
                for(let i=0; i<newPoints.length; i++) {
@@ -405,6 +407,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                       const newPoints = [...startShape.points];
                       if (handleType && pointIdx !== undefined) {
                           const p = newPoints[pointIdx];
+                          if (p.snapTo) return s; // Cannot drag handles of a point snapped to a guide
                           if (handleType === 'in' && p.handleIn) {
                               newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorld) } };
                           } else if (handleType === 'out' && p.handleOut) {
@@ -412,6 +415,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                           }
                       } else if (pointIdx !== undefined) {
                           const p = newPoints[pointIdx];
+                          if (p.snapTo) return s; // Cannot drag position of a point snapped to a guide
                           newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) };
                       } else {
                           const allMoved = newPoints.map(p => ({ ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) }));

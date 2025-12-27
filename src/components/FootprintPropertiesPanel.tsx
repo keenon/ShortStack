@@ -2,7 +2,7 @@
 import React, { Fragment, useMemo } from "react";
 import { Footprint, FootprintShape, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import { BOARD_OUTLINE_ID, modifyExpression, calcMid, getAvailableWireGuides } from "../utils/footprintUtils";
+import { BOARD_OUTLINE_ID, modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
 
 const FootprintPropertiesPanel = ({
   footprint,
@@ -28,6 +28,11 @@ const FootprintPropertiesPanel = ({
 
   // Helper to render property editors for a Point (used in Lines and Board Outline)
   const renderPointEditor = (p: Point, idx: number, updateFn: (newP: Point) => void, removeFn: () => void, allowHandles: boolean = true) => {
+      // Look up snapped guide to determine handle overrides
+      const snappedGuide = findWireGuideByPath(p.snapTo, footprint, allFootprints);
+      const guideHasIn = !!snappedGuide?.handleIn;
+      const guideHasOut = !!snappedGuide?.handleOut;
+
       return (
         <div className="point-block" key={p.id}>
             <div className="point-header">
@@ -71,14 +76,14 @@ const FootprintPropertiesPanel = ({
             {allowHandles && (
                 <>
                     <div className="point-controls-toggles">
-                        <label className="checkbox-label">
-                            <input type="checkbox" checked={!!p.handleIn} onChange={(e) => {
+                        <label className="checkbox-label" style={p.snapTo ? { opacity: 0.7 } : {}}>
+                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasIn : !!p.handleIn} onChange={(e) => {
                                     if (e.target.checked) updateFn({ ...p, handleIn: { x: "-5", y: "0" } });
                                     else { const { handleIn, ...rest } = p; updateFn(rest as Point); }
                                 }} /> In Handle
                         </label>
-                        <label className="checkbox-label">
-                            <input type="checkbox" checked={!!p.handleOut} onChange={(e) => {
+                        <label className="checkbox-label" style={p.snapTo ? { opacity: 0.7 } : {}}>
+                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasOut : !!p.handleOut} onChange={(e) => {
                                     if (e.target.checked) updateFn({ ...p, handleOut: { x: "5", y: "0" } });
                                     else { const { handleOut, ...rest } = p; updateFn(rest as Point); }
                                 }} /> Out Handle
@@ -103,7 +108,7 @@ const FootprintPropertiesPanel = ({
                              </div>
                         </div>
                     )}
-                    {p.snapTo && (p.handleIn || p.handleOut) && (
+                    {p.snapTo && (guideHasIn || guideHasOut) && (
                         <div style={{ marginTop: '5px', fontSize: '0.8em', color: '#666' }}>
                            Handles are inherited from the Wire Guide.
                         </div>

@@ -231,6 +231,35 @@ export function getAvailableWireGuides(
     return results;
 }
 
+// Find a wire guide object by its path string
+export function findWireGuideByPath(
+    pathId: string | undefined,
+    rootFootprint: Footprint,
+    allFootprints: Footprint[]
+): FootprintWireGuide | null {
+    if (!pathId) return null;
+    const path = pathId.split(":");
+    let currentFp = rootFootprint;
+
+    for (let i = 0; i < path.length; i++) {
+        const id = path[i];
+        const shape = currentFp.shapes.find(s => s.id === id);
+        if (!shape) return null;
+
+        if (shape.type === "wireGuide") {
+            return shape as FootprintWireGuide;
+        } else if (shape.type === "footprint") {
+            const ref = shape as FootprintReference;
+            const nextFp = allFootprints.find(f => f.id === ref.footprintId);
+            if (!nextFp) return null;
+            currentFp = nextFp;
+        } else {
+            return null;
+        }
+    }
+    return null;
+}
+
 // Calculate the resolved position of a point. 
 // If it snaps to a guide, recursively calculate the guide's global position.
 // Otherwise evaluate local expression.
