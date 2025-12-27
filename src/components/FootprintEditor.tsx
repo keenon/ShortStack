@@ -874,49 +874,38 @@ function collectExportShapes(
                  exportObj.angle = transform.angle + localAngle;
                  exportObj.corner_radius = evaluateExpression((shape as FootprintRect).cornerRadius, params);
              } else if (shape.type === "line") {
-                 exportObj.shape_type = "line";
-                 exportObj.thickness = evaluateExpression((shape as FootprintLine).thickness, params);
-                 
-                 // Resolve Points
-                 const points = (shape as FootprintLine).points.map(p => {
-                     // Resolve point in context of the footprint where it is defined
-                     const resolved = resolvePoint(p, contextFootprint, allFootprints, params);
-                     
-                     // resolved is relative to contextFootprint origin (0,0)
-                     // We need to transform it by the *accumulated transform* of this recursion
-                     // transform = Parent's Global Pos/Rot
-                     
-                     const px = resolved.x;
-                     const py = resolved.y;
-                     
-                     // Rotate point by parent transform angle
-                     const prx = px * cos - py * sin;
-                     const pry = px * sin + py * cos;
-                     
-                     // Handles
-                     const transformHandle = (h: {x:number, y:number} | undefined) => {
-                         if (!h) return undefined;
-                         // Handles are vectors, rotate only
-                         return {
-                             x: h.x * cos - h.y * sin,
-                             y: h.x * sin + h.y * cos
-                         };
-                     };
+                exportObj.shape_type = "line";
+                exportObj.thickness = evaluateExpression((shape as FootprintLine).thickness, params);
+                
+                const lineShape = shape as FootprintLine;
+                exportObj.points = lineShape.points.map(p => {
+                    // 1. Resolve point in the context of the footprint where it resides
+                    const resolved = resolvePoint(p, contextFootprint, allFootprints, params);
+                    
+                    // 2. Transform the resolved point by the cumulative transform of the recursion
+                    // transform.angle is the rotation of contextFootprint in the global export frame
+                    const rad = (transform.angle * Math.PI) / 180;
+                    const cos = Math.cos(rad);
+                    const sin = Math.sin(rad);
+                    
+                    // Rotate anchor
+                    const rx = resolved.x * cos - resolved.y * sin;
+                    const ry = resolved.x * sin + resolved.y * cos;
+                    
+                    // Helper to rotate handle vectors
+                    const rotateVec = (v?: {x: number, y: number}) => v ? {
+                        x: v.x * cos - v.y * sin,
+                        y: v.x * sin + v.y * cos
+                    } : undefined;
 
-                     return {
-                         x: transform.x + prx, // transform.x is parent's GX. Wait.
-                         // transform.x is the position of the PARENT of this shape?
-                         // In recursion: { x: gx, y: gy, angle... } passed as `transform`.
-                         // `gx`, `gy` is the origin of the current context footprint in Global Space.
-                         // So YES.
-                         
-                         y: transform.y + pry,
-                         handle_in: transformHandle(resolved.handleIn),
-                         handle_out: transformHandle(resolved.handleOut)
-                     };
-                 });
-                 exportObj.points = points;
-             }
+                    return {
+                        x: transform.x + rx,
+                        y: transform.y + ry,
+                        handle_in: rotateVec(resolved.handleIn),
+                        handle_out: rotateVec(resolved.handleOut)
+                    };
+                });
+            }
 
              result.push(exportObj);
         }

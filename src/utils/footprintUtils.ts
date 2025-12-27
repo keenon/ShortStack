@@ -270,50 +270,49 @@ export function resolvePoint(
     params: Parameter[]
 ): { x: number, y: number, handleIn?: {x: number, y: number}, handleOut?: {x: number, y: number} } {
     
+    // Helper to evaluate local handles
+    const evalHandle = (h?: {x: string, y: string}) => h ? {
+        x: evaluateExpression(h.x, params),
+        y: evaluateExpression(h.y, params)
+    } : undefined;
+
     // Default: Evaluate local params
     const defaultRes = {
         x: evaluateExpression(point.x, params),
         y: evaluateExpression(point.y, params),
-        handleIn: point.handleIn ? { 
-            x: evaluateExpression(point.handleIn.x, params), 
-            y: evaluateExpression(point.handleIn.y, params) 
-        } : undefined,
-        handleOut: point.handleOut ? { 
-            x: evaluateExpression(point.handleOut.x, params), 
-            y: evaluateExpression(point.handleOut.y, params) 
-        } : undefined,
+        handleIn: evalHandle(point.handleIn),
+        handleOut: evalHandle(point.handleOut),
     };
 
     if (!point.snapTo) return defaultRes;
 
     const path = point.snapTo.split(":");
-    
     let currentFp = rootFootprint;
+    
     // Accumulate transform from root to the guide
     let transform = { x: 0, y: 0, angle: 0 }; 
 
     for (let i = 0; i < path.length; i++) {
         const id = path[i];
-        
         const shape = currentFp.shapes.find(s => s.id === id);
-        if (!shape) return defaultRes; // Broken link
+        if (!shape) return defaultRes;
 
         if (shape.type === "wireGuide") {
-             // We reached the guide. Calculate its position in its local space, then transform to root.
              const wg = shape as FootprintWireGuide;
              const lx = evaluateExpression(wg.x, params);
              const ly = evaluateExpression(wg.y, params);
              
-             // Apply accumulated transform
+             // Current accumulated rotation
              const rad = (transform.angle * Math.PI) / 180;
              const cos = Math.cos(rad);
              const sin = Math.sin(rad);
              
+             // Anchor point is translated and rotated
              const gx = transform.x + (lx * cos - ly * sin);
              const gy = transform.y + (lx * sin + ly * cos);
 
-             // Handles are vectors, only rotate
-             const resolveHandle = (h?: {x:string, y:string}) => {
+             // Handles are VECTORS: they only rotate, they do not translate
+             const resolveHandle = (h?: {x: string, y: string}) => {
                  if (!h) return undefined;
                  const hx = evaluateExpression(h.x, params);
                  const hy = evaluateExpression(h.y, params);
@@ -333,25 +332,24 @@ export function resolvePoint(
         } else if (shape.type === "footprint") {
              const ref = shape as FootprintReference;
              const nextFp = allFootprints.find(f => f.id === ref.footprintId);
-             if (!nextFp) return defaultRes; // Missing footprint ref
+             if (!nextFp) return defaultRes;
 
              const lx = evaluateExpression(ref.x, params);
              const ly = evaluateExpression(ref.y, params);
              const la = evaluateExpression(ref.angle, params);
 
-             // Compose Transform
-             // New Center = Old Center + Rotate(RefPosition)
              const rad = (transform.angle * Math.PI) / 180;
              const cos = Math.cos(rad);
              const sin = Math.sin(rad);
              
+             // Move the origin of the next footprint into the current frame
              transform.x += (lx * cos - ly * sin);
              transform.y += (lx * sin + ly * cos);
              transform.angle += la;
              
              currentFp = nextFp;
         } else {
-            return defaultRes; // Should not happen if path is valid
+            return defaultRes;
         }
     }
     

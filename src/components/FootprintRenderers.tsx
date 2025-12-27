@@ -222,31 +222,33 @@ export const RecursiveShapeRenderer = ({
   if (shape.type === "line") {
       const thickness = evaluateExpression(shape.thickness, params);
       
-      // Points are resolved using snap logic
-      const pts = shape.points.map(p => {
-          const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
-          return {
-              x: resolved.x,
-              y: resolved.y,
-              hIn: resolved.handleIn,
-              hOut: resolved.handleOut,
-              isSnapped: !!p.snapTo
-          };
-      });
+        const pts = shape.points.map(p => {
+            const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
+            return {
+                x: resolved.x,
+                y: resolved.y,
+                hIn: resolved.handleIn,   // These are now global-frame relative vectors
+                hOut: resolved.handleOut, // These are now global-frame relative vectors
+                isSnapped: !!p.snapTo
+            };
+        });
 
-      let d = "";
-      if (pts.length > 0) {
-          d = `M ${pts[0].x} ${-pts[0].y}`;
-          for (let i = 0; i < pts.length - 1; i++) {
-              const curr = pts[i];
-              const next = pts[i+1];
-              const cp1x = curr.x + (curr.hOut?.x || 0);
-              const cp1y = -(curr.y + (curr.hOut?.y || 0));
-              const cp2x = next.x + (next.hIn?.x || 0);
-              const cp2y = -(next.y + (next.hIn?.y || 0));
-              d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${next.x} ${-next.y}`;
-          }
-      }
+        let d = "";
+        if (pts.length > 0) {
+            d = `M ${pts[0].x} ${-pts[0].y}`;
+            for (let i = 0; i < pts.length - 1; i++) {
+                const curr = pts[i];
+                const next = pts[i+1];
+                
+                // Use the handles directly because they were rotated by resolvePoint
+                const cp1x = curr.x + (curr.hOut?.x || 0);
+                const cp1y = -(curr.y + (curr.hOut?.y || 0)); // SVG Y is inverted
+                const cp2x = next.x + (next.hIn?.x || 0);
+                const cp2y = -(next.y + (next.hIn?.y || 0));
+                
+                d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${next.x} ${-next.y}`;
+            }
+        }
 
       // Render Handles only if strictly selected (not just parent selected)
       const handles = isSelected ? pts.map((pt, idx) => {
