@@ -554,15 +554,12 @@ function generateProceduralFillet(
             const halfH = h / 2;
             
             // If the requested radius is less than offset, the effective radius is 0
-            // But we keep a tiny value to avoid degeneracies if needed, 
-            // or simply use the corner vertex.
             let cr = Math.max(0, crRaw - offset);
             
             // Clamp to size
             const limit = Math.min(halfW, halfH);
             if (cr > limit) cr = limit;
             
-            // Always use consistent segments, do not optimize for sharpness, to ensure topology matches
             const segCorner = 6; 
             
             const quadrants = [
@@ -573,7 +570,9 @@ function generateProceduralFillet(
             ];
 
             quadrants.forEach(q => {
-                for(let i=0; i<=segCorner; i++) {
+                // Use < segCorner to avoid creating a duplicate point at the exact start of the next quadrant
+                // The wall generation loop handles the gap (straight line) automatically.
+                for(let i=0; i<segCorner; i++) {
                     const ang = q.startAng + (i/segCorner) * (Math.PI/2);
                     const vx = q.x + Math.cos(ang) * cr;
                     const vy = q.y + Math.sin(ang) * cr;
@@ -589,18 +588,12 @@ function generateProceduralFillet(
             
             const tempShape = createLineShape(shape as FootprintLine, params, effectiveT);
             if (tempShape) {
-                // Use getPoints (based on division) not getSpacedPoints (based on length)
-                // This keeps topology consistent even if length shrinks
                 const div = Math.max(4, Math.floor(resolution / 2));
                 const pts = tempShape.getPoints(div);
-                // getPoints closes the loop so last == first usually, or we can check
                 if (pts.length > 0 && pts[0].distanceTo(pts[pts.length-1]) < 0.001) {
                     pts.pop();
                 }
 
-                // Ensure consistent winding (CCW) so walls have correct normals
-                // isClockWise returns true for negative area (CW)
-                // We want CCW (matching rect/circle), so if it IS Clockwise, reverse it.
                 if (THREE.ShapeUtils.isClockWise(pts)) {
                     pts.reverse();
                 }
@@ -609,10 +602,6 @@ function generateProceduralFillet(
             }
         }
         
-        // IMPORTANT: Do NOT remove duplicate points here based on distance.
-        // Doing so breaks index alignment between layers if one layer shrinks and points merge.
-        // We accept potential degenerate triangles (zero area) to maintain index topology.
-
         return result;
     };
 
@@ -628,7 +617,6 @@ function generateProceduralFillet(
     layers.push({ z: 0, offset: 0 });
 
     const wallBottomZ = -(depth - safeR);
-    // Add the start of the fillet curve
     if (Math.abs(wallBottomZ) > 0.001) {
         layers.push({ z: wallBottomZ, offset: 0 });
     }
@@ -638,24 +626,21 @@ function generateProceduralFillet(
         const theta = (i / filletSteps) * (Math.PI / 2);
         const z = wallBottomZ - Math.sin(theta) * safeR;
         const off = (1 - Math.cos(theta)) * safeR;
-        // Clamp offset slightly to prevent total collapse at the very bottom
         const maxOffset = minDimension / 2 - 0.001; 
         layers.push({ z, offset: Math.min(off, maxOffset) });
     }
 
-    const vertices: number[] = [];
-    const indices: number[] = [];
+    // 1. Generate Raw Topology (Duplicate vertices allowed here)
+    const rawVertices: number[] = [];
+    const rawIndices: number[] = [];
 
     layers.forEach(layer => {
         const points = getContour(layer.offset);
-        // Topology protection: If a layer collapses (rare due to clamps), we can't build a manifold
         if (points.length !== vertsPerLayer) {
-             console.error(`Topology Mismatch: Layer has ${points.length} verts, expected ${vertsPerLayer}. This causes index errors.`);
+             console.error(`Topology Mismatch: Layer has ${points.length} verts, expected ${vertsPerLayer}.`);
         }
-        
         points.forEach(p => {
-            // Map 2D (x,y) to 3D (x, z, -y)
-            vertices.push(p.x, layer.z, -p.y); 
+            rawVertices.push(p.x, layer.z, -p.y); 
         });
     });
 
@@ -663,13 +648,14 @@ function generateProceduralFillet(
         return layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
     };
 
+    const pushTri = (i1: number, i2: number, i3: number) => {
+        rawIndices.push(i1, i2, i3);
+    };
+
     // A. Top Cap
-    // Normal UP (+Y)
-    // 3D mapping makes the CCW contour appear CW in X-Z plane (looking down).
-    // However, the cross product of (0, 1, 2) yields a Normal UP in this coordinate space.
     const topFaces = THREE.ShapeUtils.triangulateShape(baseProfile, []);
     topFaces.forEach(face => {
-        indices.push(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2]));
+        pushTri(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2]));
     });
 
     // B. Walls
@@ -677,33 +663,102 @@ function generateProceduralFillet(
         for(let i=0; i<vertsPerLayer; i++) {
             const curr = i;
             const next = (i+1) % vertsPerLayer;
-            
-            const v1 = getIdx(l, curr);      // Top Current
-            const v2 = getIdx(l+1, curr);    // Bot Current
-            const v3 = getIdx(l+1, next);    // Bot Next
-            const v4 = getIdx(l, next);      // Top Next
-
-            // Standard CCW outward facing wall
-            indices.push(v1, v2, v4); 
-            indices.push(v2, v3, v4);
+            const v1 = getIdx(l, curr);
+            const v2 = getIdx(l+1, curr);
+            const v3 = getIdx(l+1, next);
+            const v4 = getIdx(l, next);
+            pushTri(v1, v2, v4); 
+            pushTri(v2, v3, v4);
         }
     }
 
     // C. Bottom Cap
-    // Normal DOWN (-Y)
-    // We want the normal to point Down.
-    // (0, 1, 2) points Up, so we swap to (0, 2, 1) to point Down.
     const lastL = layers.length - 1;
     const botProfile = getContour(layers[lastL].offset);
     if (botProfile.length === vertsPerLayer) {
-        const botFaces = THREE.ShapeUtils.triangulateShape(botProfile, []);
-        botFaces.forEach(face => {
-            indices.push(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1]));
-        });
+        // Simple check to ensure it hasn't collapsed completely
+        let isCollapsed = true;
+        const p0 = botProfile[0];
+        for(let i=1; i<botProfile.length; i++) {
+            if (p0.distanceToSquared(botProfile[i]) > 1e-6) {
+                isCollapsed = false;
+                break;
+            }
+        }
+        if (!isCollapsed) {
+            const botFaces = THREE.ShapeUtils.triangulateShape(botProfile, []);
+            botFaces.forEach(face => {
+                pushTri(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1]));
+            });
+        }
     }
 
-    const vertProperties = new Float32Array(vertices);
-    const triVerts = new Uint32Array(indices);
+    // 2. Merge Vertices & Fix Indexing
+    // We map spatial coordinates to unique indices. 
+    // This fixes "Singular Vertices" (bowtie) where multiple vertices share position but not index.
+    const PRECISION = 1e-5;
+    const decimalShift = 1 / PRECISION;
+    
+    const uniqueVerts: number[] = [];
+    const vertMap = new Map<string, number>();
+    const oldToNew = new Int32Array(rawVertices.length / 3);
+
+    for(let i=0; i<rawVertices.length / 3; i++) {
+        const x = rawVertices[i*3];
+        const y = rawVertices[i*3+1];
+        const z = rawVertices[i*3+2];
+        
+        // Quantize to merge close vertices
+        const kx = Math.round(x * decimalShift);
+        const ky = Math.round(y * decimalShift);
+        const kz = Math.round(z * decimalShift);
+        const key = `${kx}_${ky}_${kz}`;
+
+        if (vertMap.has(key)) {
+            oldToNew[i] = vertMap.get(key)!;
+        } else {
+            const newIdx = uniqueVerts.length / 3;
+            uniqueVerts.push(x, y, z);
+            vertMap.set(key, newIdx);
+            oldToNew[i] = newIdx;
+        }
+    }
+
+    // 3. Reconstruct Indices & Filter Degenerate Triangles
+    const finalIndices: number[] = [];
+    
+    for(let i=0; i<rawIndices.length; i+=3) {
+        const a = oldToNew[rawIndices[i]];
+        const b = oldToNew[rawIndices[i+1]];
+        const c = oldToNew[rawIndices[i+2]];
+
+        // 3a. Filter topological degeneracies (collapsed edges)
+        if (a === b || b === c || a === c) continue;
+
+        // 3b. Filter geometric degeneracies (zero area)
+        // Even if topology is distinct, vertices might be collinear.
+        const ax = uniqueVerts[a*3], ay = uniqueVerts[a*3+1], az = uniqueVerts[a*3+2];
+        const bx = uniqueVerts[b*3], by = uniqueVerts[b*3+1], bz = uniqueVerts[b*3+2];
+        const cx = uniqueVerts[c*3], cy = uniqueVerts[c*3+1], cz = uniqueVerts[c*3+2];
+
+        // Cross Product for Area
+        const abx = bx - ax, aby = by - ay, abz = bz - az;
+        const acx = cx - ax, acy = cy - ay, acz = cz - az;
+        
+        const cpx = aby * acz - abz * acy;
+        const cpy = abz * acx - abx * acz;
+        const cpz = abx * acy - aby * acx;
+        
+        const areaSq = cpx*cpx + cpy*cpy + cpz*cpz;
+        
+        // Only add if area is significant
+        if (areaSq > 1e-12) {
+             finalIndices.push(a, b, c);
+        }
+    }
+
+    const vertProperties = new Float32Array(uniqueVerts);
+    const triVerts = new Uint32Array(finalIndices);
 
     try {
         const manifold = new manifoldModule.Manifold({ vertProperties, triVerts });
@@ -711,7 +766,6 @@ function generateProceduralFillet(
     } catch (e) {
         console.error("Procedural Fillet Failed", e);
         analyzeGeometry(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(vertProperties, 3)).setIndex(new THREE.BufferAttribute(triVerts, 1)));
-        // Return raw geometry to allow visualization of failed mesh
         return { manifold: null, vertProperties, triVerts };
     }
 }
