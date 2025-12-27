@@ -1058,7 +1058,7 @@ const LayerSolid = ({
         // we process each shape in order: Cut -> Fill -> Fillet.
         // This allows later shapes to overwrite/fill earlier shapes.
 
-        flatShapes.forEach((item) => {
+        [...flatShapes].reverse().forEach((item) => {
             const shape = item.shape;
             if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;
 
