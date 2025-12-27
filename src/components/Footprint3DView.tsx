@@ -76,107 +76,157 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
   return shape;
 }
 
-function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOverride?: number): THREE.Shape | null {
-  const points = shape.points;
-  if (points.length < 2) return null;
+/**
+ * Manually generates the contour points for a Line shape with thickness.
+ * This guarantees consistent vertex counts across different offsets/layers,
+ * avoiding the non-deterministic vertex merging of THREE.Shape.getPoints().
+ */
+function getLineOutlinePoints(
+    shape: FootprintLine, 
+    params: Parameter[], 
+    thickness: number, 
+    resolution: number
+): THREE.Vector2[] {
+    const points = shape.points;
+    if (points.length < 2) return [];
 
+    const halfThick = thickness / 2;
+    const pathPoints: THREE.Vector2[] = [];
+
+    // 1. Generate Spine (Centerline)
+    for (let i = 0; i < points.length - 1; i++) {
+        const curr = points[i];
+        const next = points[i+1];
+        
+        const x1 = evaluate(curr.x, params);
+        const y1 = evaluate(curr.y, params);
+        const x2 = evaluate(next.x, params);
+        const y2 = evaluate(next.y, params);
+
+        const hasCurve = (curr.handleOut || next.handleIn);
+
+        if (hasCurve) {
+            const cp1x = x1 + (curr.handleOut ? evaluate(curr.handleOut.x, params) : 0);
+            const cp1y = y1 + (curr.handleOut ? evaluate(curr.handleOut.y, params) : 0);
+            const cp2x = x2 + (next.handleIn ? evaluate(next.handleIn.x, params) : 0);
+            const cp2y = y2 + (next.handleIn ? evaluate(next.handleIn.y, params) : 0);
+
+            const curve = new THREE.CubicBezierCurve(
+                new THREE.Vector2(x1, y1),
+                new THREE.Vector2(cp1x, cp1y),
+                new THREE.Vector2(cp2x, cp2y),
+                new THREE.Vector2(x2, y2)
+            );
+
+            // Fixed divisions for spine to ensure stability
+            const divisions = 24; 
+            const sp = curve.getPoints(divisions);
+            
+            // Remove first point if it duplicates the last point of previous segment
+            if (pathPoints.length > 0) sp.shift();
+            sp.forEach(p => pathPoints.push(p));
+        } else {
+            if (pathPoints.length === 0) pathPoints.push(new THREE.Vector2(x1, y1));
+            pathPoints.push(new THREE.Vector2(x2, y2));
+        }
+    }
+
+    if (pathPoints.length < 2) return [];
+
+    // 2. Calculate Offsets (Left/Right rails)
+    const leftPts: THREE.Vector2[] = [];
+    const rightPts: THREE.Vector2[] = [];
+
+    for (let i = 0; i < pathPoints.length; i++) {
+        const p = pathPoints[i];
+        let tangent: THREE.Vector2;
+        
+        if (i === 0) {
+            const next = pathPoints[i+1];
+            tangent = new THREE.Vector2().subVectors(next, p).normalize();
+        } else if (i === pathPoints.length - 1) {
+            const prev = pathPoints[i-1];
+            tangent = new THREE.Vector2().subVectors(p, prev).normalize();
+        } else {
+            const prev = pathPoints[i-1];
+            const next = pathPoints[i+1];
+            const t1 = new THREE.Vector2().subVectors(p, prev).normalize();
+            const t2 = new THREE.Vector2().subVectors(next, p).normalize();
+            tangent = new THREE.Vector2().addVectors(t1, t2).normalize();
+        }
+
+        const normal = new THREE.Vector2(-tangent.y, tangent.x);
+        leftPts.push(new THREE.Vector2(p.x + normal.x * halfThick, p.y + normal.y * halfThick));
+        rightPts.push(new THREE.Vector2(p.x - normal.x * halfThick, p.y - normal.y * halfThick));
+    }
+
+    // 3. Assemble Contour (CCW Winding)
+    const contour: THREE.Vector2[] = [];
+    const arcDivisions = Math.max(4, Math.floor(resolution / 2));
+
+    // A. Left Side (Forward)
+    for (let i = 0; i < leftPts.length; i++) {
+        contour.push(leftPts[i]);
+    }
+
+    // B. End Cap (Semi-circle)
+    {
+        const lastIdx = pathPoints.length - 1;
+        const pLast = pathPoints[lastIdx];
+        const vLast = new THREE.Vector2().subVectors(leftPts[lastIdx], pLast);
+        const startAng = Math.atan2(vLast.y, vLast.x);
+        // Arc from Left Rail end to Right Rail end
+        for (let i = 1; i <= arcDivisions; i++) {
+            const t = i / arcDivisions;
+            const ang = startAng - t * Math.PI; // 180 degree turn
+            contour.push(new THREE.Vector2(
+                pLast.x + Math.cos(ang) * halfThick,
+                pLast.y + Math.sin(ang) * halfThick
+            ));
+        }
+    }
+
+    // C. Right Side (Reverse)
+    for (let i = rightPts.length - 1; i >= 0; i--) {
+        contour.push(rightPts[i]);
+    }
+
+    // D. Start Cap (Semi-circle)
+    {
+        const pFirst = pathPoints[0];
+        const vFirst = new THREE.Vector2().subVectors(rightPts[0], pFirst);
+        const startAng = Math.atan2(vFirst.y, vFirst.x);
+        
+        // Arc from Right Rail start to Left Rail start
+        // We stop 1 step short of the end because the loop wraps back to contour[0]
+        for (let i = 1; i < arcDivisions; i++) {
+            const t = i / arcDivisions;
+            const ang = startAng - t * Math.PI;
+            contour.push(new THREE.Vector2(
+                pFirst.x + Math.cos(ang) * halfThick,
+                pFirst.y + Math.sin(ang) * halfThick
+            ));
+        }
+    }
+
+    return contour;
+}
+
+function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOverride?: number): THREE.Shape | null {
+  // Use the deterministic point generator for the flat cut shape as well
   const thickVal = thicknessOverride !== undefined ? thicknessOverride : evaluate(shape.thickness, params);
   if (thickVal <= 0) return null;
+
+  const pts = getLineOutlinePoints(shape, params, thickVal, 12);
+  if (pts.length < 3) return null;
   
-  const halfThick = thickVal / 2;
-
-  const pathPoints: THREE.Vector2[] = [];
-
-  for (let i = 0; i < points.length - 1; i++) {
-      const curr = points[i];
-      const next = points[i+1];
-      
-      const x1 = evaluate(curr.x, params);
-      const y1 = evaluate(curr.y, params);
-      const x2 = evaluate(next.x, params);
-      const y2 = evaluate(next.y, params);
-
-      const hasCurve = (curr.handleOut || next.handleIn);
-
-      if (hasCurve) {
-          const cp1x = x1 + (curr.handleOut ? evaluate(curr.handleOut.x, params) : 0);
-          const cp1y = y1 + (curr.handleOut ? evaluate(curr.handleOut.y, params) : 0);
-          const cp2x = x2 + (next.handleIn ? evaluate(next.handleIn.x, params) : 0);
-          const cp2y = y2 + (next.handleIn ? evaluate(next.handleIn.y, params) : 0);
-
-          const curve = new THREE.CubicBezierCurve(
-              new THREE.Vector2(x1, y1),
-              new THREE.Vector2(cp1x, cp1y),
-              new THREE.Vector2(cp2x, cp2y),
-              new THREE.Vector2(x2, y2)
-          );
-
-          const divisions = 24; 
-          const sp = curve.getPoints(divisions);
-          if (pathPoints.length > 0) sp.shift();
-          sp.forEach(p => pathPoints.push(p));
-      } else {
-          if (pathPoints.length === 0) pathPoints.push(new THREE.Vector2(x1, y1));
-          pathPoints.push(new THREE.Vector2(x2, y2));
-      }
+  const s = new THREE.Shape();
+  s.moveTo(pts[0].x, pts[0].y);
+  for(let i=1; i<pts.length; i++) {
+      s.lineTo(pts[i].x, pts[i].y);
   }
-
-  if (pathPoints.length < 2) return null;
-
-  const leftPts: THREE.Vector2[] = [];
-  const rightPts: THREE.Vector2[] = [];
-
-  for (let i = 0; i < pathPoints.length; i++) {
-      const p = pathPoints[i];
-      let tangent: THREE.Vector2;
-      
-      if (i === 0) {
-          const next = pathPoints[i+1];
-          tangent = new THREE.Vector2().subVectors(next, p).normalize();
-      } else if (i === pathPoints.length - 1) {
-          const prev = pathPoints[i-1];
-          tangent = new THREE.Vector2().subVectors(p, prev).normalize();
-      } else {
-          const prev = pathPoints[i-1];
-          const next = pathPoints[i+1];
-          const t1 = new THREE.Vector2().subVectors(p, prev).normalize();
-          const t2 = new THREE.Vector2().subVectors(next, p).normalize();
-          tangent = new THREE.Vector2().addVectors(t1, t2).normalize();
-      }
-
-      const normal = new THREE.Vector2(-tangent.y, tangent.x);
-      leftPts.push(new THREE.Vector2(p.x + normal.x * halfThick, p.y + normal.y * halfThick));
-      rightPts.push(new THREE.Vector2(p.x - normal.x * halfThick, p.y - normal.y * halfThick));
-  }
-
-  const shape2D = new THREE.Shape();
-  shape2D.moveTo(leftPts[0].x, leftPts[0].y);
-  
-  for (let i = 1; i < leftPts.length; i++) {
-      shape2D.lineTo(leftPts[i].x, leftPts[i].y);
-  }
-
-  const lastIdx = pathPoints.length - 1;
-  const pLast = pathPoints[lastIdx];
-  const vLast = new THREE.Vector2().subVectors(leftPts[lastIdx], pLast);
-  const angLast = Math.atan2(vLast.y, vLast.x);
-  
-  shape2D.absarc(pLast.x, pLast.y, halfThick, angLast, angLast + Math.PI, true);
-
-  for (let i = rightPts.length - 2; i >= 0; i--) {
-      shape2D.lineTo(rightPts[i].x, rightPts[i].y);
-  }
-
-  const pFirst = pathPoints[0];
-  const vFirst = new THREE.Vector2().subVectors(rightPts[0], pFirst);
-  const angFirst = Math.atan2(vFirst.y, vFirst.x);
-  
-  shape2D.absarc(pFirst.x, pFirst.y, halfThick, angFirst, angFirst + Math.PI, true);
-
-  // FIXED: Explicitly close the path to ensure getPoints() returns consistent loop
-  shape2D.closePath();
-
-  return shape2D;
+  s.closePath();
+  return s;
 }
 
 function createBoardShape(points: Point[], params: Parameter[]): THREE.Shape | null {
@@ -660,16 +710,16 @@ function generateProceduralFillet(
     
     // Generates a contour at a specific inward offset
     const getContour = (offset: number): THREE.Vector2[] => {
-        let result: THREE.Vector2[] = [];
+        let rawPoints: THREE.Vector2[] = [];
         
         if (shape.type === "circle") {
             const d = evaluate((shape as any).diameter, params);
             minDimension = d;
-            const r = Math.max(0.001, d/2 - offset); // Prevent zero radius
+            const r = Math.max(0.001, d/2 - offset); 
             const segments = resolution;
             for(let i=0; i<segments; i++) {
                 const theta = (i / segments) * Math.PI * 2;
-                result.push(new THREE.Vector2(Math.cos(theta) * r, Math.sin(theta) * r));
+                rawPoints.push(new THREE.Vector2(Math.cos(theta) * r, Math.sin(theta) * r));
             }
         } 
         else if (shape.type === "rect") {
@@ -677,23 +727,16 @@ function generateProceduralFillet(
             const hRaw = evaluate((shape as FootprintRect).height, params);
             minDimension = Math.min(wRaw, hRaw);
             
-            // Ensure width/height don't collapse to 0 or negative
             const w = Math.max(0.001, wRaw - offset * 2);
             const h = Math.max(0.001, hRaw - offset * 2);
             const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
             
             const halfW = w / 2;
             const halfH = h / 2;
-            
-            // If the requested radius is less than offset, the effective radius is 0
             let cr = Math.max(0, crRaw - offset);
-            
-            // Clamp to size
             const limit = Math.min(halfW, halfH);
             if (cr > limit) cr = limit;
             
-            // FIXED: Ensure constant vertex count regardless of radius size
-            // We use a fixed number of segments per corner.
             const segCorner = 6; 
             
             const quadrants = [
@@ -708,42 +751,42 @@ function generateProceduralFillet(
                     const ang = q.startAng + (i/segCorner) * (Math.PI/2);
                     const vx = q.x + Math.cos(ang) * cr;
                     const vy = q.y + Math.sin(ang) * cr;
-                    result.push(new THREE.Vector2(vx, vy));
+                    rawPoints.push(new THREE.Vector2(vx, vy));
                 }
             });
         }
         else if (shape.type === "line") {
             const t = evaluate((shape as FootprintLine).thickness, params);
             minDimension = t;
-            // Prevent thickness collapse
             const effectiveT = Math.max(0.001, t - offset * 2);
             
-            const tempShape = createLineShape(shape as FootprintLine, params, effectiveT);
-            if (tempShape) {
-                const div = Math.max(4, Math.floor(resolution / 2));
-                const pts = tempShape.getPoints(div);
-                
-                // FIXED: Improve Loop detection consistency
-                // If points are closed, remove the last one to prevent double-vertex at seam.
-                // increased epsilon slightly for robustness.
-                if (pts.length > 0 && pts[0].distanceTo(pts[pts.length-1]) < 0.01) {
-                    pts.pop();
-                }
+            // FIXED: Use deterministic manual point generation
+            rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution);
+        }
 
-                if (THREE.ShapeUtils.isClockWise(pts)) {
-                    pts.reverse();
+        // --- FILTERING ---
+        // Ensure strictly unique points to avoid manifold errors with zero-length edges
+        if (rawPoints.length > 0) {
+            const clean: THREE.Vector2[] = [rawPoints[0]];
+            for(let i=1; i<rawPoints.length; i++) {
+                if (rawPoints[i].distanceToSquared(clean[clean.length-1]) > 1e-9) {
+                    clean.push(rawPoints[i]);
                 }
-
-                pts.forEach(p => result.push(p));
             }
+            // Check loop closure (last vs first)
+            if (clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) {
+                clean.pop();
+            }
+            return clean;
         }
         
-        return result;
+        return rawPoints;
     };
 
     // Pre-calc dimension to clamp radius
     const baseProfile = getContour(0); 
     const vertsPerLayer = baseProfile.length;
+    
     if (vertsPerLayer < 3) return null;
 
     const safeR = Math.min(filletRadius, minDimension / 2 - 0.01, depth);
@@ -752,39 +795,34 @@ function generateProceduralFillet(
     const layers: { z: number, offset: number }[] = [];
     layers.push({ z: 0, offset: 0 });
 
-    // FIXED: Calculate bottom start Z correctly relative to the ball nose
     const wallBottomZ = -(depth - safeR);
-    // Always push the cylindrical wall bottom unless it's practically 0 (pure sphere cap)
     if (Math.abs(wallBottomZ) > 0.001) {
         layers.push({ z: wallBottomZ, offset: 0 });
     }
 
-    // FIXED: Fillet steps for the ball nose
     const filletSteps = 8; 
     for(let i=1; i<=filletSteps; i++) {
         const theta = (i / filletSteps) * (Math.PI / 2);
         const z = wallBottomZ - Math.sin(theta) * safeR;
         const off = (1 - Math.cos(theta)) * safeR;
-        
-        // Clamp offset to avoid inversion
         const maxOffset = minDimension / 2 - 0.001; 
-        
         layers.push({ z, offset: Math.min(off, maxOffset) });
     }
 
-    // 1. Generate Raw Topology (Duplicate vertices allowed here)
     const rawVertices: number[] = [];
     const rawIndices: number[] = [];
-
     let topologyValid = true;
 
-    layers.forEach(layer => {
+    layers.forEach((layer, idx) => {
         const points = getContour(layer.offset);
-        // CRITICAL: Ensure topology (vertex count) is identical for all layers
+        
+        // Strictly enforce vertex count. 
+        // With getLineOutlinePoints, this should never trigger unless logic is flawed.
         if (points.length !== vertsPerLayer) {
-             console.error(`Topology Mismatch: Layer at z=${layer.z} has ${points.length} verts, expected ${vertsPerLayer}.`);
+             console.error(`Topology Mismatch: Layer ${idx} has ${points.length}, expected ${vertsPerLayer}.`);
              topologyValid = false;
         }
+        
         if (!topologyValid) return;
 
         points.forEach(p => {
@@ -803,9 +841,10 @@ function generateProceduralFillet(
     };
 
     // A. Top Cap
+    // Note: triangulateShape might be slow or flaky for complex non-convex shapes.
+    // For simple thick lines, it's usually fine. 
     const topFaces = THREE.ShapeUtils.triangulateShape(baseProfile, []);
     topFaces.forEach(face => {
-        // Winding: CCW 2D -> Up Normal in 3D (due to y-flip mapping)
         pushTri(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2]));
     });
 
@@ -826,31 +865,29 @@ function generateProceduralFillet(
     }
 
     // C. Bottom Cap
-    // If the last layer hasn't collapsed to a single point, cap it.
     const lastL = layers.length - 1;
     const botProfile = getContour(layers[lastL].offset);
-    if (botProfile.length === vertsPerLayer) {
-        let isCollapsed = true;
+    
+    // Check collapse
+    let isCollapsed = true;
+    if (botProfile.length > 0) {
         const p0 = botProfile[0];
-        // Check if all points are effectively same
         for(let i=1; i<botProfile.length; i++) {
             if (p0.distanceToSquared(botProfile[i]) > 1e-6) {
                 isCollapsed = false;
                 break;
             }
         }
-        
-        if (!isCollapsed) {
-            const botFaces = THREE.ShapeUtils.triangulateShape(botProfile, []);
-            botFaces.forEach(face => {
-                // Reverse winding for bottom cap
-                pushTri(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1]));
-            });
-        }
+    }
+    
+    if (!isCollapsed && botProfile.length === vertsPerLayer) {
+        const botFaces = THREE.ShapeUtils.triangulateShape(botProfile, []);
+        botFaces.forEach(face => {
+            pushTri(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1]));
+        });
     }
 
     // 2. Merge Vertices & Fix Indexing
-    // We map spatial coordinates to unique indices to ensure manifoldness (closed volume).
     const PRECISION = 1e-5;
     const decimalShift = 1 / PRECISION;
     
@@ -863,7 +900,6 @@ function generateProceduralFillet(
         const y = rawVertices[i*3+1];
         const z = rawVertices[i*3+2];
         
-        // Quantize
         const kx = Math.round(x * decimalShift);
         const ky = Math.round(y * decimalShift);
         const kz = Math.round(z * decimalShift);
@@ -879,7 +915,6 @@ function generateProceduralFillet(
         }
     }
 
-    // 3. Reconstruct Indices & Filter Degenerate Triangles
     const finalIndices: number[] = [];
     
     for(let i=0; i<rawIndices.length; i+=3) {
@@ -887,10 +922,9 @@ function generateProceduralFillet(
         const b = oldToNew[rawIndices[i+1]];
         const c = oldToNew[rawIndices[i+2]];
 
-        // Filter topological degeneracies
         if (a === b || b === c || a === c) continue;
-
-        // Filter geometric degeneracies (Zero Area)
+        
+        // Geometric area check
         const ax = uniqueVerts[a*3], ay = uniqueVerts[a*3+1], az = uniqueVerts[a*3+2];
         const bx = uniqueVerts[b*3], by = uniqueVerts[b*3+1], bz = uniqueVerts[b*3+2];
         const cx = uniqueVerts[c*3], cy = uniqueVerts[c*3+1], cz = uniqueVerts[c*3+2];
@@ -902,9 +936,7 @@ function generateProceduralFillet(
         const cpy = abz * acx - abx * acz;
         const cpz = abx * acy - aby * acx;
         
-        const areaSq = cpx*cpx + cpy*cpy + cpz*cpz;
-        
-        if (areaSq > 1e-12) {
+        if (cpx*cpx + cpy*cpy + cpz*cpz > 1e-12) {
              finalIndices.push(a, b, c);
         }
     }
@@ -913,23 +945,17 @@ function generateProceduralFillet(
     const triVerts = new Uint32Array(finalIndices);
 
     try {
-        // FIXED: Explicitly construct Mesh object
         const mesh = new manifoldModule.Mesh();
         mesh.vertProperties = vertProperties;
         mesh.triVerts = triVerts;
         
         const manifold = new manifoldModule.Manifold(mesh);
         
-        // Verify status if available
         if (manifold.status) {
              const status = manifold.status();
-             // Normalize status: it might be an integer (enum) or an object wrapper
              let statusCode = 0;
-             if (typeof status === 'number') {
-                 statusCode = status;
-             } else if (status && typeof status.value === 'number') {
-                 statusCode = status.value;
-             }
+             if (typeof status === 'number') statusCode = status;
+             else if (status && typeof status.value === 'number') statusCode = status.value;
              
              if (statusCode !== 0) {
                  console.error(`Manifold Status Error: ${statusCode}`);
@@ -940,7 +966,6 @@ function generateProceduralFillet(
         return { manifold, vertProperties, triVerts };
     } catch (e) {
         console.error("Procedural Fillet Manifold Creation Failed", e);
-        // Return raw data for debug visualization
         return { manifold: null, vertProperties, triVerts };
     }
 }
@@ -1162,7 +1187,7 @@ const LayerSolid = ({
                     32
                 );
 
-                if (result.manifold) {
+                if (result && result.manifold) {
                     const toolFillet = collect(result.manifold);
                     const r = collect(toolFillet.rotate([0, globalRot, 0]));
 
@@ -1176,7 +1201,7 @@ const LayerSolid = ({
                         const final = collect(flipped.translate([localX, -thickness/2, localZ]));
                         fillets.push(final);
                     }
-                } else if (result.vertProperties && result.triVerts) {
+                } else if (result && result.vertProperties && result.triVerts) {
                     // Failed to convert to manifold. Store for display (red wireframe).
                     const geom = new THREE.BufferGeometry();
                     geom.setAttribute('position', new THREE.BufferAttribute(result.vertProperties, 3));
