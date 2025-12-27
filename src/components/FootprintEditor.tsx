@@ -245,7 +245,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         const { width, height } = wrapperRef.current.getBoundingClientRect();
         if (width === 0 || height === 0) return;
         setViewBox(prev => {
-            const currentRatio = prev.width / prev.height;
             const newRatio = width / height;
             const newHeight = prev.width / newRatio;
             const centerX = prev.x + prev.width / 2;
@@ -309,7 +308,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     setViewBox(prev => ({ ...prev, x: newX, y: newY }));
   };
 
-  const handleGlobalMouseUp = (e: MouseEvent) => {
+  const handleGlobalMouseUp = (_e: MouseEvent) => {
     isDragging.current = false;
     window.removeEventListener('mousemove', handleGlobalMouseMove);
     window.removeEventListener('mouseup', handleGlobalMouseUp);
@@ -426,7 +425,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                   if ((s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide") && (startShape.type === "circle" || startShape.type === "rect" || startShape.type === "footprint" || startShape.type === "wireGuide")) {
                       // Wire Guides have handle properties too (handleIn, handleOut), check if drag target is handle
                       if (s.type === "wireGuide" && handleType) {
-                           const wg = s as FootprintWireGuide;
                            const startWg = startShape as FootprintWireGuide;
                            if (handleType === 'in' && startWg.handleIn) {
                                return { ...s, handleIn: { x: modifyExpression(startWg.handleIn.x, dxWorld), y: modifyExpression(startWg.handleIn.y, dyWorld) } };
@@ -443,7 +441,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       }
   };
 
-  const handleShapeMouseUp = (e: MouseEvent) => {
+  const handleShapeMouseUp = (_e: MouseEvent) => {
       isShapeDragging.current = false;
       dragTargetRef.current = null;
       shapeDragStartData.current = null;

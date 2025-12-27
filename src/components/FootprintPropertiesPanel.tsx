@@ -1,6 +1,7 @@
 // src/components/FootprintPropertiesPanel.tsx
-import React, { Fragment, useMemo } from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide } from "../types";
+// import React, { Fragment, useMemo } from "react";
+import { Fragment, useMemo } from "react";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import { BOARD_OUTLINE_ID, modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
 

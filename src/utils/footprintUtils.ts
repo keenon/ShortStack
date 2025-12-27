@@ -1,6 +1,6 @@
 // src/utils/footprintUtils.ts
 import * as math from "mathjs";
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, FootprintShape, Point, FootprintWireGuide } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide } from "../types";
 
 export const BOARD_OUTLINE_ID = "BOARD_OUTLINE";
 

@@ -4,7 +4,7 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, FootprintInstance, BoardOutline, LayerAssignment } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -14,15 +14,6 @@ const TABLEAU_10 = [
   "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", 
   "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC"
 ];
-
-const DEFAULT_BOARD: BoardOutline = {
-  points: [
-    { id: crypto.randomUUID(), x: "-50", y: "-50" },
-    { id: crypto.randomUUID(), x: "50", y: "-50" },
-    { id: crypto.randomUUID(), x: "50", y: "50" },
-    { id: crypto.randomUUID(), x: "-50", y: "50" },
-  ]
-};
 
 type Tab = "stackup" | "footprint" | "layout" | "parameters";
 
