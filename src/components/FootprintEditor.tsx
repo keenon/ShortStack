@@ -506,11 +506,24 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     // 2. Prepare Data
     const layerThickness = evaluateExpression(layer.thicknessExpression, params);
 
-    // Evaluate Board Outline
-    const outline = (footprint.boardOutline || []).map(p => ({
-        x: evaluateExpression(p.x, params),
-        y: evaluateExpression(p.y, params)
-    }));
+    // Evaluate Board Outline with Handles
+    const outline = (footprint.boardOutline || []).map(p => {
+        const hIn = p.handleIn ? { 
+            x: evaluateExpression(p.handleIn.x, params), 
+            y: evaluateExpression(p.handleIn.y, params) 
+        } : undefined;
+        const hOut = p.handleOut ? { 
+            x: evaluateExpression(p.handleOut.x, params), 
+            y: evaluateExpression(p.handleOut.y, params) 
+        } : undefined;
+
+        return {
+            x: evaluateExpression(p.x, params),
+            y: evaluateExpression(p.y, params),
+            handle_in: hIn,
+            handle_out: hOut
+        };
+    });
 
     // Gather Shapes (Recursive)
     // We start with identity transform
@@ -828,6 +841,7 @@ function collectExportShapes(
                  exportObj.height = evaluateExpression((shape as FootprintRect).height, params);
                  const localAngle = evaluateExpression((shape as FootprintRect).angle, params);
                  exportObj.angle = transform.angle + localAngle;
+                 exportObj.corner_radius = evaluateExpression((shape as FootprintRect).cornerRadius, params);
              } else if (shape.type === "line") {
                  exportObj.shape_type = "line";
                  exportObj.thickness = evaluateExpression((shape as FootprintLine).thickness, params);
@@ -862,8 +876,8 @@ function collectExportShapes(
                      return {
                          x: gx + prx,
                          y: gy + pry,
-                         handleIn: transformHandle(p.handleIn),
-                         handleOut: transformHandle(p.handleOut)
+                         handle_in: transformHandle(p.handleIn),
+                         handle_out: transformHandle(p.handleOut)
                      };
                  });
                  exportObj.points = points;

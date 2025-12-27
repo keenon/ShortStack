@@ -14,20 +14,31 @@ use csgrs::sketch::Sketch;
 use csgrs::traits::CSG; 
 
 #[derive(Debug, serde::Deserialize)]
-struct ExportPoint {
+struct ExportVec2 {
     x: f64,
     y: f64,
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct ExportPoint {
+    x: f64,
+    y: f64,
+    handle_in: Option<ExportVec2>,
+    handle_out: Option<ExportVec2>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct ExportShape {
-    shape_type: String, // "circle", "rect"
+    shape_type: String, // "circle", "rect", "line"
     x: f64,
     y: f64,
     width: Option<f64>,
     height: Option<f64>,
     diameter: Option<f64>,
     angle: Option<f64>,
+    corner_radius: Option<f64>,
+    thickness: Option<f64>,
+    points: Option<Vec<ExportPoint>>,
     depth: f64,
 }
 
@@ -102,19 +113,207 @@ fn export_layer_files(request: ExportRequest) {
     }
 }
 
-// Helper to get unioned geometry for profile cuts
-fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f64>)> {
-    // 1. Convert Board Outline to Polygon
-    let outline_coords: Vec<Coord<f64>> = request.outline.iter()
-        .map(|p| Coord { x: p.x, y: p.y })
-        .collect();
+// Evaluate cubic bezier at t
+fn eval_bezier(p0: Coord<f64>, p1: Coord<f64>, p2: Coord<f64>, p3: Coord<f64>, t: f64) -> Coord<f64> {
+    let mt = 1.0 - t;
+    let mt2 = mt * mt;
+    let mt3 = mt2 * mt;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    
+    Coord {
+        x: mt3 * p0.x + 3.0 * mt2 * t * p1.x + 3.0 * mt * t2 * p2.x + t3 * p3.x,
+        y: mt3 * p0.y + 3.0 * mt2 * t * p1.y + 3.0 * mt * t2 * p2.y + t3 * p3.y,
+    }
+}
 
-    if outline_coords.is_empty() {
-        return None;
+// Discretize open or generic path
+fn discretize_path(points: &[ExportPoint]) -> LineString<f64> {
+    let mut coords = Vec::new();
+    if points.is_empty() { return LineString::new(vec![]); }
+
+    coords.push(Coord { x: points[0].x, y: points[0].y });
+
+    for i in 0..points.len() {
+        if i >= points.len() - 1 { break; }
+
+        let p0 = &points[i];
+        let p3 = &points[i+1];
+        
+        // Check for handles
+        let has_curve = p0.handle_out.is_some() || p3.handle_in.is_some();
+        
+        if has_curve {
+            let cp1 = if let Some(h) = &p0.handle_out {
+                Coord { x: p0.x + h.x, y: p0.y + h.y }
+            } else {
+                Coord { x: p0.x, y: p0.y }
+            };
+            
+            let cp2 = if let Some(h) = &p3.handle_in {
+                Coord { x: p3.x + h.x, y: p3.y + h.y }
+            } else {
+                Coord { x: p3.x, y: p3.y }
+            };
+
+            // Sample
+            let steps = 16;
+            for s in 1..=steps {
+                let t = s as f64 / steps as f64;
+                coords.push(eval_bezier(
+                    Coord { x: p0.x, y: p0.y }, 
+                    cp1, cp2, 
+                    Coord { x: p3.x, y: p3.y }, 
+                    t
+                ));
+            }
+        } else {
+            coords.push(Coord { x: p3.x, y: p3.y });
+        }
+    }
+    
+    LineString::new(coords)
+}
+
+// Special version for outline which is always closed
+fn discretize_path_closed(points: &[ExportPoint]) -> LineString<f64> {
+    if points.is_empty() { return LineString::new(vec![]); }
+    let mut ls = discretize_path(points);
+    
+    // Add closing segment
+    let last = &points[points.len() - 1];
+    let first = &points[0];
+    
+    // Check if we need to discretize the closing segment
+    let has_curve = last.handle_out.is_some() || first.handle_in.is_some();
+    
+    if has_curve {
+        let cp1 = if let Some(h) = &last.handle_out {
+            Coord { x: last.x + h.x, y: last.y + h.y }
+        } else {
+            Coord { x: last.x, y: last.y }
+        };
+        let cp2 = if let Some(h) = &first.handle_in {
+            Coord { x: first.x + h.x, y: first.y + h.y }
+        } else {
+            Coord { x: first.x, y: first.y }
+        };
+        
+        let steps = 16;
+        for s in 1..=steps {
+             let t = s as f64 / steps as f64;
+             ls.0.push(eval_bezier(
+                 Coord { x: last.x, y: last.y },
+                 cp1, cp2,
+                 Coord { x: first.x, y: first.y },
+                 t
+             ));
+        }
+    } else {
+        ls.0.push(Coord { x: first.x, y: first.y });
+    }
+    ls
+}
+
+fn stroke_linestring(ls: &LineString<f64>, thickness: f64) -> Polygon<f64> {
+    if ls.0.len() < 2 { return Polygon::new(LineString::new(vec![]), vec![]); }
+    
+    let half_t = thickness / 2.0;
+    let mut left_pts = Vec::new();
+    let mut right_pts = Vec::new();
+
+    for i in 0..ls.0.len() {
+        let p = ls.0[i];
+        let tangent;
+        
+        if i == 0 {
+            let next = ls.0[i+1];
+            let dx = next.x - p.x;
+            let dy = next.y - p.y;
+            let len = (dx*dx + dy*dy).sqrt();
+            tangent = Coord { x: dx/len, y: dy/len };
+        } else if i == ls.0.len() - 1 {
+            let prev = ls.0[i-1];
+            let dx = p.x - prev.x;
+            let dy = p.y - prev.y;
+            let len = (dx*dx + dy*dy).sqrt();
+            tangent = Coord { x: dx/len, y: dy/len };
+        } else {
+            let prev = ls.0[i-1];
+            let next = ls.0[i+1];
+            // Average tangent
+            let dx1 = p.x - prev.x; let dy1 = p.y - prev.y;
+            let dx2 = next.x - p.x; let dy2 = next.y - p.y;
+            // normalize both
+            let l1 = (dx1*dx1 + dy1*dy1).sqrt();
+            let l2 = (dx2*dx2 + dy2*dy2).sqrt();
+            let tx = dx1/l1 + dx2/l2;
+            let ty = dy1/l1 + dy2/l2;
+            let tl = (tx*tx + ty*ty).sqrt();
+            tangent = Coord { x: tx/tl, y: ty/tl };
+        }
+
+        let normal = Coord { x: -tangent.y, y: tangent.x };
+        
+        left_pts.push(Coord { x: p.x + normal.x * half_t, y: p.y + normal.y * half_t });
+        right_pts.push(Coord { x: p.x - normal.x * half_t, y: p.y - normal.y * half_t });
     }
 
-    let outline_ls = LineString::new(outline_coords);
-    let board_poly = Polygon::new(outline_ls, vec![]);
+    // Construct loop with Rounded Ends (Semicircles)
+    // Left forward
+    let mut loop_coords = left_pts.clone();
+    
+    // Tip Cap (Rounded): Rotate the normal vector CW 180 degrees at the end
+    let p_last = ls.0[ls.0.len() - 1];
+    let v_start = Coord { 
+        x: left_pts.last().unwrap().x - p_last.x, 
+        y: left_pts.last().unwrap().y - p_last.y 
+    };
+    
+    let steps = 16;
+    for i in 1..steps { 
+        let theta = -(i as f64 / steps as f64) * PI; // CW rotation
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+        let vx = v_start.x * cos_t - v_start.y * sin_t;
+        let vy = v_start.x * sin_t + v_start.y * cos_t;
+        loop_coords.push(Coord { x: p_last.x + vx, y: p_last.y + vy });
+    }
+
+    // Right backward
+    loop_coords.extend(right_pts.iter().rev().cloned());
+    
+    // Start Cap (Rounded): Rotate the normal vector CW 180 degrees at the start
+    let p_first = ls.0[0];
+    let v_start_cap = Coord {
+        x: right_pts[0].x - p_first.x,
+        y: right_pts[0].y - p_first.y
+    };
+    
+    for i in 1..steps {
+        let theta = -(i as f64 / steps as f64) * PI;
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+        let vx = v_start_cap.x * cos_t - v_start_cap.y * sin_t;
+        let vy = v_start_cap.x * sin_t + v_start_cap.y * cos_t;
+        loop_coords.push(Coord { x: p_first.x + vx, y: p_first.y + vy });
+    }
+
+    // Close
+    if let Some(first) = loop_coords.first() {
+        loop_coords.push(*first);
+    }
+
+    Polygon::new(LineString::new(loop_coords), vec![])
+}
+
+// Helper to get unioned geometry for profile cuts
+fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f64>)> {
+    if request.outline.is_empty() { return None; }
+    
+    // Discretize board outline (closed)
+    let board_ls = discretize_path_closed(&request.outline);
+    let board_poly = Polygon::new(board_ls, vec![]);
 
     // 2. Convert Shapes to Sketch and Union using csgrs
     let mut united_sketch: Option<Sketch<()>> = None;
@@ -122,9 +321,7 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
     for shape in &request.shapes {
         if let Some(poly) = shape_to_polygon(shape) {
             // Convert geo::Polygon to Sketch
-            // Note: geo 0.29.3 and csgrs 0.20.1 are compatible
             let geom = geo::Geometry::Polygon(poly);
-            // Convert Geometry to GeometryCollection using .into()
             let shape_sketch = Sketch::from_geo(geom.into(), None); 
 
             if let Some(current) = united_sketch {
@@ -138,7 +335,6 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
     // 3. Convert Sketch back to MultiPolygon for export
     let united_shapes = if let Some(sketch) = united_sketch {
         let mut polys = Vec::new();
-        // Sketch contains a geo::GeometryCollection
         for geom in sketch.geometry {
             match geom {
                 geo::Geometry::Polygon(p) => polys.push(p),
@@ -156,17 +352,10 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
 
 // Helper to get raw polygon list for depth maps (no union)
 fn get_board_and_shapes_raw(request: &ExportRequest) -> Option<(Polygon<f64>, Vec<(Polygon<f64>, f64)>)> {
-    // 1. Convert Board Outline to Polygon
-    let outline_coords: Vec<Coord<f64>> = request.outline.iter()
-        .map(|p| Coord { x: p.x, y: p.y })
-        .collect();
+    if request.outline.is_empty() { return None; }
 
-    if outline_coords.is_empty() {
-        return None;
-    }
-
-    let outline_ls = LineString::new(outline_coords);
-    let board_poly = Polygon::new(outline_ls, vec![]);
+    let board_ls = discretize_path_closed(&request.outline);
+    let board_poly = Polygon::new(board_ls, vec![]);
 
     // 2. Convert Shapes to List of (Polygon, Depth)
     let mut shape_list = Vec::new();
@@ -491,39 +680,72 @@ fn shape_to_polygon(shape: &ExportShape) -> Option<Polygon<f64>> {
             let cx = shape.x;
             let cy = shape.y;
             let angle_deg = shape.angle.unwrap_or(0.0);
+            let r = shape.corner_radius.unwrap_or(0.0);
 
+            // If radius is effectively 0, standard rect
+            if r < 0.001 {
+                let half_w = w / 2.0;
+                let half_h = h / 2.0;
+                let corners = vec![
+                    (-half_w, -half_h),
+                    (half_w, -half_h),
+                    (half_w, half_h),
+                    (-half_w, half_h),
+                ];
+                let rad = angle_deg.to_radians();
+                let cos_a = rad.cos();
+                let sin_a = rad.sin();
+                let rotated_coords: Vec<Coord<f64>> = corners.iter().map(|(x, y)| {
+                    Coord {
+                        x: cx + (x * cos_a - y * sin_a),
+                        y: cy + (x * sin_a + y * cos_a),
+                    }
+                }).collect();
+                return Some(Polygon::new(LineString::new(rotated_coords), vec![]));
+            }
+
+            // Rounded Rect
+            let steps_per_corner = 12;
+            let mut coords = Vec::new();
             let half_w = w / 2.0;
             let half_h = h / 2.0;
+            // Clamp radius
+            let safe_r = r.min(half_w).min(half_h);
 
-            // Corners relative to center
-            let corners = vec![
-                (-half_w, -half_h),
-                (half_w, -half_h),
-                (half_w, half_h),
-                (-half_w, half_h),
+            // 4 quadrants
+            let quadrants = vec![
+                (half_w - safe_r, -half_h + safe_r, -std::f64::consts::FRAC_PI_2), // Bottom Right
+                (half_w - safe_r, half_h - safe_r, 0.0), // Top Right
+                (-half_w + safe_r, half_h - safe_r, std::f64::consts::FRAC_PI_2), // Top Left
+                (-half_w + safe_r, -half_h + safe_r, PI), // Bottom Left
             ];
 
-            // Rotation
+            for (qx, qy, start_angle) in quadrants {
+                for i in 0..=steps_per_corner {
+                     let theta = start_angle + (i as f64 / steps_per_corner as f64) * std::f64::consts::FRAC_PI_2;
+                     coords.push((qx + safe_r * theta.cos(), qy + safe_r * theta.sin()));
+                }
+            }
+            
+            // Rotate and Translate
             let rad = angle_deg.to_radians();
             let cos_a = rad.cos();
             let sin_a = rad.sin();
 
-            let rotated_coords: Vec<Coord<f64>> = corners.iter().map(|(x, y)| {
+            let final_coords: Vec<Coord<f64>> = coords.iter().map(|(x, y)| {
                 Coord {
                     x: cx + (x * cos_a - y * sin_a),
                     y: cy + (x * sin_a + y * cos_a),
                 }
             }).collect();
 
-            Some(Polygon::new(LineString::new(rotated_coords), vec![]))
+            Some(Polygon::new(LineString::new(final_coords), vec![]))
         },
         "circle" => {
             let d = shape.diameter.unwrap_or(0.0);
             let r = d / 2.0;
             let cx = shape.x;
             let cy = shape.y;
-
-            // Approximate circle with polygon
             let steps = 64;
             let mut coords = Vec::with_capacity(steps);
             for i in 0..steps {
@@ -533,9 +755,21 @@ fn shape_to_polygon(shape: &ExportShape) -> Option<Polygon<f64>> {
                     y: cy + r * theta.sin(),
                 });
             }
-
             Some(Polygon::new(LineString::new(coords), vec![]))
         },
+        "line" => {
+            if let Some(pts) = &shape.points {
+                 if pts.len() < 2 { return None; }
+                 let thickness = shape.thickness.unwrap_or(1.0).max(0.001);
+                 
+                 // Discretize centerline
+                 let center_ls = discretize_path(pts);
+                 // Stroke
+                 Some(stroke_linestring(&center_ls, thickness))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
