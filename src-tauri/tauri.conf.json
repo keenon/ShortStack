@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "productName": "FullStack CAD",
+  "productName": "ShortStack CAD",
   "version": "0.1.0",
-  "identifier": "com.fullstack.cad",
+  "identifier": "org.shortstack.cad",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "FullStack CAD",
-        "width": 800,
-        "height": 600
+        "title": "ShortStack CAD",
+        "width": 1200,
+        "height": 800
       }
     ],
     "security": {
