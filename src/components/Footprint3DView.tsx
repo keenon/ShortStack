@@ -1,5 +1,5 @@
 // src/components/Footprint3DView.tsx
-import React, { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect } from "react";
+import React, { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
 import * as THREE from "three";
@@ -1319,6 +1319,8 @@ const LayerSolid = ({
 const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
+  const hasInitiallySnapped = useRef(false);
+  const [firstMeshReady, setFirstMeshReady] = useState(false);
   
   // Initialize Manifold
   const [manifoldModule, setManifoldModule] = useState<any>(null);
@@ -1339,61 +1341,71 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     });
   }, []);
 
-useImperativeHandle(ref, () => ({
-    resetCamera: () => {
-        const controls = controlsRef.current;
-        if (!controls) return;
+  const fitToHome = useCallback(() => {
+    const controls = controlsRef.current;
+    if (!controls) return;
 
-        const camera = controls.object as THREE.PerspectiveCamera;
-        const box = new THREE.Box3();
-        let hasMeshes = false;
+    const camera = controls.object as THREE.PerspectiveCamera;
+    const box = new THREE.Box3();
+    let hasMeshes = false;
 
-        // Iterate through all visible meshes to compute the total bounding box
-        Object.values(meshRefs.current).forEach((mesh) => {
-            if (mesh && mesh.geometry) {
-                mesh.updateMatrixWorld();
-                const meshBox = new THREE.Box3().setFromObject(mesh);
-                if (!meshBox.isEmpty()) {
-                    box.union(meshBox);
-                    hasMeshes = true;
-                }
+    // Iterate through all visible meshes to compute the total bounding box
+    Object.values(meshRefs.current).forEach((mesh) => {
+        if (mesh && mesh.geometry) {
+            mesh.updateMatrixWorld();
+            const meshBox = new THREE.Box3().setFromObject(mesh);
+            if (!meshBox.isEmpty()) {
+                box.union(meshBox);
+                hasMeshes = true;
             }
-        });
-
-        if (!hasMeshes) {
-            // Default fallback if no meshes are visible
-            camera.position.set(50, 50, 50);
-            controls.target.set(0, 0, 0);
-            controls.update();
-            return;
         }
+    });
 
-        const center = new THREE.Vector3();
-        box.getCenter(center);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-
-        // Calculate the required distance to fit the bounding box in the camera's FOV
-        const maxDim = Math.max(size.x, size.y, size.z);
-        const fov = camera.fov * (Math.PI / 180);
-        
-        // Take aspect ratio into account for wide bounding boxes
-        const aspect = camera.aspect || 1;
-        const fovH = 2 * Math.atan(Math.tan(fov / 2) * aspect);
-        const effectiveFOV = Math.min(fov, fovH);
-        
-        let distance = maxDim / (2 * Math.tan(effectiveFOV / 2));
-        
-        // Add 30% margin for "comfortable" framing
-        distance *= 1.3;
-
-        // Position camera at a standard isometric-ish angle relative to the center
-        const direction = new THREE.Vector3(1, 1, 1).normalize();
-        camera.position.copy(center).add(direction.multiplyScalar(distance));
-        
-        controls.target.copy(center);
+    if (!hasMeshes) {
+        // Default fallback if no meshes are visible
+        camera.position.set(50, 50, 50);
+        controls.target.set(0, 0, 0);
         controls.update();
-    },
+        return;
+    }
+
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+
+    // Calculate the required distance to fit the bounding box in the camera's FOV
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const fov = camera.fov * (Math.PI / 180);
+    
+    // Take aspect ratio into account for wide bounding boxes
+    const aspect = camera.aspect || 1;
+    const fovH = 2 * Math.atan(Math.tan(fov / 2) * aspect);
+    const effectiveFOV = Math.min(fov, fovH);
+    
+    let distance = maxDim / (2 * Math.tan(effectiveFOV / 2));
+    
+    // Add 30% margin for "comfortable" framing
+    distance *= 1.3;
+
+    // Position camera at a standard isometric-ish angle relative to the center
+    const direction = new THREE.Vector3(1, 1, 1).normalize();
+    camera.position.copy(center).add(direction.multiplyScalar(distance));
+    
+    controls.target.copy(center);
+    controls.update();
+  }, []);
+
+  // Snap to home the first time computing the mesh finishes
+  useEffect(() => {
+    if (firstMeshReady && !hasInitiallySnapped.current && is3DActive) {
+        fitToHome();
+        hasInitiallySnapped.current = true;
+    }
+  }, [firstMeshReady, is3DActive, fitToHome]);
+
+useImperativeHandle(ref, () => ({
+    resetCamera: fitToHome,
     getLayerSTL: (layerId: string) => {
         const mesh = meshRefs.current[layerId];
         if (!mesh || !mesh.geometry) return null;
@@ -1505,8 +1517,13 @@ useImperativeHandle(ref, () => ({
                   boardShape={boardShape}
                   manifoldModule={manifoldModule}
                   registerMesh={(id, mesh) => { 
-                      if (mesh) meshRefs.current[id] = mesh; 
-                      else delete meshRefs.current[id]; 
+                      if (mesh) {
+                        meshRefs.current[id] = mesh; 
+                        // Once geometry is set, indicate we have something to snap to
+                        if (mesh.geometry) setFirstMeshReady(true);
+                      } else {
+                        delete meshRefs.current[id]; 
+                      }
                   }}
                 />
               ) : null;
