@@ -703,6 +703,8 @@ function generateProceduralFillet(
             const limit = Math.min(halfW, halfH);
             if (cr > limit) cr = limit;
             
+            // FIXED: Ensure constant vertex count regardless of radius size
+            // We use a fixed number of segments per corner.
             const segCorner = 6; 
             
             const quadrants = [
@@ -713,8 +715,6 @@ function generateProceduralFillet(
             ];
 
             quadrants.forEach(q => {
-                // Use < segCorner to avoid creating a duplicate point at the exact start of the next quadrant
-                // The wall generation loop handles the gap (straight line) automatically.
                 for(let i=0; i<segCorner; i++) {
                     const ang = q.startAng + (i/segCorner) * (Math.PI/2);
                     const vx = q.x + Math.cos(ang) * cr;
@@ -733,6 +733,9 @@ function generateProceduralFillet(
             if (tempShape) {
                 const div = Math.max(4, Math.floor(resolution / 2));
                 const pts = tempShape.getPoints(div);
+                
+                // FIXED: Improve Loop detection consistency
+                // If points are closed, remove the last one to prevent double-vertex at seam
                 if (pts.length > 0 && pts[0].distanceTo(pts[pts.length-1]) < 0.001) {
                     pts.pop();
                 }
@@ -759,18 +762,23 @@ function generateProceduralFillet(
     const layers: { z: number, offset: number }[] = [];
     layers.push({ z: 0, offset: 0 });
 
+    // FIXED: Calculate bottom start Z correctly relative to the ball nose
     const wallBottomZ = -(depth - safeR);
+    // Always push the cylindrical wall bottom unless it's practically 0 (pure sphere cap)
     if (Math.abs(wallBottomZ) > 0.001) {
         layers.push({ z: wallBottomZ, offset: 0 });
     }
 
-    const filletSteps = 0; 
+    // FIXED: Fillet steps for the ball nose
+    const filletSteps = 8; 
     for(let i=1; i<=filletSteps; i++) {
         const theta = (i / filletSteps) * (Math.PI / 2);
         const z = wallBottomZ - Math.sin(theta) * safeR;
         const off = (1 - Math.cos(theta)) * safeR;
+        
+        // Clamp offset to avoid inversion
         const maxOffset = minDimension / 2 - 0.001; 
-        // const maxOffset = 0.005;
+        
         layers.push({ z, offset: Math.min(off, maxOffset) });
     }
 
@@ -778,15 +786,23 @@ function generateProceduralFillet(
     const rawVertices: number[] = [];
     const rawIndices: number[] = [];
 
+    let topologyValid = true;
+
     layers.forEach(layer => {
         const points = getContour(layer.offset);
+        // CRITICAL: Ensure topology (vertex count) is identical for all layers
         if (points.length !== vertsPerLayer) {
-             console.error(`Topology Mismatch: Layer has ${points.length} verts, expected ${vertsPerLayer}.`);
+             console.error(`Topology Mismatch: Layer at z=${layer.z} has ${points.length} verts, expected ${vertsPerLayer}.`);
+             topologyValid = false;
         }
+        if (!topologyValid) return;
+
         points.forEach(p => {
             rawVertices.push(p.x, layer.z, -p.y); 
         });
     });
+
+    if (!topologyValid) return null;
 
     const getIdx = (layerIdx: number, ptIdx: number) => {
         return layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
@@ -799,6 +815,7 @@ function generateProceduralFillet(
     // A. Top Cap
     const topFaces = THREE.ShapeUtils.triangulateShape(baseProfile, []);
     topFaces.forEach(face => {
+        // Winding: CCW 2D -> Up Normal in 3D (due to y-flip mapping)
         pushTri(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2]));
     });
 
@@ -811,35 +828,39 @@ function generateProceduralFillet(
             const v2 = getIdx(l+1, curr);
             const v3 = getIdx(l+1, next);
             const v4 = getIdx(l, next);
+            
+            // Standard Quad triangulation
             pushTri(v1, v2, v4); 
             pushTri(v2, v3, v4);
         }
     }
 
     // C. Bottom Cap
+    // If the last layer hasn't collapsed to a single point, cap it.
     const lastL = layers.length - 1;
     const botProfile = getContour(layers[lastL].offset);
     if (botProfile.length === vertsPerLayer) {
-        // Simple check to ensure it hasn't collapsed completely
         let isCollapsed = true;
         const p0 = botProfile[0];
+        // Check if all points are effectively same
         for(let i=1; i<botProfile.length; i++) {
             if (p0.distanceToSquared(botProfile[i]) > 1e-6) {
                 isCollapsed = false;
                 break;
             }
         }
+        
         if (!isCollapsed) {
             const botFaces = THREE.ShapeUtils.triangulateShape(botProfile, []);
             botFaces.forEach(face => {
+                // Reverse winding for bottom cap
                 pushTri(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1]));
             });
         }
     }
 
     // 2. Merge Vertices & Fix Indexing
-    // We map spatial coordinates to unique indices. 
-    // This fixes "Singular Vertices" (bowtie) where multiple vertices share position but not index.
+    // We map spatial coordinates to unique indices to ensure manifoldness (closed volume).
     const PRECISION = 1e-5;
     const decimalShift = 1 / PRECISION;
     
@@ -852,7 +873,7 @@ function generateProceduralFillet(
         const y = rawVertices[i*3+1];
         const z = rawVertices[i*3+2];
         
-        // Quantize to merge close vertices
+        // Quantize
         const kx = Math.round(x * decimalShift);
         const ky = Math.round(y * decimalShift);
         const kz = Math.round(z * decimalShift);
@@ -876,16 +897,14 @@ function generateProceduralFillet(
         const b = oldToNew[rawIndices[i+1]];
         const c = oldToNew[rawIndices[i+2]];
 
-        // 3a. Filter topological degeneracies (collapsed edges)
+        // Filter topological degeneracies
         if (a === b || b === c || a === c) continue;
 
-        // 3b. Filter geometric degeneracies (zero area)
-        // Even if topology is distinct, vertices might be collinear.
+        // Filter geometric degeneracies (Zero Area)
         const ax = uniqueVerts[a*3], ay = uniqueVerts[a*3+1], az = uniqueVerts[a*3+2];
         const bx = uniqueVerts[b*3], by = uniqueVerts[b*3+1], bz = uniqueVerts[b*3+2];
         const cx = uniqueVerts[c*3], cy = uniqueVerts[c*3+1], cz = uniqueVerts[c*3+2];
 
-        // Cross Product for Area
         const abx = bx - ax, aby = by - ay, abz = bz - az;
         const acx = cx - ax, acy = cy - ay, acz = cz - az;
         
@@ -895,7 +914,6 @@ function generateProceduralFillet(
         
         const areaSq = cpx*cpx + cpy*cpy + cpz*cpz;
         
-        // Only add if area is significant
         if (areaSq > 1e-12) {
              finalIndices.push(a, b, c);
         }
@@ -905,11 +923,34 @@ function generateProceduralFillet(
     const triVerts = new Uint32Array(finalIndices);
 
     try {
-        const manifold = new manifoldModule.Manifold({ vertProperties, triVerts });
+        // FIXED: Explicitly construct Mesh object
+        const mesh = new manifoldModule.Mesh();
+        mesh.vertProperties = vertProperties;
+        mesh.triVerts = triVerts;
+        
+        const manifold = new manifoldModule.Manifold(mesh);
+        
+        // Verify status if available
+        if (manifold.status) {
+             const status = manifold.status();
+             // Normalize status: it might be an integer (enum) or an object wrapper
+             let statusCode = 0;
+             if (typeof status === 'number') {
+                 statusCode = status;
+             } else if (status && typeof status.value === 'number') {
+                 statusCode = status.value;
+             }
+             
+             if (statusCode !== 0) {
+                 console.error(`Manifold Status Error: ${statusCode}`);
+                 return { manifold: null, vertProperties, triVerts };
+             }
+        }
+        
         return { manifold, vertProperties, triVerts };
     } catch (e) {
-        console.error("Procedural Fillet Failed", e);
-        analyzeGeometry(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(vertProperties, 3)).setIndex(new THREE.BufferAttribute(triVerts, 1)));
+        console.error("Procedural Fillet Manifold Creation Failed", e);
+        // Return raw data for debug visualization
         return { manifold: null, vertProperties, triVerts };
     }
 }
@@ -980,8 +1021,6 @@ const LayerSolid = ({
         let base;
         if (boardShape) {
             const cs = collect(shapeToManifold(manifoldModule, boardShape));
-            // Extrude along Z, then rotate to match Y-up convention if needed, 
-            // but here we just produce the volume relative to center.
             const ext = collect(cs.extrude(thickness));
             const rotated = collect(ext.rotate([-90, 0, 0]));
             base = collect(rotated.translate([0, -thickness/2, 0]));
@@ -1016,7 +1055,6 @@ const LayerSolid = ({
             }
 
             // SAFETY: Clamp radius to avoid self-intersection inside ExtrudeGeometry
-            // This is a heuristic. For arbitrary shapes, it is hard to know the perfect limit.
             let safeRadius = endmillRadius;
             if (shape.type === "circle") {
                  const d = evaluate((shape as any).diameter, params);
@@ -1129,54 +1167,47 @@ const LayerSolid = ({
                     manifoldModule, 
                     shape, 
                     params, 
-                    actualDepth, // Tool depth equals cut depth
+                    actualDepth,
                     safeRadius,
                     32
                 );
 
-                if (result) {
-                    if (result.manifold) {
-                        const toolFillet = collect(result.manifold);
-                        const r = collect(toolFillet.rotate([0, globalRot, 0]));
-    
-                        if (layer.carveSide === "Top") {
-                            // Top carve: Top of tool matches top of layer
-                            const topY = thickness / 2;
-                            const final = collect(r.translate([localX, topY, localZ]));
-                            fillets.push(final);
-                        } else {
-                            // Bottom carve: Drill enters from bottom.
-                            // Top of tool (entry point) matches bottom of layer (-thickness/2).
-                            // Rotate 180X: (x,y,z) -> (x,-y,-z). Top(0) -> 0. Tip(-Depth) -> +Depth.
-                            // Translate Y to -thickness/2.
-                            const flipped = collect(r.rotate([180, 0, 0]));
-                            const final = collect(flipped.translate([localX, -thickness/2, localZ]));
-                            fillets.push(final);
-                        }
-                    } else if (result.vertProperties && result.triVerts) {
-                        // Failed to convert to manifold. Store for display.
-                        const geom = new THREE.BufferGeometry();
-                        geom.setAttribute('position', new THREE.BufferAttribute(result.vertProperties, 3));
-                        geom.setIndex(new THREE.BufferAttribute(result.triVerts, 1));
-                        
-                        // Apply transforms manually to match where it would have been
-                        geom.rotateY(globalRot * (Math.PI / 180));
-                        
-                        if (layer.carveSide === "Top") {
-                            geom.translate(localX, thickness / 2, localZ);
-                        } else {
-                            geom.rotateX(Math.PI);
-                            geom.translate(localX, -thickness / 2, localZ);
-                        }
-                        
-                        failedFillets.push(geom);
+                if (result.manifold) {
+                    const toolFillet = collect(result.manifold);
+                    const r = collect(toolFillet.rotate([0, globalRot, 0]));
+
+                    if (layer.carveSide === "Top") {
+                        const topY = thickness / 2;
+                        const final = collect(r.translate([localX, topY, localZ]));
+                        fillets.push(final);
+                    } else {
+                        // Bottom carve: Drill enters from bottom.
+                        const flipped = collect(r.rotate([180, 0, 0]));
+                        const final = collect(flipped.translate([localX, -thickness/2, localZ]));
+                        fillets.push(final);
                     }
+                } else if (result.vertProperties && result.triVerts) {
+                    // Failed to convert to manifold. Store for display (red wireframe).
+                    const geom = new THREE.BufferGeometry();
+                    geom.setAttribute('position', new THREE.BufferAttribute(result.vertProperties, 3));
+                    geom.setIndex(new THREE.BufferAttribute(result.triVerts, 1));
+                    
+                    // Apply transforms manually to match where it would have been
+                    geom.rotateY(globalRot * (Math.PI / 180));
+                    
+                    if (layer.carveSide === "Top") {
+                        geom.translate(localX, thickness / 2, localZ);
+                    } else {
+                        geom.rotateX(Math.PI);
+                        geom.translate(localX, -thickness / 2, localZ);
+                    }
+                    
+                    failedFillets.push(geom);
                 }
             }
         });
 
         if (failedFillets.length > 0) {
-            // Merge all failed fillets into one geometry for display
             const merged = mergeBufferGeometries(failedFillets);
             setGeometry(merged);
             setHasError(true);
@@ -1209,6 +1240,7 @@ const LayerSolid = ({
         if (mesh.vertProperties && mesh.triVerts) {
              bufferGeom.setAttribute('position', new THREE.BufferAttribute(mesh.vertProperties, 3));
              bufferGeom.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
+             bufferGeom.computeVertexNormals();
              setGeometry(bufferGeom);
         } else {
              setGeometry(null);
@@ -1216,6 +1248,7 @@ const LayerSolid = ({
 
     } catch (e) {
         console.error("Manifold Error", e);
+        setHasError(true);
     } finally {
         garbage.forEach(g => {
             try { g.delete(); } catch(e) {}
@@ -1265,6 +1298,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         }) as any
     }).then((m) => {
         m.setup();
+        console.log(m);
         setManifoldModule(m);
     });
   }, []);
