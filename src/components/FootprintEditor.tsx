@@ -2,9 +2,9 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { BOARD_OUTLINE_ID, modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression } from "../utils/footprintUtils";
+import { BOARD_OUTLINE_ID, modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer, BoardOutlineRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import './FootprintEditor.css';
@@ -161,6 +161,8 @@ const ShapeListPanel = ({
           } else {
               usedLayers = stackup.filter(l => shape.assignedLayers && shape.assignedLayers[l.id] !== undefined);
           }
+          
+          const isGuide = shape.type === "wireGuide";
 
           return (
           <div key={shape.id}
@@ -172,9 +174,8 @@ const ShapeListPanel = ({
               {usedLayers.map(layer => (
                  <div key={layer.id} className="layer-indicator-dot" style={{ backgroundColor: layer.color }} title={layer.name} />
               ))}
-              {/* Show gray dot only if recursive footprint is valid but has no layers? Or just showing nothing is fine. */}
-              {shape.type === "footprint" && usedLayers.length === 0 && !hasError && (
-                 <div className="layer-indicator-dot" style={{ backgroundColor: "#555", borderRadius: '50%' }} title="Empty Footprint" />
+              {isGuide && (
+                 <div className="layer-indicator-dot" style={{ backgroundColor: '#0f0', borderRadius: '50%' }} title="Wire Guide" />
               )}
             </div>
 
@@ -418,7 +419,17 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                       }
                       return { ...s, points: newPoints };
                   } 
-                  if ((s.type === "circle" || s.type === "rect" || s.type === "footprint") && (startShape.type === "circle" || startShape.type === "rect" || startShape.type === "footprint")) {
+                  if ((s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide") && (startShape.type === "circle" || startShape.type === "rect" || startShape.type === "footprint" || startShape.type === "wireGuide")) {
+                      // Wire Guides have handle properties too (handleIn, handleOut), check if drag target is handle
+                      if (s.type === "wireGuide" && handleType) {
+                           const wg = s as FootprintWireGuide;
+                           const startWg = startShape as FootprintWireGuide;
+                           if (handleType === 'in' && startWg.handleIn) {
+                               return { ...s, handleIn: { x: modifyExpression(startWg.handleIn.x, dxWorld), y: modifyExpression(startWg.handleIn.y, dyWorld) } };
+                           } else if (handleType === 'out' && startWg.handleOut) {
+                               return { ...s, handleOut: { x: modifyExpression(startWg.handleOut.x, dxWorld), y: modifyExpression(startWg.handleOut.y, dyWorld) } };
+                           }
+                      }
                       return { ...s, x: modifyExpression(startShape.x, dxWorld), y: modifyExpression(startShape.y, dyWorld) };
                   }
               }
@@ -437,7 +448,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   };
 
   // --- ACTIONS ---
-  const addShape = (type: "circle" | "rect" | "line" | "footprint", footprintId?: string) => {
+  const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide", footprintId?: string) => {
     const base = { id: crypto.randomUUID(), name: `New ${type}`, assignedLayers: {}, };
     let newShape: FootprintShape;
 
@@ -455,10 +466,24 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       newShape = { ...base, type: "circle", x: "0", y: "0", diameter: "10" };
     } else if (type === "rect") {
       newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0", cornerRadius: "0" };
+    } else if (type === "wireGuide") {
+      // Wire Guides go to index 0 to ensure they are at the top of the list and rendered "on top" (last drawn if we didn't reverse, but we reverse, so first drawn???)
+      // Wait, in Canvas we do `[...shapes].reverse().map`.
+      // The `reverse()` puts the last element of array to the first rendered component.
+      // SVG renders first component at bottom.
+      // So Last Element of Array -> First Component -> Bottom Layer.
+      // First Element of Array -> Last Component -> Top Layer.
+      // So to render on top, we need index 0.
+      newShape = { ...base, type: "wireGuide", x: "0", y: "0", name: "Wire Guide" } as FootprintWireGuide;
     } else {
       newShape = { ...base, type: "line", thickness: "1", x: "0", y: "0", points: [{ id: crypto.randomUUID(), x: "0", y: "0" }, { id: crypto.randomUUID(), x: "10", y: "10" }] };
     }
-    onUpdate({ ...footprint, shapes: [...footprint.shapes, newShape] });
+
+    if (type === "wireGuide") {
+        onUpdate({ ...footprint, shapes: [newShape, ...footprint.shapes] });
+    } else {
+        onUpdate({ ...footprint, shapes: [...footprint.shapes, newShape] });
+    }
     setSelectedShapeId(newShape.id);
   };
 
@@ -506,29 +531,21 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     // 2. Prepare Data
     const layerThickness = evaluateExpression(layer.thicknessExpression, params);
 
-    // Evaluate Board Outline with Handles
+    // Evaluate Board Outline with Handles and Snaps
     const outline = (footprint.boardOutline || []).map(p => {
-        const hIn = p.handleIn ? { 
-            x: evaluateExpression(p.handleIn.x, params), 
-            y: evaluateExpression(p.handleIn.y, params) 
-        } : undefined;
-        const hOut = p.handleOut ? { 
-            x: evaluateExpression(p.handleOut.x, params), 
-            y: evaluateExpression(p.handleOut.y, params) 
-        } : undefined;
-
+        const resolved = resolvePoint(p, footprint, allFootprints, params);
         return {
-            x: evaluateExpression(p.x, params),
-            y: evaluateExpression(p.y, params),
-            handle_in: hIn,
-            handle_out: hOut
+            x: resolved.x,
+            y: resolved.y,
+            handle_in: resolved.handleIn,
+            handle_out: resolved.handleOut
         };
     });
 
     // Gather Shapes (Recursive)
-    // We start with identity transform
     const shapes = collectExportShapes(
-        footprint.shapes,
+        footprint, // Pass Current Context
+        footprint.shapes, // Pass Shapes
         allFootprints,
         params,
         layer,
@@ -573,6 +590,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
   const isShapeVisible = (shape: FootprintShape) => {
+      // Wire guides always visible in editor
+      if (shape.type === "wireGuide") return true;
       // Recursive footprints are visible if not explicitly hidden (no layer assignment usually, but could implement)
       if (shape.type === "footprint") return true; 
 
@@ -596,6 +615,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         <button onClick={() => addShape("circle")}>+ Circle</button>
         <button onClick={() => addShape("rect")}>+ Rect</button>
         <button onClick={() => addShape("line")}>+ Line</button>
+        <button onClick={() => addShape("wireGuide")}>+ Guide</button>
         
         {/* Footprint Dropdown */}
         <div style={{ marginLeft: '10px', display: 'flex', alignItems: 'center' }}>
@@ -681,10 +701,14 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                             onMouseDown={handleShapeMouseDown}
                             onHandleDown={handleHandleMouseDown}
                             handleRadius={handleRadius}
+                            // Pass context for resolving snaps
+                            rootFootprint={footprint}
+                            allFootprints={allFootprints}
                         />
                     )}
 
                     {/* Shapes Rendered Reversed (Bottom to Top visual order) */}
+                    {/* Reverse reverses the array in place if not copied. Copy with spread. */}
                     {[...footprint.shapes].reverse().map((shape) => {
                         if (!isShapeVisible(shape)) return null;
                         
@@ -701,6 +725,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                                 onMouseDown={handleShapeMouseDown}
                                 onHandleDown={handleHandleMouseDown}
                                 handleRadius={handleRadius}
+                                rootFootprint={footprint}
                             />
                         );
                     })}
@@ -757,6 +782,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 // HELPER: Collect Export Shapes Recursively
 // ------------------------------------------------------------------
 function collectExportShapes(
+    contextFootprint: Footprint, // The footprint defining the shapes
     shapes: FootprintShape[],
     allFootprints: Footprint[],
     params: Parameter[],
@@ -766,31 +792,22 @@ function collectExportShapes(
 ): any[] {
     let result: any[] = [];
 
-    // Process shapes from Bottom to Top (forward order) or Top to Bottom?
-    // The renderer reverses them to draw top last.
-    // LayoutEditor exports reversed (visual top to bottom).
-    // Let's stick to LayoutEditor logic: Iterate array, but typically one should iterate reversed if we want visual stack order.
-    // However, for CSG union, order doesn't matter much unless we do subtractions.
-    // LayoutEditor does: [...fp.shapes].reverse().forEach...
-    // Let's iterate reversed to match "Visual Top on top of list"
+    // Process shapes. Reverse to match visual order in export list if needed (though CSG doesn't care much for cut)
     const reversedShapes = [...shapes].reverse();
 
     reversedShapes.forEach(shape => {
+        // SKIP WIRE GUIDES (Virtual)
+        if (shape.type === "wireGuide") return;
+
         // 1. Calculate Local Transform
         const lx = evaluateExpression(shape.x, params);
         const ly = evaluateExpression(shape.y, params);
         
-        // Parent Transform application
+        // Global Position
         const rad = (transform.angle * Math.PI) / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
 
-        // Global Position
-        // Rotate (lx, ly) then add parent pos
-        // Wait, typical transform is Translate Parent -> Rotate Parent.
-        // If parent is at (Px, Py) rotated by Pa.
-        // Child at (Cx, Cy) means P + Rotate(C)
-        // Here transform.x/y is parent position.
         const gx = transform.x + (lx * cos - ly * sin);
         const gy = transform.y + (lx * sin + ly * cos);
 
@@ -802,6 +819,7 @@ function collectExportShapes(
                  const globalAngle = transform.angle + localAngle;
                  
                  result = result.concat(collectExportShapes(
+                     target, // Switch context to the referenced footprint
                      target.shapes,
                      allFootprints,
                      params,
@@ -820,7 +838,7 @@ function collectExportShapes(
                  depth = layerThickness;
              } else {
                  const assign = shape.assignedLayers[layer.id];
-                 const val = evaluateExpression(assign, params);
+                 const val = evaluateExpression(typeof assign === 'object' ? assign.depth : assign, params);
                  depth = Math.max(0, val);
              }
              if (depth <= 0.0001) return;
@@ -832,10 +850,8 @@ function collectExportShapes(
                  depth: depth
              };
 
-            // NEW: Capture Endmill Radius for Gradient Generation
              if (layer.type === "Carved/Printed") {
                  const assign = shape.assignedLayers[layer.id];
-                 // Handle normalized object or legacy string
                  const radExpr = (typeof assign === 'object') ? assign.endmillRadius : "0";
                  const radVal = evaluateExpression(radExpr, params);
                  if (radVal > 0) {
@@ -857,38 +873,42 @@ function collectExportShapes(
                  exportObj.shape_type = "line";
                  exportObj.thickness = evaluateExpression((shape as FootprintLine).thickness, params);
                  
-                 // Points are relative to shape origin (0,0) which is locally (lx, ly)
-                 // We need to transform them to global coords
-                 // Global Point = GlobalOrigin + Rotate(Pt)
-                 // GlobalOrigin is (gx, gy)
-                 // Rotate is by transform.angle (parent angle)
-                 // NOTE: Lines do NOT have their own rotation property in FootprintLine type, 
-                 // so they rotate only with parent.
-                 
+                 // Resolve Points
                  const points = (shape as FootprintLine).points.map(p => {
-                     const px = evaluateExpression(p.x, params);
-                     const py = evaluateExpression(p.y, params);
+                     // Resolve point in context of the footprint where it is defined
+                     const resolved = resolvePoint(p, contextFootprint, allFootprints, params);
+                     
+                     // resolved is relative to contextFootprint origin (0,0)
+                     // We need to transform it by the *accumulated transform* of this recursion
+                     // transform = Parent's Global Pos/Rot
+                     
+                     const px = resolved.x;
+                     const py = resolved.y;
+                     
                      // Rotate point by parent transform angle
                      const prx = px * cos - py * sin;
                      const pry = px * sin + py * cos;
                      
                      // Handles
-                     const transformHandle = (h: {x:string, y:string} | undefined) => {
+                     const transformHandle = (h: {x:number, y:number} | undefined) => {
                          if (!h) return undefined;
-                         const hx = evaluateExpression(h.x, params);
-                         const hy = evaluateExpression(h.y, params);
                          // Handles are vectors, rotate only
                          return {
-                             x: hx * cos - hy * sin,
-                             y: hx * sin + hy * cos
+                             x: h.x * cos - h.y * sin,
+                             y: h.x * sin + h.y * cos
                          };
                      };
 
                      return {
-                         x: gx + prx,
-                         y: gy + pry,
-                         handle_in: transformHandle(p.handleIn),
-                         handle_out: transformHandle(p.handleOut)
+                         x: transform.x + prx, // transform.x is parent's GX. Wait.
+                         // transform.x is the position of the PARENT of this shape?
+                         // In recursion: { x: gx, y: gy, angle... } passed as `transform`.
+                         // `gx`, `gy` is the origin of the current context footprint in Global Space.
+                         // So YES.
+                         
+                         y: transform.y + pry,
+                         handle_in: transformHandle(resolved.handleIn),
+                         handle_out: transformHandle(resolved.handleOut)
                      };
                  });
                  exportObj.points = points;

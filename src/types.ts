@@ -20,7 +20,7 @@ export interface StackupLayer {
 
 // --- FOOTPRINT TYPES ---
 
-export type ShapeType = "circle" | "rect" | "line" | "footprint";
+export type ShapeType = "circle" | "rect" | "line" | "footprint" | "wireGuide";
 
 export interface LayerAssignment {
     depth: string;
@@ -54,6 +54,14 @@ export interface FootprintRect extends BaseShape {
   cornerRadius: string;
 }
 
+export interface FootprintWireGuide extends BaseShape {
+  type: "wireGuide";
+  x: string;
+  y: string;
+  handleIn?: { x: string; y: string };
+  handleOut?: { x: string; y: string };
+}
+
 export interface Point {
   id: string;
   x: string;
@@ -61,6 +69,7 @@ export interface Point {
   // Control points are relative to the anchor point (x, y)
   handleIn?: { x: string; y: string };  // "Left" / Incoming handle
   handleOut?: { x: string; y: string }; // "Right" / Outgoing handle
+  snapTo?: string; // ID path to a Wire Guide (e.g., "refId:guideId")
 }
 
 export interface FootprintLine extends BaseShape {
@@ -79,7 +88,7 @@ export interface FootprintReference extends BaseShape {
   footprintId: string; // The ID of the child footprint
 }
 
-export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference;
+export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide;
 
 export interface Footprint {
   id: string;

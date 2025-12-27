@@ -1,6 +1,6 @@
 // src/utils/footprintUtils.ts
 import * as math from "mathjs";
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, FootprintShape } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, FootprintShape, Point, FootprintWireGuide } from "../types";
 
 export const BOARD_OUTLINE_ID = "BOARD_OUTLINE";
 
@@ -193,4 +193,138 @@ export function isFootprintOptionValid(
     }
 
     return true;
+}
+
+// --- SNAP TO GUIDE UTILS ---
+
+export interface WireGuideDefinition {
+    pathId: string; // ID path "ref1:ref2:guideId" or just "guideId" for local
+    label: string;  // "Guide Name" or "Ref Name > Guide Name"
+}
+
+// Recursively find all wire guides available to the current footprint
+export function getAvailableWireGuides(
+    rootFootprint: Footprint,
+    allFootprints: Footprint[]
+): WireGuideDefinition[] {
+    const results: WireGuideDefinition[] = [];
+
+    function recurse(fp: Footprint, pathIds: string[], names: string[]) {
+        fp.shapes.forEach(s => {
+            if (s.type === "wireGuide") {
+                // If it's a wire guide, add it
+                const fullId = [...pathIds, s.id].join(":");
+                const fullName = [...names, s.name].join(" > ");
+                results.push({ pathId: fullId, label: fullName });
+            } else if (s.type === "footprint") {
+                // If it's a reference, dive in
+                const ref = s as FootprintReference;
+                const child = allFootprints.find(f => f.id === ref.footprintId);
+                if (child) {
+                    recurse(child, [...pathIds, s.id], [...names, s.name]);
+                }
+            }
+        });
+    }
+
+    recurse(rootFootprint, [], []);
+    return results;
+}
+
+// Calculate the resolved position of a point. 
+// If it snaps to a guide, recursively calculate the guide's global position.
+// Otherwise evaluate local expression.
+export function resolvePoint(
+    point: Point,
+    rootFootprint: Footprint,
+    allFootprints: Footprint[],
+    params: Parameter[]
+): { x: number, y: number, handleIn?: {x: number, y: number}, handleOut?: {x: number, y: number} } {
+    
+    // Default: Evaluate local params
+    const defaultRes = {
+        x: evaluateExpression(point.x, params),
+        y: evaluateExpression(point.y, params),
+        handleIn: point.handleIn ? { 
+            x: evaluateExpression(point.handleIn.x, params), 
+            y: evaluateExpression(point.handleIn.y, params) 
+        } : undefined,
+        handleOut: point.handleOut ? { 
+            x: evaluateExpression(point.handleOut.x, params), 
+            y: evaluateExpression(point.handleOut.y, params) 
+        } : undefined,
+    };
+
+    if (!point.snapTo) return defaultRes;
+
+    const path = point.snapTo.split(":");
+    
+    let currentFp = rootFootprint;
+    // Accumulate transform from root to the guide
+    let transform = { x: 0, y: 0, angle: 0 }; 
+
+    for (let i = 0; i < path.length; i++) {
+        const id = path[i];
+        
+        const shape = currentFp.shapes.find(s => s.id === id);
+        if (!shape) return defaultRes; // Broken link
+
+        if (shape.type === "wireGuide") {
+             // We reached the guide. Calculate its position in its local space, then transform to root.
+             const wg = shape as FootprintWireGuide;
+             const lx = evaluateExpression(wg.x, params);
+             const ly = evaluateExpression(wg.y, params);
+             
+             // Apply accumulated transform
+             const rad = (transform.angle * Math.PI) / 180;
+             const cos = Math.cos(rad);
+             const sin = Math.sin(rad);
+             
+             const gx = transform.x + (lx * cos - ly * sin);
+             const gy = transform.y + (lx * sin + ly * cos);
+
+             // Handles are vectors, only rotate
+             const resolveHandle = (h?: {x:string, y:string}) => {
+                 if (!h) return undefined;
+                 const hx = evaluateExpression(h.x, params);
+                 const hy = evaluateExpression(h.y, params);
+                 return {
+                     x: hx * cos - hy * sin,
+                     y: hx * sin + hy * cos
+                 };
+             };
+
+             return {
+                 x: gx,
+                 y: gy,
+                 handleIn: resolveHandle(wg.handleIn),
+                 handleOut: resolveHandle(wg.handleOut)
+             };
+
+        } else if (shape.type === "footprint") {
+             const ref = shape as FootprintReference;
+             const nextFp = allFootprints.find(f => f.id === ref.footprintId);
+             if (!nextFp) return defaultRes; // Missing footprint ref
+
+             const lx = evaluateExpression(ref.x, params);
+             const ly = evaluateExpression(ref.y, params);
+             const la = evaluateExpression(ref.angle, params);
+
+             // Compose Transform
+             // New Center = Old Center + Rotate(RefPosition)
+             const rad = (transform.angle * Math.PI) / 180;
+             const cos = Math.cos(rad);
+             const sin = Math.sin(rad);
+             
+             transform.x += (lx * cos - ly * sin);
+             transform.y += (lx * sin + ly * cos);
+             transform.angle += la;
+             
+             currentFp = nextFp;
+        } else {
+            return defaultRes; // Should not happen if path is valid
+        }
+    }
+    
+    return defaultRes;
 }

@@ -1,7 +1,7 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine } from "../types";
-import { evaluateExpression, interpolateColor, BOARD_OUTLINE_ID } from "../utils/footprintUtils";
+import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide } from "../types";
+import { evaluateExpression, interpolateColor, BOARD_OUTLINE_ID, resolvePoint } from "../utils/footprintUtils";
 
 // RECURSIVE SHAPE RENDERER
 export const RecursiveShapeRenderer = ({
@@ -14,6 +14,7 @@ export const RecursiveShapeRenderer = ({
   onMouseDown,
   onHandleDown,
   handleRadius,
+  rootFootprint, // NEW: Context for point resolution
 }: {
   shape: FootprintShape;
   allFootprints: Footprint[];
@@ -24,7 +25,54 @@ export const RecursiveShapeRenderer = ({
   onMouseDown: (e: React.MouseEvent, id: string, pointIndex?: number) => void;
   onHandleDown: (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => void;
   handleRadius: number;
+  rootFootprint: Footprint; // NEW
 }) => {
+  // --- WIRE GUIDE RENDERER (Virtual Shape) ---
+  if (shape.type === "wireGuide") {
+    const wg = shape as FootprintWireGuide;
+    const x = evaluateExpression(wg.x, params);
+    const y = evaluateExpression(wg.y, params);
+
+    // Rendered with dotted/dashed lines in green to indicate "virtual" and "guide"
+    const stroke = isSelected ? "#646cff" : "#00ff00";
+    const vectorEffect = "non-scaling-stroke";
+
+    const elements = [];
+
+    // Main marker (Crosshair)
+    elements.push(
+      <g key="marker" style={{ cursor: "pointer" }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
+        <line x1={x - 4} y1={-y} x2={x + 4} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />
+        <line x1={x} y1={-(y - 4)} x2={x} y2={-(y + 4)} stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />
+        <circle cx={x} cy={-y} r={3} fill="none" stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="1,1" />
+      </g>
+    );
+
+    // Draggable handles for the guide itself
+    if (isSelected) {
+      if (wg.handleIn) {
+        const hx = x + evaluateExpression(wg.handleIn.x, params);
+        const hy = -(y + evaluateExpression(wg.handleIn.y, params));
+        elements.push(
+          <line key="h-in-l" x1={x} y1={-y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />,
+          <circle key="h-in-c" cx={hx} cy={hy} r={handleRadius * 0.8} fill={stroke} vectorEffect={vectorEffect} style={{ cursor: 'crosshair' }}
+            onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'in'); }} />
+        );
+      }
+      if (wg.handleOut) {
+        const hx = x + evaluateExpression(wg.handleOut.x, params);
+        const hy = -(y + evaluateExpression(wg.handleOut.y, params));
+        elements.push(
+          <line key="h-out-l" x1={x} y1={-y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />,
+          <circle key="h-out-c" cx={hx} cy={hy} r={handleRadius * 0.8} fill={stroke} vectorEffect={vectorEffect} style={{ cursor: 'crosshair' }}
+            onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'out'); }} />
+        );
+      }
+    }
+
+    return <g>{elements}</g>;
+  }
+
   // If this is a reference to another footprint, we render that footprint's shapes inside a group
   if (shape.type === "footprint") {
       const ref = shape as FootprintReference;
@@ -84,6 +132,7 @@ export const RecursiveShapeRenderer = ({
                     }}
                     onHandleDown={() => {}} // Handles inside child footprints are not editable here
                     handleRadius={handleRadius}
+                    rootFootprint={rootFootprint}
                   />
               ))}
               
@@ -173,18 +222,17 @@ export const RecursiveShapeRenderer = ({
   if (shape.type === "line") {
       const thickness = evaluateExpression(shape.thickness, params);
       
-      const pts = shape.points.map(p => ({
-          x: evaluateExpression(p.x, params),
-          y: evaluateExpression(p.y, params),
-          hIn: p.handleIn ? { 
-              x: evaluateExpression(p.handleIn.x, params), 
-              y: evaluateExpression(p.handleIn.y, params) 
-          } : null,
-          hOut: p.handleOut ? { 
-              x: evaluateExpression(p.handleOut.x, params), 
-              y: evaluateExpression(p.handleOut.y, params) 
-          } : null
-      }));
+      // Points are resolved using snap logic
+      const pts = shape.points.map(p => {
+          const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
+          return {
+              x: resolved.x,
+              y: resolved.y,
+              hIn: resolved.handleIn,
+              hOut: resolved.handleOut,
+              isSnapped: !!p.snapTo
+          };
+      });
 
       let d = "";
       if (pts.length > 0) {
@@ -204,13 +252,15 @@ export const RecursiveShapeRenderer = ({
       const handles = isSelected ? pts.map((pt, idx) => {
           const elements = [];
           
-          // Anchor Point
+          // Anchor Point: Green if snapped to a guide
+          const anchorFill = pt.isSnapped ? "#00ff00" : "#fff";
+
           elements.push(
               <circle 
                   key={`anchor-${idx}`}
                   cx={pt.x} cy={-pt.y} 
                   r={handleRadius} // Use scaled radius
-                  fill="#fff" stroke="#646cff" strokeWidth={1}
+                  fill={anchorFill} stroke="#646cff" strokeWidth={1}
                   vectorEffect="non-scaling-stroke"
                   onMouseDown={(e) => {
                       e.stopPropagation();
@@ -272,6 +322,8 @@ export const BoardOutlineRenderer = ({
   onMouseDown,
   onHandleDown,
   handleRadius,
+  rootFootprint,
+  allFootprints,
 }: {
   points: Point[];
   isSelected: boolean;
@@ -279,23 +331,23 @@ export const BoardOutlineRenderer = ({
   onMouseDown: (e: React.MouseEvent, id: string, idx?: number) => void;
   onHandleDown: (e: React.MouseEvent, id: string, idx: number, type: 'in' | 'out') => void;
   handleRadius: number;
+  rootFootprint: Footprint;
+  allFootprints: Footprint[];
 }) => {
     const stroke = isSelected ? "#646cff" : "#555";
     const strokeWidth = isSelected ? 3 : 2;
     const strokeDasharray = isSelected ? "0" : "5,5";
 
-    const pts = points.map(p => ({
-        x: evaluateExpression(p.x, params),
-        y: evaluateExpression(p.y, params),
-        hIn: p.handleIn ? { 
-            x: evaluateExpression(p.handleIn.x, params), 
-            y: evaluateExpression(p.handleIn.y, params) 
-        } : null,
-        hOut: p.handleOut ? { 
-            x: evaluateExpression(p.handleOut.x, params), 
-            y: evaluateExpression(p.handleOut.y, params) 
-        } : null
-    }));
+    const pts = points.map(p => {
+        const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
+        return {
+            x: resolved.x,
+            y: resolved.y,
+            hIn: resolved.handleIn,
+            hOut: resolved.handleOut,
+            isSnapped: !!p.snapTo
+        };
+    });
 
     let d = "";
     if (pts.length > 0) {
@@ -314,10 +366,12 @@ export const BoardOutlineRenderer = ({
 
     const handles = isSelected ? pts.map((pt, idx) => {
         const elements = [];
+        const anchorColor = pt.isSnapped ? "#00ff00" : "#fff";
+
         elements.push(
             <circle key={`bo-anchor-${idx}`} cx={pt.x} cy={-pt.y} 
                 r={handleRadius} // Use scaled radius
-                fill="#fff" stroke="#646cff" strokeWidth={1} vectorEffect="non-scaling-stroke"
+                fill={anchorColor} stroke="#646cff" strokeWidth={1} vectorEffect="non-scaling-stroke"
                 onMouseDown={(e) => { e.stopPropagation(); onMouseDown(e, BOARD_OUTLINE_ID, idx); }} />
         );
         if (pt.hIn) {

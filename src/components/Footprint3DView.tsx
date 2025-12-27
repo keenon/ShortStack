@@ -4,8 +4,9 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
 import * as THREE from "three";
 import * as math from "mathjs";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference, FootprintCircle } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
+import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
 import Module from "manifold-3d";
 // @ts-ignore
 import wasmUrl from "manifold-3d/manifold.wasm?url";
@@ -29,21 +30,7 @@ export interface Footprint3DViewHandle {
 // ------------------------------------------------------------------
 
 function evaluate(expression: string, params: Parameter[]): number {
-  if (!expression || !expression.trim()) return 0;
-  try {
-    const scope: Record<string, any> = {};
-    params.forEach((p) => {
-      // Treat parameters as pure numbers in mm
-      const val = p.unit === "in" ? p.value * 25.4 : p.value;
-      scope[p.key] = val;
-    });
-    const result = math.evaluate(expression, scope);
-    if (typeof result === "number") return result;
-    if (result && typeof result.toNumber === "function") return result.toNumber("mm");
-    return 0;
-  } catch (e) {
-    return 0;
-  }
+  return evaluateExpression(expression, params);
 }
 
 function createRoundedRectShape(width: number, height: number, radius: number): THREE.Shape {
@@ -85,7 +72,9 @@ function getLineOutlinePoints(
     shape: FootprintLine, 
     params: Parameter[], 
     thickness: number, 
-    resolution: number
+    resolution: number,
+    contextFp: Footprint,
+    allFootprints: Footprint[]
 ): THREE.Vector2[] {
     const points = shape.points;
     if (points.length < 2) return [];
@@ -95,21 +84,24 @@ function getLineOutlinePoints(
 
     // 1. Generate Spine (Centerline)
     for (let i = 0; i < points.length - 1; i++) {
-        const curr = points[i];
-        const next = points[i+1];
+        const currRaw = points[i];
+        const nextRaw = points[i+1];
         
-        const x1 = evaluate(curr.x, params);
-        const y1 = evaluate(curr.y, params);
-        const x2 = evaluate(next.x, params);
-        const y2 = evaluate(next.y, params);
+        const curr = resolvePoint(currRaw, contextFp, allFootprints, params);
+        const next = resolvePoint(nextRaw, contextFp, allFootprints, params);
+
+        const x1 = curr.x;
+        const y1 = curr.y;
+        const x2 = next.x;
+        const y2 = next.y;
 
         const hasCurve = (curr.handleOut || next.handleIn);
 
         if (hasCurve) {
-            const cp1x = x1 + (curr.handleOut ? evaluate(curr.handleOut.x, params) : 0);
-            const cp1y = y1 + (curr.handleOut ? evaluate(curr.handleOut.y, params) : 0);
-            const cp2x = x2 + (next.handleIn ? evaluate(next.handleIn.x, params) : 0);
-            const cp2y = y2 + (next.handleIn ? evaluate(next.handleIn.y, params) : 0);
+            const cp1x = x1 + (curr.handleOut ? curr.handleOut.x : 0);
+            const cp1y = y1 + (curr.handleOut ? curr.handleOut.y : 0);
+            const cp2x = x2 + (next.handleIn ? next.handleIn.x : 0);
+            const cp2y = y2 + (next.handleIn ? next.handleIn.y : 0);
 
             const curve = new THREE.CubicBezierCurve(
                 new THREE.Vector2(x1, y1),
@@ -212,12 +204,18 @@ function getLineOutlinePoints(
     return contour;
 }
 
-function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOverride?: number): THREE.Shape | null {
+function createLineShape(
+    shape: FootprintLine, 
+    params: Parameter[], 
+    contextFp: Footprint,
+    allFootprints: Footprint[],
+    thicknessOverride?: number
+): THREE.Shape | null {
   // Use the deterministic point generator for the flat cut shape as well
   const thickVal = thicknessOverride !== undefined ? thicknessOverride : evaluate(shape.thickness, params);
   if (thickVal <= 0) return null;
 
-  const pts = getLineOutlinePoints(shape, params, thickVal, 12);
+  const pts = getLineOutlinePoints(shape, params, thickVal, 12, contextFp, allFootprints);
   if (pts.length < 3) return null;
   
   const s = new THREE.Shape();
@@ -229,29 +227,33 @@ function createLineShape(shape: FootprintLine, params: Parameter[], thicknessOve
   return s;
 }
 
-function createBoardShape(points: Point[], params: Parameter[]): THREE.Shape | null {
+function createBoardShape(points: Point[], params: Parameter[], rootFootprint: Footprint, allFootprints: Footprint[]): THREE.Shape | null {
     if (!points || points.length < 3) return null;
     const shape = new THREE.Shape();
 
-    const p0 = points[0];
-    shape.moveTo(evaluate(p0.x, params), evaluate(p0.y, params));
+    const p0Raw = points[0];
+    const p0 = resolvePoint(p0Raw, rootFootprint, allFootprints, params);
+    shape.moveTo(p0.x, p0.y);
     
     for(let i = 0; i < points.length; i++) {
-        const curr = points[i];
-        const next = points[(i + 1) % points.length];
+        const currRaw = points[i];
+        const nextRaw = points[(i + 1) % points.length];
+
+        const curr = resolvePoint(currRaw, rootFootprint, allFootprints, params);
+        const next = resolvePoint(nextRaw, rootFootprint, allFootprints, params);
         
-        const x2 = evaluate(next.x, params);
-        const y2 = evaluate(next.y, params);
+        const x2 = next.x;
+        const y2 = next.y;
 
         if (curr.handleOut || next.handleIn) {
-            const x1 = evaluate(curr.x, params);
-            const y1 = evaluate(curr.y, params);
+            const x1 = curr.x;
+            const y1 = curr.y;
             
-            const cp1x = x1 + (curr.handleOut ? evaluate(curr.handleOut.x, params) : 0);
-            const cp1y = y1 + (curr.handleOut ? evaluate(curr.handleOut.y, params) : 0);
+            const cp1x = x1 + (curr.handleOut ? curr.handleOut.x : 0);
+            const cp1y = y1 + (curr.handleOut ? curr.handleOut.y : 0);
             
-            const cp2x = x2 + (next.handleIn ? evaluate(next.handleIn.x, params) : 0);
-            const cp2y = y2 + (next.handleIn ? evaluate(next.handleIn.y, params) : 0);
+            const cp2x = x2 + (next.handleIn ? next.handleIn.x : 0);
+            const cp2y = y2 + (next.handleIn ? next.handleIn.y : 0);
             
             shape.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
         } else {
@@ -271,10 +273,12 @@ interface FlatShape {
     y: number;             // Global Y in mm
     rotation: number;      // Global Rotation in degrees
     originalId: string;
+    contextFp: Footprint;  // Context for resolving snaps
 }
 
 // Recursively traverse footprint references to build a flat list of primitives with absolute transforms
 function flattenShapes(
+    contextFp: Footprint,
     shapes: FootprintShape[], 
     allFootprints: Footprint[], 
     params: Parameter[],
@@ -286,6 +290,8 @@ function flattenShapes(
     let result: FlatShape[] = [];
 
     shapes.forEach(shape => {
+        if (shape.type === "wireGuide") return; // SKIP VIRTUAL WIRE GUIDES
+
         // Calculate Global Transform for this specific shape
         const localX = evaluate(shape.x, params);
         const localY = evaluate(shape.y, params);
@@ -308,7 +314,7 @@ function flattenShapes(
             const target = allFootprints.find(f => f.id === ref.footprintId);
             if (target) {
                 // Recurse
-                const children = flattenShapes(target.shapes, allFootprints, params, {
+                const children = flattenShapes(target, target.shapes, allFootprints, params, {
                     x: globalX,
                     y: globalY,
                     rotation: globalRotation
@@ -321,15 +327,14 @@ function flattenShapes(
                 x: globalX,
                 y: globalY,
                 rotation: globalRotation,
-                originalId: shape.id
+                originalId: shape.id,
+                contextFp
             });
         }
     });
 
     return result;
 }
-
-// src/components/Footprint3DView.tsx
 
 // ------------------------------------------------------------------
 // MANIFOLD UTILS
@@ -704,6 +709,8 @@ function generateProceduralFillet(
     params: Parameter[],
     depth: number, 
     filletRadius: number,
+    contextFp: Footprint,
+    allFootprints: Footprint[],
     resolution = 32
 ) {
     let minDimension = Infinity;
@@ -713,7 +720,7 @@ function generateProceduralFillet(
         let rawPoints: THREE.Vector2[] = [];
         
         if (shape.type === "circle") {
-            const d = evaluate((shape as any).diameter, params);
+            const d = evaluateExpression((shape as any).diameter, params);
             minDimension = d;
             const r = Math.max(0.001, d/2 - offset); 
             const segments = resolution;
@@ -723,13 +730,13 @@ function generateProceduralFillet(
             }
         } 
         else if (shape.type === "rect") {
-            const wRaw = evaluate((shape as FootprintRect).width, params);
-            const hRaw = evaluate((shape as FootprintRect).height, params);
+            const wRaw = evaluateExpression((shape as FootprintRect).width, params);
+            const hRaw = evaluateExpression((shape as FootprintRect).height, params);
             minDimension = Math.min(wRaw, hRaw);
             
             const w = Math.max(0.001, wRaw - offset * 2);
             const h = Math.max(0.001, hRaw - offset * 2);
-            const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+            const crRaw = evaluateExpression((shape as FootprintRect).cornerRadius, params);
             
             const halfW = w / 2;
             const halfH = h / 2;
@@ -754,10 +761,10 @@ function generateProceduralFillet(
             });
         }
         else if (shape.type === "line") {
-            const t = evaluate((shape as FootprintLine).thickness, params);
+            const t = evaluateExpression((shape as FootprintLine).thickness, params);
             minDimension = t;
             const effectiveT = Math.max(0.001, t - offset * 2);
-            rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution);
+            rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, contextFp, allFootprints);
         }
 
         // --- FILTERING ---
@@ -1016,7 +1023,7 @@ const LayerSolid = ({
 
   // Flatten shapes
   const flatShapes = useMemo(() => {
-    return flattenShapes(footprint.shapes, allFootprints, params);
+    return flattenShapes(footprint, footprint.shapes, allFootprints, params);
   }, [footprint, allFootprints, params]);
 
   // Compute Geometry using Manifold
@@ -1053,7 +1060,7 @@ const LayerSolid = ({
 
         const failedFillets: THREE.BufferGeometry[] = [];
 
-        // CHANGED: Sequential Processing (Painter's Algorithm)
+        // Sequential Processing (Painter's Algorithm)
         // Instead of batching all cuts, then all fills, then all fillets,
         // we process each shape in order: Cut -> Fill -> Fillet.
         // This allows later shapes to overwrite/fill earlier shapes.
@@ -1073,22 +1080,22 @@ const LayerSolid = ({
                 const valExpr = (typeof assignment === 'object') ? assignment.depth : (assignment as string);
                 const radiusExpr = (typeof assignment === 'object') ? assignment.endmillRadius : "0";
 
-                const val = evaluate(valExpr, params);
-                endmillRadius = evaluate(radiusExpr, params);
+                const val = evaluateExpression(valExpr, params);
+                endmillRadius = evaluateExpression(radiusExpr, params);
                 actualDepth = Math.max(0, Math.min(val, thickness));
             }
 
             // SAFETY: Clamp radius to avoid self-intersection inside ExtrudeGeometry
             let safeRadius = endmillRadius;
             if (shape.type === "circle") {
-                 const d = evaluate((shape as any).diameter, params);
+                 const d = evaluateExpression((shape as any).diameter, params);
                  safeRadius = Math.min(safeRadius, d/2 - 0.01);
             } else if (shape.type === "rect") {
-                 const w = evaluate((shape as FootprintRect).width, params);
-                 const h = evaluate((shape as FootprintRect).height, params);
+                 const w = evaluateExpression((shape as FootprintRect).width, params);
+                 const h = evaluateExpression((shape as FootprintRect).height, params);
                  safeRadius = Math.min(safeRadius, Math.min(w, h)/2 - 0.01);
             } else if (shape.type === "line") {
-                 const t = evaluate((shape as FootprintLine).thickness, params);
+                 const t = evaluateExpression((shape as FootprintLine).thickness, params);
                  safeRadius = Math.min(safeRadius, t/2 - 0.01);
             }
             if (safeRadius < 0) safeRadius = 0;
@@ -1123,16 +1130,16 @@ const LayerSolid = ({
                 let tool = null;
 
                 if (shape.type === "circle") {
-                    const d = evaluate((shape as any).diameter, params);
+                    const d = evaluateExpression((shape as any).diameter, params);
                     if (d > 0) {
                         const r = d/2 + extraOffset;
                         tool = collect(Manifold.cylinder(height, r, r, 32, true));
                         tool = collect(tool.rotate([90, 0, 0])); 
                     }
                 } else if (shape.type === "rect") {
-                    const w = evaluate((shape as FootprintRect).width, params);
-                    const h = evaluate((shape as FootprintRect).height, params);
-                    const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+                    const w = evaluateExpression((shape as FootprintRect).width, params);
+                    const h = evaluateExpression((shape as FootprintRect).height, params);
+                    const crRaw = evaluateExpression((shape as FootprintRect).cornerRadius, params);
                     const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
                     
                     if (w > 0 && h > 0) {
@@ -1153,9 +1160,9 @@ const LayerSolid = ({
                         }
                     }
                 } else if (shape.type === "line") {
-                    const t = evaluate((shape as FootprintLine).thickness, params);
+                    const t = evaluateExpression((shape as FootprintLine).thickness, params);
                     const validT = (t > 0 ? t : 0.01) + extraOffset * 2;
-                    const s = createLineShape(shape as FootprintLine, params, validT);
+                    const s = createLineShape(shape as FootprintLine, params, item.contextFp, allFootprints, validT);
                     if (s) {
                         const cs = collect(shapeToManifold(manifoldModule, s));
                         const csRot = collect(cs.rotate(globalRot));
@@ -1196,6 +1203,8 @@ const LayerSolid = ({
                     params, 
                     actualDepth,
                     safeRadius,
+                    item.contextFp,
+                    allFootprints,
                     32
                 );
 
@@ -1326,7 +1335,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         }) as any
     }).then((m) => {
         m.setup();
-        console.log(m);
         setManifoldModule(m);
     });
   }, []);
@@ -1369,10 +1377,10 @@ useImperativeHandle(ref, () => ({
 
   const boardShape = useMemo(() => {
       if (footprint.isBoard && footprint.boardOutline && footprint.boardOutline.length >= 3) {
-          return createBoardShape(footprint.boardOutline, params);
+          return createBoardShape(footprint.boardOutline, params, footprint, allFootprints);
       }
       return null;
-  }, [footprint, params]);
+  }, [footprint, params, allFootprints]);
 
   // 1. Calculate Bounding Box of all shapes (or board outline) + Padding
   const bounds = useMemo(() => {
@@ -1380,9 +1388,10 @@ useImperativeHandle(ref, () => ({
     
     if (footprint.isBoard && footprint.boardOutline && footprint.boardOutline.length >= 3) {
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        footprint.boardOutline.forEach(p => {
-             const x = evaluate(p.x, params);
-             const y = evaluate(p.y, params);
+        footprint.boardOutline.forEach(pRaw => {
+             const p = resolvePoint(pRaw, footprint, allFootprints, params);
+             const x = p.x;
+             const y = p.y;
              if (x < minX) minX = x;
              if (x > maxX) maxX = x;
              if (y < minY) minY = y;
@@ -1402,8 +1411,9 @@ useImperativeHandle(ref, () => ({
     let maxY = -Infinity;
 
     footprint.shapes.forEach(shape => {
-        const x = evaluate(shape.x, params);
-        const y = evaluate(shape.y, params);
+        if (shape.type === "wireGuide") return;
+        const x = evaluateExpression(shape.x, params);
+        const y = evaluateExpression(shape.y, params);
         const MARGIN = 50; 
         if (x - MARGIN < minX) minX = x - MARGIN;
         if (x + MARGIN > maxX) maxX = x + MARGIN;
@@ -1413,7 +1423,7 @@ useImperativeHandle(ref, () => ({
 
     return { minX, maxX, minY, maxY };
 
-  }, [footprint, params]);
+  }, [footprint, params, allFootprints]);
 
   return (
     <div style={{ width: "100%", height: "100%", background: "#111" }}>
@@ -1429,7 +1439,7 @@ useImperativeHandle(ref, () => ({
           {(() => {
             let currentZ = 0; // This tracks height (Y in 3D)
             return [...stackup].reverse().map((layer) => {
-              const thickness = evaluate(layer.thicknessExpression, params);
+              const thickness = evaluateExpression(layer.thicknessExpression, params);
               
               const isVisible = visibleLayers ? visibleLayers[layer.id] !== false : true;
               

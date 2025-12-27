@@ -1,8 +1,8 @@
-// src/components/PropertiesPanel.tsx
-import React, { Fragment } from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine } from "../types";
+// src/components/FootprintPropertiesPanel.tsx
+import React, { Fragment, useMemo } from "react";
+import { Footprint, FootprintShape, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import { BOARD_OUTLINE_ID, modifyExpression, calcMid } from "../utils/footprintUtils";
+import { BOARD_OUTLINE_ID, modifyExpression, calcMid, getAvailableWireGuides } from "../utils/footprintUtils";
 
 const FootprintPropertiesPanel = ({
   footprint,
@@ -21,6 +21,99 @@ const FootprintPropertiesPanel = ({
   params: Parameter[];
   stackup: StackupLayer[];
 }) => {
+  
+  // Get available wire guides for Snapping
+  // We memoize this to prevent recalculation on every render unless footprint structure changes
+  const availableGuides = useMemo(() => getAvailableWireGuides(footprint, allFootprints), [footprint, allFootprints]);
+
+  // Helper to render property editors for a Point (used in Lines and Board Outline)
+  const renderPointEditor = (p: Point, idx: number, updateFn: (newP: Point) => void, removeFn: () => void, allowHandles: boolean = true) => {
+      return (
+        <div className="point-block" key={p.id}>
+            <div className="point-header">
+                <span>Point {idx + 1}</span>
+                <button className="icon-btn danger" onClick={removeFn} title="Remove Point">×</button>
+            </div>
+            
+            {/* SNAP TO DROPDOWN */}
+            <div className="point-row full" style={{ marginBottom: '8px' }}>
+                <span className="label" style={{ width: 'auto', marginRight: '5px' }}>Snap:</span>
+                <select 
+                    value={p.snapTo || ""} 
+                    onChange={(e) => updateFn({ ...p, snapTo: e.target.value || undefined })}
+                    style={{ flex: 1, background: '#333', border: '1px solid #555', color: 'white' }}
+                >
+                    <option value="">(None)</option>
+                    {availableGuides.map(g => (
+                        <option key={g.pathId} value={g.pathId}>{g.label}</option>
+                    ))}
+                </select>
+            </div>
+
+            {/* If Snapped, disable X/Y editing or show visual cue */}
+            {p.snapTo ? (
+                <div style={{ padding: '8px', background: '#333', borderRadius: '4px', fontSize: '0.9em', color: '#aaa', fontStyle: 'italic', textAlign: 'center' }}>
+                    Position controlled by Wire Guide.
+                </div>
+            ) : (
+                <>
+                    <div className="point-row full">
+                        <span className="label">X</span>
+                        <ExpressionEditor value={p.x} onChange={(val) => updateFn({ ...p, x: val })} params={params} placeholder="X" />
+                    </div>
+                    <div className="point-row full">
+                        <span className="label">Y</span>
+                        <ExpressionEditor value={p.y} onChange={(val) => updateFn({ ...p, y: val })} params={params} placeholder="Y" />
+                    </div>
+                </>
+            )}
+
+            {allowHandles && (
+                <>
+                    <div className="point-controls-toggles">
+                        <label className="checkbox-label">
+                            <input type="checkbox" checked={!!p.handleIn} onChange={(e) => {
+                                    if (e.target.checked) updateFn({ ...p, handleIn: { x: "-5", y: "0" } });
+                                    else { const { handleIn, ...rest } = p; updateFn(rest as Point); }
+                                }} /> In Handle
+                        </label>
+                        <label className="checkbox-label">
+                            <input type="checkbox" checked={!!p.handleOut} onChange={(e) => {
+                                    if (e.target.checked) updateFn({ ...p, handleOut: { x: "5", y: "0" } });
+                                    else { const { handleOut, ...rest } = p; updateFn(rest as Point); }
+                                }} /> Out Handle
+                        </label>
+                    </div>
+
+                    {!p.snapTo && p.handleIn && (
+                        <div className="handle-sub-block">
+                             <div className="sub-label">Handle In (Relative)</div>
+                             <div className="handle-inputs">
+                                 <div className="mini-input"><span>dX</span><ExpressionEditor value={p.handleIn.x} onChange={(v) => updateFn({...p, handleIn: {...p.handleIn!, x:v}})} params={params}/></div>
+                                 <div className="mini-input"><span>dY</span><ExpressionEditor value={p.handleIn.y} onChange={(v) => updateFn({...p, handleIn: {...p.handleIn!, y:v}})} params={params}/></div>
+                             </div>
+                        </div>
+                    )}
+                    {!p.snapTo && p.handleOut && (
+                        <div className="handle-sub-block">
+                             <div className="sub-label">Handle Out (Relative)</div>
+                             <div className="handle-inputs">
+                                 <div className="mini-input"><span>dX</span><ExpressionEditor value={p.handleOut.x} onChange={(v) => updateFn({...p, handleOut: {...p.handleOut!, x:v}})} params={params}/></div>
+                                 <div className="mini-input"><span>dY</span><ExpressionEditor value={p.handleOut.y} onChange={(v) => updateFn({...p, handleOut: {...p.handleOut!, y:v}})} params={params}/></div>
+                             </div>
+                        </div>
+                    )}
+                    {p.snapTo && (p.handleIn || p.handleOut) && (
+                        <div style={{ marginTop: '5px', fontSize: '0.8em', color: '#666' }}>
+                           Handles are inherited from the Wire Guide.
+                        </div>
+                    )}
+                </>
+            )}
+        </div>
+      );
+  };
+
   // SPECIAL CASE: Board Outline
   if (selectedId === BOARD_OUTLINE_ID && footprint.isBoard && footprint.boardOutline) {
       const points = footprint.boardOutline;
@@ -46,108 +139,24 @@ const FootprintPropertiesPanel = ({
                 <div className="points-list-container">
                     {points.map((p, idx) => (
                         <Fragment key={p.id}>
-                        <div className="point-block">
-                             <div className="point-header">
-                                <span>Point {idx + 1}</span>
-                                <button className="icon-btn danger" onClick={() => {
-                                        const newPoints = points.filter((_, i) => i !== idx);
-                                        updateFootprint("boardOutline", newPoints);
-                                    }} disabled={points.length <= 3} title="Remove Point">×</button>
-                            </div>
-                            <div className="point-row full">
-                                <span className="label">X</span>
-                                <ExpressionEditor value={p.x} onChange={(val) => {
-                                        const newPoints = [...points];
-                                        newPoints[idx] = { ...p, x: val };
-                                        updateFootprint("boardOutline", newPoints);
-                                    }} params={params} placeholder="X" />
-                            </div>
-                            <div className="point-row full">
-                                <span className="label">Y</span>
-                                <ExpressionEditor value={p.y} onChange={(val) => {
-                                        const newPoints = [...points];
-                                        newPoints[idx] = { ...p, y: val };
-                                        updateFootprint("boardOutline", newPoints);
-                                    }} params={params} placeholder="Y" />
-                            </div>
-                            <div className="point-controls-toggles">
-                                <label className="checkbox-label">
-                                    <input type="checkbox" checked={!!p.handleIn} onChange={(e) => {
-                                            const newPoints = [...points];
-                                            if (e.target.checked) newPoints[idx] = { ...p, handleIn: { x: "-5", y: "0" } };
-                                            else { const pt = { ...p }; delete pt.handleIn; newPoints[idx] = pt; }
-                                            updateFootprint("boardOutline", newPoints);
-                                        }} /> In Handle
-                                </label>
-                                <label className="checkbox-label">
-                                    <input type="checkbox" checked={!!p.handleOut} onChange={(e) => {
-                                            const newPoints = [...points];
-                                            if (e.target.checked) newPoints[idx] = { ...p, handleOut: { x: "5", y: "0" } };
-                                            else { const pt = { ...p }; delete pt.handleOut; newPoints[idx] = pt; }
-                                            updateFootprint("boardOutline", newPoints);
-                                        }} /> Out Handle
-                                </label>
-                            </div>
-                            {p.handleIn && (
-                                <div className="handle-sub-block">
-                                    <div className="sub-label">Handle In (Relative)</div>
-                                    <div className="handle-inputs">
-                                        <div className="mini-input">
-                                            <span>dX</span>
-                                            <ExpressionEditor value={p.handleIn.x} onChange={(val) => {
-                                                    const newPoints = [...points];
-                                                    if (newPoints[idx].handleIn) {
-                                                        newPoints[idx].handleIn!.x = val;
-                                                        updateFootprint("boardOutline", newPoints);
-                                                    }
-                                                }} params={params} />
-                                        </div>
-                                        <div className="mini-input">
-                                            <span>dY</span>
-                                            <ExpressionEditor value={p.handleIn.y} onChange={(val) => {
-                                                    const newPoints = [...points];
-                                                    if (newPoints[idx].handleIn) {
-                                                        newPoints[idx].handleIn!.y = val;
-                                                        updateFootprint("boardOutline", newPoints);
-                                                    }
-                                                }} params={params} />
-                                        </div>
-                                    </div>
+                            {renderPointEditor(
+                                p, 
+                                idx, 
+                                (newP) => {
+                                    const newPoints = [...points];
+                                    newPoints[idx] = newP;
+                                    updateFootprint("boardOutline", newPoints);
+                                },
+                                () => {
+                                    const newPoints = points.filter((_, i) => i !== idx);
+                                    updateFootprint("boardOutline", newPoints);
+                                }
+                            )}
+                            {idx < points.length - 1 && (
+                                <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
+                                    <button onClick={() => addMidpoint(idx)} style={{ cursor: "pointer", padding: "4px 8px", fontSize: "0.8rem", background: "#333", border: "1px solid #555", color: "#fff", borderRadius: "4px" }} title="Insert Midpoint">+ Midpoint</button>
                                 </div>
                             )}
-                            {p.handleOut && (
-                                <div className="handle-sub-block">
-                                    <div className="sub-label">Handle Out (Relative)</div>
-                                    <div className="handle-inputs">
-                                        <div className="mini-input">
-                                            <span>dX</span>
-                                            <ExpressionEditor value={p.handleOut.x} onChange={(val) => {
-                                                    const newPoints = [...points];
-                                                    if (newPoints[idx].handleOut) {
-                                                        newPoints[idx].handleOut!.x = val;
-                                                        updateFootprint("boardOutline", newPoints);
-                                                    }
-                                                }} params={params} />
-                                        </div>
-                                        <div className="mini-input">
-                                            <span>dY</span>
-                                            <ExpressionEditor value={p.handleOut.y} onChange={(val) => {
-                                                    const newPoints = [...points];
-                                                    if (newPoints[idx].handleOut) {
-                                                        newPoints[idx].handleOut!.y = val;
-                                                        updateFootprint("boardOutline", newPoints);
-                                                    }
-                                                }} params={params} />
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                        {idx < points.length - 1 && (
-                            <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
-                                <button onClick={() => addMidpoint(idx)} style={{ cursor: "pointer", padding: "4px 8px", fontSize: "0.8rem", background: "#333", border: "1px solid #555", color: "#fff", borderRadius: "4px" }} title="Insert Midpoint">+ Midpoint</button>
-                            </div>
-                        )}
                         </Fragment>
                     ))}
                     <button className="secondary small-btn" onClick={() => {
@@ -165,7 +174,68 @@ const FootprintPropertiesPanel = ({
   const shape = footprint.shapes.find(s => s.id === selectedId);
   if (!shape) return null;
 
-  // NEW: Footprint Reference Properties
+  // NEW: Wire Guide Properties
+  if (shape.type === "wireGuide") {
+      const wg = shape as FootprintWireGuide;
+      return (
+        <div className="properties-panel">
+            <h3>Wire Guide Properties</h3>
+            <div className="prop-group">
+                <label>Name</label>
+                <input type="text" value={wg.name} onChange={(e) => updateShape(wg.id, "name", e.target.value)} />
+            </div>
+            <div className="prop-group">
+                <label>X Position</label>
+                <ExpressionEditor value={wg.x} onChange={(v) => updateShape(wg.id, "x", v)} params={params} placeholder="0" />
+            </div>
+            <div className="prop-group">
+                <label>Y Position</label>
+                <ExpressionEditor value={wg.y} onChange={(v) => updateShape(wg.id, "y", v)} params={params} placeholder="0" />
+            </div>
+            
+            <div className="prop-section">
+                 <h4>Handles (Optional)</h4>
+                 <div className="point-controls-toggles">
+                    <label className="checkbox-label">
+                        <input type="checkbox" checked={!!wg.handleIn} onChange={(e) => {
+                             if (e.target.checked) updateShape(wg.id, "handleIn", { x: "-5", y: "0" });
+                             else updateShape(wg.id, "handleIn", undefined);
+                        }} /> In Handle
+                    </label>
+                    <label className="checkbox-label">
+                        <input type="checkbox" checked={!!wg.handleOut} onChange={(e) => {
+                             if (e.target.checked) updateShape(wg.id, "handleOut", { x: "5", y: "0" });
+                             else updateShape(wg.id, "handleOut", undefined);
+                        }} /> Out Handle
+                    </label>
+                </div>
+                {wg.handleIn && (
+                    <div className="handle-sub-block">
+                         <div className="sub-label">Handle In</div>
+                         <div className="handle-inputs">
+                             <div className="mini-input"><span>dX</span><ExpressionEditor value={wg.handleIn.x} onChange={(v) => updateShape(wg.id, "handleIn", {...wg.handleIn, x:v})} params={params}/></div>
+                             <div className="mini-input"><span>dY</span><ExpressionEditor value={wg.handleIn.y} onChange={(v) => updateShape(wg.id, "handleIn", {...wg.handleIn, y:v})} params={params}/></div>
+                         </div>
+                    </div>
+                )}
+                {wg.handleOut && (
+                    <div className="handle-sub-block">
+                         <div className="sub-label">Handle Out</div>
+                         <div className="handle-inputs">
+                             <div className="mini-input"><span>dX</span><ExpressionEditor value={wg.handleOut.x} onChange={(v) => updateShape(wg.id, "handleOut", {...wg.handleOut, x:v})} params={params}/></div>
+                             <div className="mini-input"><span>dY</span><ExpressionEditor value={wg.handleOut.y} onChange={(v) => updateShape(wg.id, "handleOut", {...wg.handleOut, y:v})} params={params}/></div>
+                         </div>
+                    </div>
+                )}
+            </div>
+            <div className="prop-group">
+                <small style={{color: '#888'}}>Wire guides are virtual and do not appear in exports.</small>
+            </div>
+        </div>
+      );
+  }
+
+  // Footprint Reference Properties
   if (shape.type === "footprint") {
       const refShape = shape as FootprintReference;
       const target = allFootprints.find(f => f.id === refShape.footprintId);
@@ -317,115 +387,31 @@ const FootprintPropertiesPanel = ({
                 <div className="points-list-container">
                     {(shape as FootprintLine).points.map((p, idx) => (
                         <Fragment key={p.id}>
-                        <div className="point-block">
-                            <div className="point-header">
-                                <span>Point {idx + 1}</span>
-                                <button className="icon-btn danger" onClick={() => {
-                                        const newPoints = (shape as FootprintLine).points.filter((_, i) => i !== idx);
-                                        updateShape(shape.id, "points", newPoints);
-                                    }} title="Remove Point">×</button>
-                            </div>
-                            <div className="point-row full">
-                                <span className="label">X</span>
-                                <ExpressionEditor value={p.x} onChange={(val) => {
-                                        const newPoints = [...(shape as FootprintLine).points];
-                                        newPoints[idx] = { ...p, x: val };
-                                        updateShape(shape.id, "points", newPoints);
-                                    }} params={params} placeholder="X" />
-                            </div>
-                            <div className="point-row full">
-                                <span className="label">Y</span>
-                                <ExpressionEditor value={p.y} onChange={(val) => {
-                                        const newPoints = [...(shape as FootprintLine).points];
-                                        newPoints[idx] = { ...p, y: val };
-                                        updateShape(shape.id, "points", newPoints);
-                                    }} params={params} placeholder="Y" />
-                            </div>
-                            <div className="point-controls-toggles">
-                                <label className="checkbox-label">
-                                    <input type="checkbox" checked={!!p.handleIn} onChange={(e) => {
+                            {renderPointEditor(
+                                p, 
+                                idx, 
+                                (newP) => {
+                                    const newPoints = [...(shape as FootprintLine).points];
+                                    newPoints[idx] = newP;
+                                    updateShape(shape.id, "points", newPoints);
+                                },
+                                () => {
+                                    const newPoints = (shape as FootprintLine).points.filter((_, i) => i !== idx);
+                                    updateShape(shape.id, "points", newPoints);
+                                }
+                            )}
+                            {idx < (shape as FootprintLine).points.length - 1 && (
+                                <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
+                                    <button onClick={() => {
                                             const newPoints = [...(shape as FootprintLine).points];
-                                            if (e.target.checked) newPoints[idx] = { ...p, handleIn: { x: "-5", y: "0" } };
-                                            else { const pt = { ...p }; delete pt.handleIn; newPoints[idx] = pt; }
+                                            const p1 = newPoints[idx];
+                                            const p2 = newPoints[idx + 1];
+                                            const newPoint = { id: crypto.randomUUID(), x: calcMid(p1.x, p2.x), y: calcMid(p1.y, p2.y) };
+                                            newPoints.splice(idx + 1, 0, newPoint);
                                             updateShape(shape.id, "points", newPoints);
-                                        }} /> In Handle
-                                </label>
-                                <label className="checkbox-label">
-                                    <input type="checkbox" checked={!!p.handleOut} onChange={(e) => {
-                                            const newPoints = [...(shape as FootprintLine).points];
-                                            if (e.target.checked) newPoints[idx] = { ...p, handleOut: { x: "5", y: "0" } };
-                                            else { const pt = { ...p }; delete pt.handleOut; newPoints[idx] = pt; }
-                                            updateShape(shape.id, "points", newPoints);
-                                        }} /> Out Handle
-                                </label>
-                            </div>
-                            {p.handleIn && (
-                                <div className="handle-sub-block">
-                                    <div className="sub-label">Handle In (Relative)</div>
-                                    <div className="handle-inputs">
-                                        <div className="mini-input">
-                                            <span>dX</span>
-                                            <ExpressionEditor value={p.handleIn.x} onChange={(val) => {
-                                                    const newPoints = [...(shape as FootprintLine).points];
-                                                    if (newPoints[idx].handleIn) {
-                                                        newPoints[idx].handleIn!.x = val;
-                                                        updateShape(shape.id, "points", newPoints);
-                                                    }
-                                                }} params={params} />
-                                        </div>
-                                        <div className="mini-input">
-                                            <span>dY</span>
-                                            <ExpressionEditor value={p.handleIn.y} onChange={(val) => {
-                                                    const newPoints = [...(shape as FootprintLine).points];
-                                                    if (newPoints[idx].handleIn) {
-                                                        newPoints[idx].handleIn!.y = val;
-                                                        updateShape(shape.id, "points", newPoints);
-                                                    }
-                                                }} params={params} />
-                                        </div>
-                                    </div>
+                                        }} style={{ cursor: "pointer", padding: "4px 8px", fontSize: "0.8rem", background: "#333", border: "1px solid #555", color: "#fff", borderRadius: "4px" }} title="Insert Midpoint">+ Midpoint</button>
                                 </div>
                             )}
-                            {p.handleOut && (
-                                <div className="handle-sub-block">
-                                    <div className="sub-label">Handle Out (Relative)</div>
-                                    <div className="handle-inputs">
-                                        <div className="mini-input">
-                                            <span>dX</span>
-                                            <ExpressionEditor value={p.handleOut.x} onChange={(val) => {
-                                                    const newPoints = [...(shape as FootprintLine).points];
-                                                    if (newPoints[idx].handleOut) {
-                                                        newPoints[idx].handleOut!.x = val;
-                                                        updateShape(shape.id, "points", newPoints);
-                                                    }
-                                                }} params={params} />
-                                        </div>
-                                        <div className="mini-input">
-                                            <span>dY</span>
-                                            <ExpressionEditor value={p.handleOut.y} onChange={(val) => {
-                                                    const newPoints = [...(shape as FootprintLine).points];
-                                                    if (newPoints[idx].handleOut) {
-                                                        newPoints[idx].handleOut!.y = val;
-                                                        updateShape(shape.id, "points", newPoints);
-                                                    }
-                                                }} params={params} />
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                        {idx < (shape as FootprintLine).points.length - 1 && (
-                            <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
-                                <button onClick={() => {
-                                        const newPoints = [...(shape as FootprintLine).points];
-                                        const p1 = newPoints[idx];
-                                        const p2 = newPoints[idx + 1];
-                                        const newPoint = { id: crypto.randomUUID(), x: calcMid(p1.x, p2.x), y: calcMid(p1.y, p2.y) };
-                                        newPoints.splice(idx + 1, 0, newPoint);
-                                        updateShape(shape.id, "points", newPoints);
-                                    }} style={{ cursor: "pointer", padding: "4px 8px", fontSize: "0.8rem", background: "#333", border: "1px solid #555", color: "#fff", borderRadius: "4px" }} title="Insert Midpoint">+ Midpoint</button>
-                            </div>
-                        )}
                         </Fragment>
                     ))}
                     <button className="secondary small-btn" onClick={() => {
