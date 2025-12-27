@@ -276,9 +276,142 @@ function flattenShapes(
     return result;
 }
 
+// src/components/Footprint3DView.tsx
+
 // ------------------------------------------------------------------
 // MANIFOLD UTILS
 // ------------------------------------------------------------------
+
+// Helper: Separating Axis Theorem check for Triangle-Triangle Intersection
+function separated(axis: THREE.Vector3, p1: THREE.Vector3, q1: THREE.Vector3, r1: THREE.Vector3, 
+                                      p2: THREE.Vector3, q2: THREE.Vector3, r2: THREE.Vector3): boolean {
+    let min1 = Infinity, max1 = -Infinity;
+    let min2 = Infinity, max2 = -Infinity;
+    
+    // Unroll loop for performance
+    const d1a = p1.dot(axis);
+    const d1b = q1.dot(axis);
+    const d1c = r1.dot(axis);
+    min1 = Math.min(d1a, d1b, d1c);
+    max1 = Math.max(d1a, d1b, d1c);
+
+    const d2a = p2.dot(axis);
+    const d2b = q2.dot(axis);
+    const d2c = r2.dot(axis);
+    min2 = Math.min(d2a, d2b, d2c);
+    max2 = Math.max(d2a, d2b, d2c);
+    
+    if (max1 < min2 || max2 < min1) return true;
+    return false;
+}
+
+function triIntersect(p1: THREE.Vector3, q1: THREE.Vector3, r1: THREE.Vector3, 
+                      p2: THREE.Vector3, q2: THREE.Vector3, r2: THREE.Vector3): boolean {
+    const v1 = new THREE.Vector3(), v2 = new THREE.Vector3(), normal1 = new THREE.Vector3(), normal2 = new THREE.Vector3();
+    
+    v1.subVectors(q1, p1);
+    v2.subVectors(r1, p1);
+    normal1.crossVectors(v1, v2);
+
+    v1.subVectors(q2, p2);
+    v2.subVectors(r2, p2);
+    normal2.crossVectors(v1, v2);
+
+    // SAT: Check Face Normals
+    if (separated(normal1, p1, q1, r1, p2, q2, r2)) return false;
+    if (separated(normal2, p1, q1, r1, p2, q2, r2)) return false;
+
+    // SAT: Check Edge Cross Products
+    const e1 = [new THREE.Vector3().subVectors(q1, p1), new THREE.Vector3().subVectors(r1, q1), new THREE.Vector3().subVectors(p1, r1)];
+    const e2 = [new THREE.Vector3().subVectors(q2, p2), new THREE.Vector3().subVectors(r2, q2), new THREE.Vector3().subVectors(p2, r2)];
+
+    const axis = new THREE.Vector3();
+    for(let i=0; i<3; i++) {
+        for(let j=0; j<3; j++) {
+            axis.crossVectors(e1[i], e2[j]);
+            if (axis.lengthSq() > 1e-9) { 
+                if (separated(axis, p1, q1, r1, p2, q2, r2)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+function checkSelfIntersections(geometry: THREE.BufferGeometry): number {
+    const pos = geometry.getAttribute('position');
+    const index = geometry.getIndex();
+    if (!pos) return 0;
+    
+    const vCount = pos.count;
+    const iCount = index ? index.count : vCount;
+    const triCount = iCount / 3;
+
+    // Heuristic: Skip if mesh is too massive to avoid freezing UI
+    if (triCount > 3000) {
+        console.warn(`Mesh has ${triCount} triangles. Skipping expensive self-intersection check.`);
+        return 0;
+    }
+
+    const vA0 = new THREE.Vector3(), vA1 = new THREE.Vector3(), vA2 = new THREE.Vector3();
+    const vB0 = new THREE.Vector3(), vB1 = new THREE.Vector3(), vB2 = new THREE.Vector3();
+    
+    let intersections = 0;
+
+    for (let i = 0; i < triCount; i++) {
+        const i0 = index ? index.getX(i*3) : i*3;
+        const i1 = index ? index.getX(i*3+1) : i*3+1;
+        const i2 = index ? index.getX(i*3+2) : i*3+2;
+        
+        vA0.fromBufferAttribute(pos, i0);
+        vA1.fromBufferAttribute(pos, i1);
+        vA2.fromBufferAttribute(pos, i2);
+
+        const minAx = Math.min(vA0.x, vA1.x, vA2.x);
+        const maxAx = Math.max(vA0.x, vA1.x, vA2.x);
+        const minAy = Math.min(vA0.y, vA1.y, vA2.y);
+        const maxAy = Math.max(vA0.y, vA1.y, vA2.y);
+        const minAz = Math.min(vA0.z, vA1.z, vA2.z);
+        const maxAz = Math.max(vA0.z, vA1.z, vA2.z);
+
+        for (let j = i + 1; j < triCount; j++) {
+             const j0 = index ? index.getX(j*3) : j*3;
+             const j1 = index ? index.getX(j*3+1) : j*3+1;
+             const j2 = index ? index.getX(j*3+2) : j*3+2;
+             
+             // Ignore neighbors (sharing vertices) to avoid false positives on valid mesh folds
+             let shared = 0;
+             if (i0 === j0 || i0 === j1 || i0 === j2) shared++;
+             if (i1 === j0 || i1 === j1 || i1 === j2) shared++;
+             if (i2 === j0 || i2 === j1 || i2 === j2) shared++;
+             if (shared > 0) continue;
+
+             vB0.fromBufferAttribute(pos, j0);
+             vB1.fromBufferAttribute(pos, j1);
+             vB2.fromBufferAttribute(pos, j2);
+
+             // AABB Broad Phase
+             const minBx = Math.min(vB0.x, vB1.x, vB2.x);
+             const maxBx = Math.max(vB0.x, vB1.x, vB2.x);
+             if (maxAx < minBx || minAx > maxBx) continue;
+
+             const minBy = Math.min(vB0.y, vB1.y, vB2.y);
+             const maxBy = Math.max(vB0.y, vB1.y, vB2.y);
+             if (maxAy < minBy || minAy > maxBy) continue;
+
+             const minBz = Math.min(vB0.z, vB1.z, vB2.z);
+             const maxBz = Math.max(vB0.z, vB1.z, vB2.z);
+             if (maxAz < minBz || minAz > maxBz) continue;
+
+             // Detailed Intersection
+             if (triIntersect(vA0, vA1, vA2, vB0, vB1, vB2)) {
+                 console.error(`Intersection found between Tri ${i} and Tri ${j}`);
+                 intersections++;
+                 if (intersections >= 5) return intersections; 
+             }
+        }
+    }
+    return intersections;
+}
 
 function analyzeGeometry(geometry: THREE.BufferGeometry) {
   const pos = geometry.getAttribute('position');
@@ -412,8 +545,18 @@ function analyzeGeometry(geometry: THREE.BufferGeometry) {
   
   if (singularVertices > 0) console.error(`Found ${singularVertices} singular vertices (bowtie/hourglass). This causes "Not Manifold".`);
 
+  // 5. Self-Intersection Check (New)
+  // If basic topology is clean, the issue is often geometric collision (faces passing through each other).
   if (boundaryEdges === 0 && nonManifoldEdges === 0 && reversedEdges === 0 && singularVertices === 0 && zeroArea === 0 && !hasNaN) {
-      console.log("Topology checks passed. The issue is likely Self-Intersection (geometry overlaps without nodes).");
+      console.log("Topology checks passed. Checking for geometric Self-Intersection...");
+      const intersections = checkSelfIntersections(geometry);
+      if (intersections > 0) {
+          console.error(`FATAL: Mesh has ${intersections} self-intersecting triangle pairs. This causes 'NotManifold' errors in manifold-3d.`);
+      } else {
+          console.log("No self-intersections found. The mesh appears geometrically valid.");
+      }
+  } else {
+      console.log("Skipping geometric intersection check due to topological errors.");
   }
 
   console.groupEnd();
@@ -621,12 +764,13 @@ function generateProceduralFillet(
         layers.push({ z: wallBottomZ, offset: 0 });
     }
 
-    const filletSteps = 6; 
+    const filletSteps = 0; 
     for(let i=1; i<=filletSteps; i++) {
         const theta = (i / filletSteps) * (Math.PI / 2);
         const z = wallBottomZ - Math.sin(theta) * safeR;
         const off = (1 - Math.cos(theta)) * safeR;
         const maxOffset = minDimension / 2 - 0.001; 
+        // const maxOffset = 0.005;
         layers.push({ z, offset: Math.min(off, maxOffset) });
     }
 
@@ -1086,7 +1230,18 @@ const LayerSolid = ({
         ref={(ref) => registerMesh && registerMesh(layer.id, ref)}
         geometry={geometry || undefined}
     >
-      <meshStandardMaterial color={hasError ? "#ff0000" : layer.color} transparent opacity={0.9} flatShading />
+      <meshStandardMaterial 
+          color={layer.color} 
+          transparent 
+          opacity={0.9} 
+          flatShading 
+          visible={!hasError}
+      />
+      {hasError && geometry && (
+        <mesh geometry={geometry}>
+          <meshBasicMaterial color="red" wireframe wireframeLinewidth={2} />
+        </mesh>
+      )}
     </mesh>
   );
 };
