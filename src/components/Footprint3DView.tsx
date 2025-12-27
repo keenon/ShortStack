@@ -1051,10 +1051,12 @@ const LayerSolid = ({
             base = collect(Manifold.cube([width, thickness, depth], true));
         }
 
-        const throughCuts: any[] = [];
-        const fills: any[] = [];
-        const fillets: any[] = [];
         const failedFillets: THREE.BufferGeometry[] = [];
+
+        // CHANGED: Sequential Processing (Painter's Algorithm)
+        // Instead of batching all cuts, then all fills, then all fillets,
+        // we process each shape in order: Cut -> Fill -> Fillet.
+        // This allows later shapes to overwrite/fill earlier shapes.
 
         flatShapes.forEach((item) => {
             const shape = item.shape;
@@ -1166,20 +1168,23 @@ const LayerSolid = ({
                 return tool;
             };
 
-            // A. THROUGH CUT
+            // A. THROUGH CUT (The "Eraser")
+            // This removes material from previous shapes in this footprint
             const toolCut = createTool(0, throughHeight);
             if (toolCut) {
                 const moved = collect(toolCut.translate([localX, throughY, localZ]));
-                throughCuts.push(moved);
+                const diff = collect(Manifold.difference(base, moved));
+                base = diff;
             }
 
-            // B. FILL
+            // B. FILL (Add material back)
             if (shouldFill) {
                 // Use epsilon for fill to ensure overlap
                 const toolFill = createTool(CSG_EPSILON, fillHeight);
                 if (toolFill) {
                     const moved = collect(toolFill.translate([localX, fillY, localZ]));
-                    fills.push(moved);
+                    const added = collect(Manifold.union(base, moved));
+                    base = added;
                 }
             }
 
@@ -1197,17 +1202,20 @@ const LayerSolid = ({
                 if (result && result.manifold) {
                     const toolFillet = collect(result.manifold);
                     const r = collect(toolFillet.rotate([0, globalRot, 0]));
+                    let final;
 
                     if (layer.carveSide === "Top") {
                         const topY = thickness / 2;
-                        const final = collect(r.translate([localX, topY, localZ]));
-                        fillets.push(final);
+                        final = collect(r.translate([localX, topY, localZ]));
                     } else {
                         // Bottom carve: Drill enters from bottom.
                         const flipped = collect(r.rotate([180, 0, 0]));
-                        const final = collect(flipped.translate([localX, -thickness/2, localZ]));
-                        fillets.push(final);
+                        final = collect(flipped.translate([localX, -thickness/2, localZ]));
                     }
+                    
+                    const diff = collect(Manifold.difference(base, final));
+                    base = diff;
+
                 } else if (result && result.vertProperties && result.triVerts) {
                     // Failed to convert to manifold. Store for display (red wireframe).
                     const geom = new THREE.BufferGeometry();
@@ -1234,25 +1242,6 @@ const LayerSolid = ({
             setGeometry(merged);
             setHasError(true);
             return;
-        }
-
-        // 5. Apply Booleans
-        if (throughCuts.length > 0) {
-            const unionCuts = collect(Manifold.compose(throughCuts));
-            const diff = collect(Manifold.difference(base, unionCuts));
-            base = diff;
-        }
-
-        if (fills.length > 0) {
-            const unionFills = collect(Manifold.compose(fills));
-            const added = collect(Manifold.union(base, unionFills));
-            base = added;
-        }
-
-        if (fillets.length > 0) {
-            const unionFillets = collect(Manifold.compose(fillets));
-            const diff = collect(Manifold.difference(base, unionFillets));
-            base = diff;
         }
 
         // 6. Convert to Mesh
