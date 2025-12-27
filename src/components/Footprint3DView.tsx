@@ -1341,9 +1341,58 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 
 useImperativeHandle(ref, () => ({
     resetCamera: () => {
-        if (controlsRef.current) {
-            controlsRef.current.reset();
+        const controls = controlsRef.current;
+        if (!controls) return;
+
+        const camera = controls.object as THREE.PerspectiveCamera;
+        const box = new THREE.Box3();
+        let hasMeshes = false;
+
+        // Iterate through all visible meshes to compute the total bounding box
+        Object.values(meshRefs.current).forEach((mesh) => {
+            if (mesh && mesh.geometry) {
+                mesh.updateMatrixWorld();
+                const meshBox = new THREE.Box3().setFromObject(mesh);
+                if (!meshBox.isEmpty()) {
+                    box.union(meshBox);
+                    hasMeshes = true;
+                }
+            }
+        });
+
+        if (!hasMeshes) {
+            // Default fallback if no meshes are visible
+            camera.position.set(50, 50, 50);
+            controls.target.set(0, 0, 0);
+            controls.update();
+            return;
         }
+
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+
+        // Calculate the required distance to fit the bounding box in the camera's FOV
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const fov = camera.fov * (Math.PI / 180);
+        
+        // Take aspect ratio into account for wide bounding boxes
+        const aspect = camera.aspect || 1;
+        const fovH = 2 * Math.atan(Math.tan(fov / 2) * aspect);
+        const effectiveFOV = Math.min(fov, fovH);
+        
+        let distance = maxDim / (2 * Math.tan(effectiveFOV / 2));
+        
+        // Add 30% margin for "comfortable" framing
+        distance *= 1.3;
+
+        // Position camera at a standard isometric-ish angle relative to the center
+        const direction = new THREE.Vector3(1, 1, 1).normalize();
+        camera.position.copy(center).add(direction.multiplyScalar(distance));
+        
+        controls.target.copy(center);
+        controls.update();
     },
     getLayerSTL: (layerId: string) => {
         const mesh = meshRefs.current[layerId];
