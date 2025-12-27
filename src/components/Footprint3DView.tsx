@@ -512,6 +512,178 @@ function geometryToManifold(geometry: THREE.BufferGeometry, Manifold: any) {
     }
 }
 
+/**
+ * Generates a valid manifold mesh for a shape with a ball-nosed (filleted) bottom.
+ * Replaces the brittle THREE.ExtrudeGeometry bevel logic.
+ */
+function generateProceduralFillet(
+    manifoldModule: any,
+    shape: FootprintShape, 
+    params: Parameter[],
+    depth: number, 
+    filletRadius: number,
+    resolution = 32
+) {
+    let minDimension = Infinity;
+    
+    // Generates a contour at a specific inward offset
+    const getContour = (offset: number): THREE.Vector2[] => {
+        const result: THREE.Vector2[] = [];
+        
+        if (shape.type === "circle") {
+            const d = evaluate((shape as any).diameter, params);
+            minDimension = d;
+            const r = Math.max(0.001, d/2 - offset); // Prevent zero radius
+            const segments = resolution;
+            for(let i=0; i<segments; i++) {
+                const theta = (i / segments) * Math.PI * 2;
+                result.push(new THREE.Vector2(Math.cos(theta) * r, Math.sin(theta) * r));
+            }
+        } 
+        else if (shape.type === "rect") {
+            const wRaw = evaluate((shape as FootprintRect).width, params);
+            const hRaw = evaluate((shape as FootprintRect).height, params);
+            minDimension = Math.min(wRaw, hRaw);
+            
+            // Ensure width/height don't collapse to 0 or negative
+            const w = Math.max(0.001, wRaw - offset * 2);
+            const h = Math.max(0.001, hRaw - offset * 2);
+            const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
+            
+            // Clamp Corner Radius to prevent singularity AND duplicate vertices
+            // We use a small epsilon factor (0.99) so that even a "fully rounded" end
+            // retains a microscopic straight segment between corners.
+            // This ensures vertex counts remain consistent and we don't get duplicate vertices
+            // (which cause degenerate triangles/edges in Manifold).
+            const halfW = w / 2;
+            const halfH = h / 2;
+            let cr = Math.max(0.001, crRaw - offset);
+            const limit = Math.min(halfW, halfH) * 0.99;
+            if (cr > limit) cr = limit;
+            
+            const segCorner = 6; 
+            
+            const quadrants = [
+                { x: halfW - cr, y: halfH - cr, startAng: 0 },         
+                { x: -halfW + cr, y: halfH - cr, startAng: Math.PI/2 },
+                { x: -halfW + cr, y: -halfH + cr, startAng: Math.PI }, 
+                { x: halfW - cr, y: -halfH + cr, startAng: 1.5*Math.PI}
+            ];
+
+            quadrants.forEach(q => {
+                for(let i=0; i<=segCorner; i++) {
+                    const ang = q.startAng + (i/segCorner) * (Math.PI/2);
+                    const vx = q.x + Math.cos(ang) * cr;
+                    const vy = q.y + Math.sin(ang) * cr;
+                    result.push(new THREE.Vector2(vx, vy));
+                }
+            });
+        }
+        else if (shape.type === "line") {
+            const t = evaluate((shape as FootprintLine).thickness, params);
+            minDimension = t;
+            // Prevent thickness collapse
+            const effectiveT = Math.max(0.001, t - offset * 2);
+            
+            const tempShape = createLineShape(shape as FootprintLine, params, effectiveT);
+            if (tempShape) {
+                const pts = tempShape.getSpacedPoints(resolution * 2);
+                pts.pop(); // Remove duplicate
+                pts.forEach(p => result.push(p));
+            }
+        }
+        
+        return result;
+    };
+
+    // Pre-calc dimension to clamp radius
+    getContour(0); 
+
+    const safeR = Math.min(filletRadius, minDimension / 2 - 0.01, depth);
+    if (safeR <= 0.001) return null;
+
+    const layers: { z: number, offset: number }[] = [];
+    layers.push({ z: 0, offset: 0 });
+
+    const wallBottomZ = -(depth - safeR);
+    if (Math.abs(wallBottomZ) > 0.001) {
+        layers.push({ z: wallBottomZ, offset: 0 });
+    }
+
+    const filletSteps = 6; 
+    for(let i=1; i<=filletSteps; i++) {
+        const theta = (i / filletSteps) * (Math.PI / 2);
+        const z = wallBottomZ - Math.sin(theta) * safeR;
+        const off = (1 - Math.cos(theta)) * safeR;
+        layers.push({ z, offset: off });
+    }
+
+    const vertices: number[] = [];
+    const indices: number[] = [];
+    const vertsPerLayer = getContour(0).length;
+    if (vertsPerLayer < 3) return null;
+
+    layers.forEach(layer => {
+        const points = getContour(layer.offset);
+        if (points.length !== vertsPerLayer) {
+             console.warn("Vertex count mismatch in fillet generation");
+        }
+        points.forEach(p => {
+            // Map 2D (x,y) to 3D (x, z, -y) to match Three.js default orientation
+            vertices.push(p.x, layer.z, -p.y); 
+        });
+    });
+
+    const getIdx = (layerIdx: number, ptIdx: number) => {
+        return layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
+    };
+
+    // A. Top Cap
+    const topPts = getContour(0);
+    const topFaces = THREE.ShapeUtils.triangulateShape(topPts, []);
+    topFaces.forEach(face => {
+        // Normal UP (+Y)
+        indices.push(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2]));
+    });
+
+    // B. Walls
+    for(let l=0; l<layers.length-1; l++) {
+        for(let i=0; i<vertsPerLayer; i++) {
+            const curr = i;
+            const next = (i+1) % vertsPerLayer;
+            
+            const v1 = getIdx(l, curr);      // Top Current
+            const v2 = getIdx(l+1, curr);    // Bot Current
+            const v3 = getIdx(l+1, next);    // Bot Next
+            const v4 = getIdx(l, next);      // Top Next
+
+            // Standard CCW outward facing wall
+            indices.push(v1, v2, v4); 
+            indices.push(v2, v3, v4);
+        }
+    }
+
+    // C. Bottom Cap
+    const lastL = layers.length - 1;
+    const botFaces = THREE.ShapeUtils.triangulateShape(getContour(layers[lastL].offset), []);
+    botFaces.forEach(face => {
+        // Normal DOWN (-Y) -> Reorder vertices
+        indices.push(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1]));
+    });
+
+    const vertProperties = new Float32Array(vertices);
+    const triVerts = new Uint32Array(indices);
+
+    analyzeGeometry(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(vertProperties, 3)).setIndex(new THREE.BufferAttribute(triVerts, 1)));
+    
+    try {
+        return new manifoldModule.Manifold({ vertProperties, triVerts });
+    } catch (e) {
+        console.error("Procedural Fillet Failed", e);
+        return null;
+    }
+}
+
 // ------------------------------------------------------------------
 // COMPONENTS
 // ------------------------------------------------------------------
@@ -719,76 +891,34 @@ const LayerSolid = ({
             }
 
             // C. ROUNDED CUT (FILLET)
-            // If the fillet fails generation (non-manifold), we simply SKIP it.
-            // This leaves a "sharp" corner (box/cylinder cut + fill) rather than crashing.
+            // Replaces legacy Three.js Extrude logic with robust procedural manifold generation
             if (shouldRound) {
-                try {
-                    // Reconstruct Three.js Shape for ExtrudeGeometry
-                    let s: THREE.Shape | null = null;
-                    if (shape.type === "circle") {
-                        const d = evaluate((shape as any).diameter, params);
-                        if (d > 0) {
-                            s = new THREE.Shape();
-                            s.absarc(0, 0, d/2 + CSG_EPSILON, 0, Math.PI*2, true);
-                        }
-                    } else if (shape.type === "rect") {
-                        const w = evaluate((shape as FootprintRect).width, params);
-                        const h = evaluate((shape as FootprintRect).height, params);
-                        const crRaw = evaluate((shape as FootprintRect).cornerRadius, params);
-                        const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
-                        s = createRoundedRectShape(w + CSG_EPSILON, h + CSG_EPSILON, cr + CSG_EPSILON/2);
-                    } else if (shape.type === "line") {
-                        const t = evaluate((shape as FootprintLine).thickness, params);
-                        const validT = t > 0 ? t : 0.01;
-                        s = createLineShape(shape as FootprintLine, params, validT + CSG_EPSILON);
+                const toolFillet = collect(generateProceduralFillet(
+                    manifoldModule, 
+                    shape, 
+                    params, 
+                    actualDepth, // Tool depth equals cut depth
+                    safeRadius,
+                    32
+                ));
+
+                if (toolFillet) {
+                    const r = collect(toolFillet.rotate([0, globalRot, 0]));
+
+                    if (layer.carveSide === "Top") {
+                        // Top carve: Top of tool matches top of layer
+                        const topY = thickness / 2;
+                        const final = collect(r.translate([localX, topY, localZ]));
+                        fillets.push(final);
+                    } else {
+                        // Bottom carve: Drill enters from bottom.
+                        // Top of tool (entry point) matches bottom of layer (-thickness/2).
+                        // Rotate 180X: (x,y,z) -> (x,-y,-z). Top(0) -> 0. Tip(-Depth) -> +Depth.
+                        // Translate Y to -thickness/2.
+                        const flipped = collect(r.rotate([180, 0, 0]));
+                        const final = collect(flipped.translate([localX, -thickness/2, localZ]));
+                        fillets.push(final);
                     }
-
-                    if (s) {
-                        const options: THREE.ExtrudeGeometryOptions = {
-                            depth: throughHeight, 
-                            bevelEnabled: true,
-                            bevelThickness: safeRadius,
-                            bevelSize: safeRadius,
-                            bevelOffset: -safeRadius,
-                            bevelSegments: 8, // Reduce segments to reduce chance of degenerate triangles
-                            curveSegments: 16
-                        };
-                        
-                        const geomRaw = new THREE.ExtrudeGeometry(s, options);
-                        
-                        // Clean
-                        geomRaw.deleteAttribute('uv');
-                        geomRaw.deleteAttribute('normal');
-                        
-                        // Weld
-                        const geom = mergeVertices(geomRaw, 1e-4);
-                        geomRaw.dispose();
-                        
-                        // Convert
-                        const toolFillet = collect(geometryToManifold(geom, Manifold));
-                        geom.dispose();
-
-                        if (toolFillet) {
-                            // 1. Rotate
-                            const r = collect(toolFillet.rotate([-90, 0, globalRot]));
-
-                            // 2. Position
-                            let floorY = 0;
-                            if (layer.carveSide === "Top") {
-                                floorY = (thickness / 2) - actualDepth;
-                                const final = collect(r.translate([localX, floorY + safeRadius, localZ]));
-                                fillets.push(final);
-                            } else {
-                                floorY = (-thickness / 2) + actualDepth;
-                                const final = collect(r.translate([localX, floorY - (throughHeight + safeRadius), localZ]));
-                                fillets.push(final);
-                            }
-                        }
-                    }
-                } catch (err) {
-                    console.warn("Failed to generate fillet geometry for shape:", shape.id, err);
-                    // Fallback: Do nothing, just don't add the fillet. 
-                    // The 'throughCut' and 'fill' already exist, so it will look like a sharp flat-bottom pocket.
                 }
             }
         });
