@@ -4,6 +4,11 @@ on:
     tags:
       - 'v*' # Triggers on any tag starting with "v"
 
+permissions:
+  contents: write
+  packages: write # Optional, but good for some tauri features
+  pull-requests: read
+
 jobs:
   publish-tauri:
     permissions:
