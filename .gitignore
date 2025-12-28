@@ -10,3 +10,5 @@ src-tauri/gen/
 # OS
 .DS_Store
 Thumbs.db
+
+signing-certs/
