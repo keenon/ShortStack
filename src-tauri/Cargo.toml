@@ -1,7 +1,7 @@
 [package]
-name = "fullstack-cad"
-version = "0.0.0"
-description = "Fullstack CAD"
+name = "shortstack"
+version = "0.1.6"
+description = "ShortStack CAD"
 authors = ["you"]
 edition = "2021"
 
