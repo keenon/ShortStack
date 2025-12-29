@@ -74,11 +74,13 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
       shape.lineTo(x, y + height);
       shape.lineTo(x, y);
   } else {
+        // Note to the future: These curve commands are tricky, and LLMs often swap the ordering around.
+        // Please double-check if modifying, especially around the quadraticCurveTo control points.
        shape.moveTo(x, y + r);
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
        shape.lineTo(x + width - r, y + height);
-       shape.quadraticCurveTo(x + width, y, x + width, y + height - r);
+       shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
        shape.lineTo(x + width, y + r);
        shape.quadraticCurveTo(x + width, y, x + width - r, y);
        shape.lineTo(x + r, y);
