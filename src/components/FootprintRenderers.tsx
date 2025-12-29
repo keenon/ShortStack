@@ -15,6 +15,7 @@ export const RecursiveShapeRenderer = ({
   onHandleDown,
   handleRadius,
   rootFootprint, // NEW: Context for point resolution
+  layerVisibility,
 }: {
   shape: FootprintShape;
   allFootprints: Footprint[];
@@ -26,6 +27,7 @@ export const RecursiveShapeRenderer = ({
   onHandleDown: (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => void;
   handleRadius: number;
   rootFootprint: Footprint; // NEW
+  layerVisibility: Record<string, boolean>;
 }) => {
   // --- WIRE GUIDE RENDERER (Virtual Shape) ---
   if (shape.type === "wireGuide") {
@@ -137,6 +139,7 @@ export const RecursiveShapeRenderer = ({
                     onHandleDown={() => {}} // Handles inside child footprints are not editable here
                     handleRadius={handleRadius}
                     rootFootprint={rootFootprint}
+                    layerVisibility={layerVisibility}
                   />
               ))}
               
@@ -155,9 +158,9 @@ export const RecursiveShapeRenderer = ({
   let strokeWidth = isSelected ? 2 : 1;
   const vectorEffect = "non-scaling-stroke";
 
-  // Calculate Color based on highest layer
+  // Calculate Color based on highest VISIBLE layer
   const assigned = shape.assignedLayers || {};
-  const highestLayer = stackup.find(l => assigned[l.id] !== undefined);
+  const highestLayer = stackup.find(l => assigned[l.id] !== undefined && layerVisibility[l.id] !== false);
 
   if (highestLayer) {
       stroke = highestLayer.color;

@@ -728,6 +728,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                                 onHandleDown={handleHandleMouseDown}
                                 handleRadius={handleRadius}
                                 rootFootprint={footprint}
+                                layerVisibility={layerVisibility} // <--- ADDED
                             />
                         );
                     })}
