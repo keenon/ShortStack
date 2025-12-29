@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "productName": "shortstack",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "identifier": "io.github.keenon.shortstack",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -30,7 +30,8 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   },
     "plugins": {
     "updater": {
