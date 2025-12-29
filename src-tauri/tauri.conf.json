@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "productName": "shortstack",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "identifier": "io.github.keenon.shortstack",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -38,7 +38,7 @@
       "endpoints": [
         "https://github.com/keenon/ShortStack/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcxNkM2NDBCMkM4OTBBRkIKUldUN0Nva3NDMlJzY2FLTnhrMlhZTkcydlUySWw4YnEwNWhNbFlRSndGLzJMalRLaXZHQ1pwNjAK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE1MTNDREVGRDc5QTg5NDQKUldSRWlaclg3ODBUcFMrL3VwL2JGNTlyL3ZsM0QyQVZTeHI1RGUrYUxHYmZQL1IwU3YvOGZMUUgK"
     }
   }
 }
