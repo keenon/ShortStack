@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { BOARD_OUTLINE_ID, modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer, BoardOutlineRenderer } from "./FootprintRenderers";
@@ -16,6 +16,19 @@ interface Props {
   onClose: () => void;
   params: Parameter[];
   stackup: StackupLayer[];
+}
+
+// ------------------------------------------------------------------
+// HELPERS FOR BASE64
+// ------------------------------------------------------------------
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
 }
 
 // ------------------------------------------------------------------
@@ -193,6 +206,47 @@ const ShapeListPanel = ({
       </div>
     </div>
   );
+};
+
+// 5. MESH LIST PANEL
+const MeshListPanel = ({
+    meshes,
+    selectedId,
+    onSelect,
+    onDelete,
+    onRename
+}: {
+    meshes: FootprintMesh[];
+    selectedId: string | null;
+    onSelect: (id: string) => void;
+    onDelete: (id: string) => void;
+    onRename: (id: string, name: string) => void;
+}) => {
+    return (
+        <div className="fp-left-subpanel">
+            <h3 style={{ marginTop: 0 }}>Meshes</h3>
+            <div className="shape-list-container">
+                {meshes.map(mesh => (
+                    <div key={mesh.id}
+                        className={`shape-item ${mesh.id === selectedId ? "selected" : ""}`}
+                        onClick={() => onSelect(mesh.id)}
+                    >
+                        <div style={{ marginRight: '8px', fontSize: '0.8em', color: '#888', textTransform: 'uppercase' }}>
+                            {mesh.format}
+                        </div>
+                        <input 
+                            type="text" 
+                            value={mesh.name} 
+                            onChange={(e) => onRename(mesh.id, e.target.value)} 
+                            className="shape-name-edit" 
+                        />
+                        <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(mesh.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
+                    </div>
+                ))}
+                {meshes.length === 0 && <div className="empty-state-small">Drag & Drop STL/STEP files onto 3D view.</div>}
+            </div>
+        </div>
+    );
 };
 
 // ------------------------------------------------------------------
@@ -469,13 +523,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     } else if (type === "rect") {
       newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0", cornerRadius: "0" };
     } else if (type === "wireGuide") {
-      // Wire Guides go to index 0 to ensure they are at the top of the list and rendered "on top" (last drawn if we didn't reverse, but we reverse, so first drawn???)
-      // Wait, in Canvas we do `[...shapes].reverse().map`.
-      // The `reverse()` puts the last element of array to the first rendered component.
-      // SVG renders first component at bottom.
-      // So Last Element of Array -> First Component -> Bottom Layer.
-      // First Element of Array -> Last Component -> Top Layer.
-      // So to render on top, we need index 0.
       newShape = { ...base, type: "wireGuide", x: "0", y: "0", name: "Wire Guide" } as FootprintWireGuide;
     } else {
       newShape = { ...base, type: "line", thickness: "1", x: "0", y: "0", points: [{ id: crypto.randomUUID(), x: "0", y: "0" }, { id: crypto.randomUUID(), x: "10", y: "10" }] };
@@ -501,6 +548,57 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     [newShapes[index], newShapes[index + direction]] = [newShapes[index + direction], newShapes[index]];
     onUpdate({ ...footprint, shapes: newShapes });
   };
+  
+  // --- MESH ACTIONS ---
+  const handleDrop = (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      console.log("Drop detected", e.dataTransfer.files);
+
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          Array.from(e.dataTransfer.files).forEach(file => {
+              const ext = file.name.split('.').pop()?.toLowerCase();
+              console.log("Processing file", file.name, ext);
+              if (ext === "stl" || ext === "step" || ext === "stp") {
+                  const reader = new FileReader();
+                  console.log("Reading file", file.name);
+                  reader.onload = () => {
+                      if (reader.result instanceof ArrayBuffer) {
+                          const base64 = arrayBufferToBase64(reader.result);
+                          const newMesh: FootprintMesh = {
+                              id: crypto.randomUUID(),
+                              name: file.name,
+                              content: base64,
+                              format: ext === "stl" ? "stl" : "step",
+                              x: "0", y: "0", z: "0",
+                              rotationX: "0", rotationY: "0", rotationZ: "0",
+                              renderingType: "solid"
+                          };
+                          onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), newMesh] });
+                          setSelectedShapeId(newMesh.id);
+                      }
+                  };
+                  reader.readAsArrayBuffer(file);
+              }
+          });
+      }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+  };
+  
+  const updateMesh = (meshId: string, field: string, val: any) => {
+      onUpdate({ ...footprint, meshes: (footprint.meshes || []).map(m => m.id === meshId ? { ...m, [field]: val } : m) });
+  };
+  const deleteMesh = (meshId: string) => {
+      onUpdate({ ...footprint, meshes: (footprint.meshes || []).filter(m => m.id !== meshId) });
+      if (selectedShapeId === meshId) setSelectedShapeId(null);
+  };
+
+
   const updateFootprintName = (name: string) => { onUpdate({ ...footprint, name }); };
   const toggleLayerVisibility = (id: string) => { setLayerVisibility(prev => ({ ...prev, [id]: prev[id] === undefined ? false : !prev[id] })); };
   const handleHomeClick = () => {
@@ -588,6 +686,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   };
 
   const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
+  const activeMesh = footprint.meshes ? footprint.meshes.find(m => m.id === selectedShapeId) : null;
   const isBoardSelected = selectedShapeId === BOARD_OUTLINE_ID;
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
@@ -602,10 +701,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       return !assignedIds.every(id => layerVisibility[id] === false);
   };
 
-  // NEW: Calculate Scale for Constant Handle Size
-  // We want handles to be approx 6px radius on screen.
-  // Scale = viewBox.width / assumed_canvas_width (e.g. 150)
-  // This is a heuristic. If viewBox width is small (zoomed in), handles are small in units.
   const handleRadius = viewBox.width / 100;
 
   return (
@@ -632,10 +727,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
             >
                 <option value="" disabled>+ Footprint</option>
                 {allFootprints.map(fp => {
-                    // Filter logic:
-                    // 1. Cannot add self
-                    // 2. Cannot add boards
-                    // 3. Cannot add cycle
                     const isValid = isFootprintOptionValid(footprint.id, fp, allFootprints);
                     return (
                         <option key={fp.id} value={fp.id} disabled={!isValid}>
@@ -668,6 +759,13 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 stackup={stackup}
                 isShapeVisible={isShapeVisible}
             />
+            <MeshListPanel
+                meshes={footprint.meshes || []}
+                selectedId={selectedShapeId}
+                onSelect={setSelectedShapeId}
+                onDelete={deleteMesh}
+                onRename={updateMesh}
+            />
         </div>
 
         <div className="fp-center-column">
@@ -676,7 +774,12 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 <button className={`view-toggle-btn ${viewMode === "3D" ? "active" : ""}`} onClick={() => setViewMode("3D")}>3D Preview</button>
             </div>
 
-            <div className="fp-canvas-wrapper" ref={wrapperRef}>
+            <div 
+                className="fp-canvas-wrapper" 
+                ref={wrapperRef}
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+            >
                 <button className="canvas-home-btn" onClick={handleHomeClick} title="Reset View">🏠</button>
 
             <div style={{ display: viewMode === "2D" ? 'contents' : 'none' }}>
@@ -710,11 +813,9 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                     )}
 
                     {/* Shapes Rendered Reversed (Bottom to Top visual order) */}
-                    {/* Reverse reverses the array in place if not copied. Copy with spread. */}
                     {[...footprint.shapes].reverse().map((shape) => {
                         if (!isShapeVisible(shape)) return null;
                         
-                        // Use Recursive Renderer
                         return (
                             <RecursiveShapeRenderer
                                 key={shape.id}
@@ -728,7 +829,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                                 onHandleDown={handleHandleMouseDown}
                                 handleRadius={handleRadius}
                                 rootFootprint={footprint}
-                                layerVisibility={layerVisibility} // <--- ADDED
+                                layerVisibility={layerVisibility} 
                             />
                         );
                     })}
@@ -745,19 +846,22 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                     stackup={stackup}
                     visibleLayers={layerVisibility} 
                     is3DActive={viewMode === "3D"} 
+                    selectedId={selectedShapeId}
+                    onSelect={setSelectedShapeId}
                 />
             </div>
             </div>
         </div>
 
         <div className="fp-sidebar">
-          {activeShape || isBoardSelected ? (
+          {activeShape || activeMesh || isBoardSelected ? (
             <>
               <FootprintPropertiesPanel 
                 footprint={footprint}
                 allFootprints={allFootprints}
                 selectedId={selectedShapeId}
                 updateShape={updateShape} 
+                updateMesh={updateMesh} // NEW
                 updateFootprint={updateFootprintField}
                 params={params} 
                 stackup={stackup}
@@ -769,10 +873,17 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                     </button>
                 </div>
               )}
+              {activeMesh && (
+                <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
+                    <button className="danger" style={{width: '100%'}} onClick={() => deleteMesh(activeMesh.id)}>
+                        Delete Mesh
+                    </button>
+                </div>
+              )}
             </>
           ) : (
             <div className="empty-state">
-              <p>Select a shape or board outline to edit properties.</p>
+              <p>Select a shape, mesh, or board outline to edit properties.</p>
             </div>
           )}
         </div>

@@ -4,12 +4,19 @@ import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, 
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
 import * as THREE from "three";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference } from "../types";
+import { STLLoader } from "three-stdlib";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference, FootprintMesh } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
 import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
 import Module from "manifold-3d";
 // @ts-ignore
 import wasmUrl from "manifold-3d/manifold.wasm?url";
+
+// OCCT Imports
+// @ts-ignore
+import initOCCT from "occt-import-js";
+// @ts-ignore
+import occtWasmUrl from "occt-import-js/dist/occt-import-js.wasm?url";
 
 interface Props {
   footprint: Footprint;
@@ -18,6 +25,9 @@ interface Props {
   stackup: StackupLayer[];
   visibleLayers?: Record<string, boolean>;
   is3DActive: boolean;
+  // NEW: Selection Props
+  selectedId: string | null;
+  onSelect: (id: string) => void;
 }
 
 export interface Footprint3DViewHandle {
@@ -32,6 +42,20 @@ export interface Footprint3DViewHandle {
 function evaluate(expression: string, params: Parameter[]): number {
   return evaluateExpression(expression, params);
 }
+
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+    const binary_string = window.atob(base64);
+    const len = binary_string.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binary_string.charCodeAt(i);
+    }
+    return bytes.buffer;
+}
+
+// ------------------------------------------------------------------
+// GEOMETRY GENERATION
+// ------------------------------------------------------------------
 
 function createRoundedRectShape(width: number, height: number, radius: number): THREE.Shape {
   const shape = new THREE.Shape();
@@ -54,7 +78,7 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
        shape.lineTo(x + width - r, y + height);
-       shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
+       shape.quadraticCurveTo(x + width, y, x + width, y + height - r);
        shape.lineTo(x + width, y + r);
        shape.quadraticCurveTo(x + width, y, x + width - r, y);
        shape.lineTo(x + r, y);
@@ -63,11 +87,6 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
   return shape;
 }
 
-/**
- * Manually generates the contour points for a Line shape with thickness.
- * This guarantees consistent vertex counts across different offsets/layers,
- * avoiding the non-deterministic vertex merging of THREE.Shape.getPoints().
- */
 function getLineOutlinePoints(
     shape: FootprintLine, 
     params: Parameter[], 
@@ -365,10 +384,6 @@ function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
     return new wasm.CrossSection(contours, "EvenOdd");
 }
 
-/**
- * Generates a valid manifold mesh for a shape with a ball-nosed (filleted) bottom.
- * Replaces the brittle THREE.ExtrudeGeometry bevel logic.
- */
 function generateProceduralFillet(
     manifoldModule: any,
     shape: FootprintShape, 
@@ -651,6 +666,73 @@ function generateProceduralFillet(
 }
 
 // ------------------------------------------------------------------
+// MESH PARSING
+// ------------------------------------------------------------------
+
+// Global cache to avoid re-parsing same base64 mesh
+const meshGeometryCache = new Map<string, THREE.BufferGeometry>();
+
+async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<THREE.BufferGeometry | null> {
+    const cacheKey = mesh.id + "_" + mesh.content.slice(0, 30); // Simple hash
+    if (meshGeometryCache.has(cacheKey)) {
+        return meshGeometryCache.get(cacheKey)!.clone();
+    }
+
+    const buffer = base64ToArrayBuffer(mesh.content);
+
+    try {
+        console.log(`Loading mesh ${mesh.id} of format ${mesh.format}`);
+        if (mesh.format === "stl") {
+            const loader = new STLLoader();
+            const geometry = loader.parse(buffer);
+            meshGeometryCache.set(cacheKey, geometry);
+            return geometry;
+        } else if (mesh.format === "step") {
+            // FIX: Robust check for module
+            if (!occtModule) {
+                console.error("OCCT Module not initialized.");
+                return null;
+            }
+            
+            try {
+                // Pass the buffer directly to ReadStepFile
+                // The library handles memory management for the buffer input
+                const result = occtModule.ReadStepFile(new Uint8Array(buffer), null);
+                
+                if (result && result.meshes && result.meshes.length > 0) {
+                    // Combine all sub-meshes
+                    const geometries: THREE.BufferGeometry[] = [];
+                    for(const m of result.meshes) {
+                        const geom = new THREE.BufferGeometry();
+                        const positions = new Float32Array(m.attributes.position.array);
+                        geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                        if(m.attributes.normal) {
+                             const normals = new Float32Array(m.attributes.normal.array);
+                             geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+                        }
+                        if(m.index) {
+                            const indices = new Uint16Array(m.index.array);
+                            geom.setIndex(new THREE.BufferAttribute(indices, 1));
+                        }
+                        geometries.push(geom);
+                    }
+
+                    const merged = mergeBufferGeometries(geometries);
+                    meshGeometryCache.set(cacheKey, merged);
+                    return merged;
+                }
+            } catch (err) {
+                console.error("Error reading STEP file via OCCT:", err);
+                return null;
+            }
+        }
+    } catch (e) {
+        console.error("Failed to load mesh", e);
+    }
+    return null;
+}
+
+// ------------------------------------------------------------------
 // COMPONENTS
 // ------------------------------------------------------------------
 
@@ -727,10 +809,6 @@ const LayerSolid = ({
         const failedFillets: THREE.BufferGeometry[] = [];
 
         // Sequential Processing (Painter's Algorithm)
-        // Instead of batching all cuts, then all fills, then all fillets,
-        // we process each shape in order: Cut -> Fill -> Fillet.
-        // This allows later shapes to overwrite/fill earlier shapes.
-
         [...flatShapes].reverse().forEach((item) => {
             const shape = item.shape;
             if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;
@@ -982,18 +1060,153 @@ const LayerSolid = ({
   );
 };
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive }, ref) => {
+// --- MESH RENDERER ---
+
+interface FlatMesh {
+    mesh: FootprintMesh;
+    globalTransform: THREE.Matrix4;
+}
+
+// Recursive flattener for meshes
+function flattenMeshes(
+    rootFp: Footprint, 
+    allFootprints: Footprint[], 
+    params: Parameter[],
+    transform = new THREE.Matrix4()
+): FlatMesh[] {
+    let result: FlatMesh[] = [];
+
+    // Add local meshes
+    if (rootFp.meshes) {
+        rootFp.meshes.forEach(m => {
+            // Apply local mesh transform to the accumulated footprint transform
+            const x = evaluate(m.x, params);
+            const y = evaluate(m.y, params);
+            const z = evaluate(m.z, params);
+            const rx = evaluate(m.rotationX, params) * Math.PI / 180;
+            const ry = evaluate(m.rotationY, params) * Math.PI / 180;
+            const rz = evaluate(m.rotationZ, params) * Math.PI / 180;
+
+            const meshMat = new THREE.Matrix4();
+            const rot = new THREE.Euler(rx, ry, rz, 'XYZ');
+            meshMat.makeRotationFromEuler(rot);
+            meshMat.setPosition(x, y, z); 
+            // NOTE: CAD view is Y-up in 3D?
+            // In Footprint editor 2D: X is right, Y is up (SVG style). 
+            // In 3D view: we usually map 2D (x, y) to 3D (x, -y, z=0) or (x, z, y=0).
+            // The LayerSolid uses `localZ = centerZ - item.y` implying Y in 2D maps to Z in 3D (inverted).
+            // And X maps to X.
+            // Let's standardise on the transform passed in.
+            
+            // However, Footprint3DView maps shapes with:
+            // X -> X
+            // Y -> -Z (approx)
+            // But here `m.x`, `m.y`, `m.z` are explicit 3D coordinates.
+            // So we just apply them relative to the footprint origin.
+            
+            // IMPORTANT: The footprint recursion transform is in "2D plane logic".
+            // We need to convert that to 3D logic.
+            // But `flattenShapes` calculates `globalX` and `globalY`. 
+            
+            // Let's assume standard 3D logic for the mesh properties relative to parent.
+            // The `transform` passed in is the GLOBAL transform of the parent footprint in 3D space.
+            
+            const finalMat = transform.clone().multiply(meshMat);
+            result.push({ mesh: m, globalTransform: finalMat });
+        });
+    }
+
+    // Recurse children
+    rootFp.shapes.forEach(s => {
+        if (s.type === "footprint") {
+             const ref = s as FootprintReference;
+             const child = allFootprints.find(f => f.id === ref.footprintId);
+             if (child) {
+                 const x = evaluate(ref.x, params);
+                 const y = evaluate(ref.y, params);
+                 const angle = evaluate(ref.angle, params);
+                 
+                 // Create transform for child footprint relative to current
+                 // 2D (x, y) maps to 3D (x, 0, -y) typically in this view setup
+                 // Rotation is around Y axis in 3D (since Z is depth in 2D)
+                 
+                 const childMat = new THREE.Matrix4();
+                 childMat.makeRotationY(angle * Math.PI / 180);
+                 childMat.setPosition(x, 0, -y);
+                 
+                 const globalChildMat = transform.clone().multiply(childMat);
+                 
+                 result = result.concat(flattenMeshes(child, allFootprints, params, globalChildMat));
+             }
+        }
+    });
+
+    return result;
+}
+
+const MeshObject = ({ 
+    meshData, 
+    occtModule,
+    isSelected,
+    onSelect
+}: { 
+    meshData: FlatMesh, 
+    occtModule: any,
+    isSelected: boolean,
+    onSelect: () => void
+}) => {
+    const { mesh, globalTransform } = meshData;
+    const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
+
+    useEffect(() => {
+        let mounted = true;
+        loadMeshGeometry(mesh, occtModule).then(geom => {
+            if(mounted && geom) setGeometry(geom);
+        });
+        return () => { mounted = false; };
+    }, [mesh, occtModule]);
+
+    if (!geometry || mesh.renderingType === "hidden") return null;
+
+    const color = isSelected ? "#646cff" : (mesh.color || "#ccc");
+    const emissive = isSelected ? "#3333aa" : "#000000";
+
+    return (
+        <mesh 
+            geometry={geometry} 
+            matrix={globalTransform}
+            matrixAutoUpdate={false} // Use the matrix we computed
+            onClick={(e) => {
+                e.stopPropagation();
+                onSelect();
+            }}
+        >
+            {mesh.renderingType === "wireframe" ? (
+                <meshBasicMaterial color={color} wireframe />
+            ) : (
+                <meshStandardMaterial 
+                    color={color} 
+                    emissive={emissive} 
+                    emissiveIntensity={0.2}
+                />
+            )}
+        </mesh>
+    );
+};
+
+
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive, selectedId, onSelect }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
   const hasInitiallySnapped = useRef(false);
   const [firstMeshReady, setFirstMeshReady] = useState(false);
   
-  // Initialize Manifold
+  // Initialize Manifold and OCCT
   const [manifoldModule, setManifoldModule] = useState<any>(null);
+  const [occtModule, setOcctModule] = useState<any>(null);
   
   useEffect(() => {
-    // Load WASM
-    // We explicitly locate the file using Vite's imported URL to prevent 404/MIME errors
+    // Load Manifold WASM
     Module({
         locateFile: ((path: string) => {
             if (path.endsWith('.wasm')) {
@@ -1004,6 +1217,19 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     }).then((m) => {
         m.setup();
         setManifoldModule(m);
+    });
+
+    // Load OCCT WASM
+    initOCCT({
+        locateFile: (name: string) => {
+            if (name.endsWith('.wasm')) {
+                return occtWasmUrl;
+            }
+            return name;
+        }
+    }).then((m: any) => {
+        console.log("OCCT Module initialized");
+        setOcctModule(m);
     });
   }, []);
 
@@ -1152,11 +1378,14 @@ useImperativeHandle(ref, () => ({
 
   }, [footprint, params, allFootprints]);
 
+  const flattenedMeshes = useMemo(() => flattenMeshes(footprint, allFootprints, params), [footprint, allFootprints, params]);
+
   return (
     <div style={{ width: "100%", height: "100%", background: "#111" }}>
       <Canvas 
         camera={{ position: [50, 50, 50], fov: 45 }}
         frameloop={is3DActive ? "always" : "never"}
+        onPointerMissed={() => onSelect && onSelect("")}
       >
         <ambientLight intensity={0.5} />
         <directionalLight position={[10, 20, 10]} intensity={1} />
@@ -1198,6 +1427,18 @@ useImperativeHandle(ref, () => ({
               return node;
             });
           })()}
+        </group>
+        
+        <group>
+            {flattenedMeshes.map((m, idx) => (
+                <MeshObject 
+                    key={m.mesh.id + idx} 
+                    meshData={m} 
+                    occtModule={occtModule} 
+                    isSelected={selectedId === m.mesh.id}
+                    onSelect={() => onSelect(m.mesh.id)}
+                />
+            ))}
         </group>
 
         <Grid 

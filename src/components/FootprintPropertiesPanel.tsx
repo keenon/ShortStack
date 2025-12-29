@@ -10,6 +10,7 @@ const FootprintPropertiesPanel = ({
   allFootprints,
   selectedId,
   updateShape,
+  updateMesh, // NEW
   updateFootprint,
   params,
   stackup,
@@ -18,6 +19,7 @@ const FootprintPropertiesPanel = ({
   allFootprints: Footprint[];
   selectedId: string | null;
   updateShape: (id: string, field: string, val: any) => void;
+  updateMesh: (id: string, field: string, val: any) => void; // NEW
   updateFootprint: (field: string, val: any) => void;
   params: Parameter[];
   stackup: StackupLayer[];
@@ -173,6 +175,64 @@ const FootprintPropertiesPanel = ({
                         }}>+ Add Point</button>
                 </div>
             </div>
+          </div>
+      );
+  }
+
+  // CHECK FOR MESH SELECTION
+  const mesh = footprint.meshes?.find(m => m.id === selectedId);
+  if (mesh) {
+      return (
+          <div className="properties-panel">
+              <h3>Mesh Properties</h3>
+              <div className="prop-group">
+                  <label>Name</label>
+                  <input type="text" value={mesh.name} onChange={(e) => updateMesh(mesh.id, "name", e.target.value)} />
+              </div>
+              
+              <div className="prop-group">
+                  <label>Rendering Type</label>
+                  <select 
+                      value={mesh.renderingType} 
+                      onChange={(e) => updateMesh(mesh.id, "renderingType", e.target.value)}
+                  >
+                      <option value="solid">Solid</option>
+                      <option value="wireframe">Wireframe</option>
+                      <option value="hidden">Hidden</option>
+                  </select>
+              </div>
+
+              <div className="prop-section">
+                  <h4>Position</h4>
+                  <div className="prop-group">
+                      <label>X (mm)</label>
+                      <ExpressionEditor value={mesh.x} onChange={(val) => updateMesh(mesh.id, "x", val)} params={params} placeholder="0" />
+                  </div>
+                  <div className="prop-group">
+                      <label>Y (mm)</label>
+                      <ExpressionEditor value={mesh.y} onChange={(val) => updateMesh(mesh.id, "y", val)} params={params} placeholder="0" />
+                  </div>
+                  <div className="prop-group">
+                      <label>Z (mm)</label>
+                      <ExpressionEditor value={mesh.z} onChange={(val) => updateMesh(mesh.id, "z", val)} params={params} placeholder="0" />
+                  </div>
+              </div>
+
+              <div className="prop-section">
+                  <h4>Rotation (Degrees)</h4>
+                  <div className="prop-group">
+                      <label>X Axis</label>
+                      <ExpressionEditor value={mesh.rotationX} onChange={(val) => updateMesh(mesh.id, "rotationX", val)} params={params} placeholder="0" />
+                  </div>
+                  <div className="prop-group">
+                      <label>Y Axis</label>
+                      <ExpressionEditor value={mesh.rotationY} onChange={(val) => updateMesh(mesh.id, "rotationY", val)} params={params} placeholder="0" />
+                  </div>
+                  <div className="prop-group">
+                      <label>Z Axis</label>
+                      <ExpressionEditor value={mesh.rotationZ} onChange={(val) => updateMesh(mesh.id, "rotationZ", val)} params={params} placeholder="0" />
+                  </div>
+              </div>
           </div>
       );
   }

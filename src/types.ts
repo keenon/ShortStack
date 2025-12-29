@@ -90,10 +90,28 @@ export interface FootprintReference extends BaseShape {
 
 export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide;
 
+export interface FootprintMesh {
+  id: string;
+  name: string;
+  content: string; // Base64 encoded file content
+  format: "stl" | "step";
+  renderingType: "solid" | "wireframe" | "hidden";
+  color?: string;
+  // Position
+  x: string; 
+  y: string; 
+  z: string;
+  // Rotation (Euler Angles in Degrees)
+  rotationX: string; 
+  rotationY: string; 
+  rotationZ: string;
+}
+
 export interface Footprint {
   id: string;
   name: string;
   shapes: FootprintShape[];
+  meshes?: FootprintMesh[]; // NEW: Meshes
   isBoard?: boolean;      // NEW: Marks if this footprint is a standalone board
   boardOutline?: Point[]; // NEW: Outline points if isBoard is true
 }
