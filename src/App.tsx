@@ -2,6 +2,9 @@
 import { useState, useEffect } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
+// UPDATER IMPORTS
+import { check, Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
 
 import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment } from "./types";
@@ -25,6 +28,60 @@ function App() {
   const [footprints, setFootprints] = useState<Footprint[]>([]);
   
   const [activeTab, setActiveTab] = useState<Tab>("stackup");
+
+  // --- UPDATER STATE ---
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "available" | "downloading" | "installing" | "ready">("idle");
+  const [downloadProgress, setDownloadProgress] = useState<number>(0);
+  const [downloadTotal, setDownloadTotal] = useState<number>(0);
+
+  // --- CHECK FOR UPDATES ---
+  useEffect(() => {
+    const checkForUpdates = async () => {
+      try {
+        const u = await check();
+        if (u?.available) {
+          setUpdate(u);
+          setUpdateStatus("available");
+        }
+      } catch (err) {
+        console.error("Failed to check for updates:", err);
+      }
+    };
+    checkForUpdates();
+  }, []);
+
+  // --- INSTALL UPDATE ---
+  async function installUpdate() {
+    if (!update) return;
+    setUpdateStatus("downloading");
+    try {
+      await update.downloadAndInstall((event) => {
+        switch (event.event) {
+          case 'Started':
+            setDownloadTotal(event.data.contentLength || 0);
+            setDownloadProgress(0);
+            break;
+          case 'Progress':
+            setDownloadProgress((prev) => prev + (event.data.chunkLength || 0));
+            break;
+          case 'Finished':
+            setUpdateStatus("installing");
+            break;
+        }
+      });
+      setUpdateStatus("ready");
+      
+      // Prompt user or relaunch immediately
+      if (confirm("Update installed. Relaunch now?")) {
+          await relaunch();
+      }
+    } catch (err) {
+      console.error("Update failed", err);
+      alert("Failed to install update. Check console for details.");
+      setUpdateStatus("available"); // Reset logic to try again
+    }
+  }
 
   // AUTO-SAVE
   useEffect(() => {
@@ -191,6 +248,37 @@ function App() {
     setFootprints([]);
   }
 
+  // --- UI BANNER ---
+  const updateBanner = update && updateStatus !== "idle" ? (
+    <div className="update-banner">
+      <div className="update-info">
+        <h3>Update Available: {update.version}</h3>
+        <p>{update.body ? (update.body.length > 100 ? update.body.substring(0, 100) + "..." : update.body) : "New version available."}</p>
+        
+        {updateStatus === "available" && (
+           <button onClick={installUpdate}>Install Now</button>
+        )}
+
+        {updateStatus === "downloading" && (
+           <div className="progress-container">
+             <div className="progress-bar">
+                <div 
+                    className="fill" 
+                    style={{ width: downloadTotal > 0 ? `${(downloadProgress / downloadTotal) * 100}%` : '0%' }} 
+                />
+             </div>
+             <span className="progress-text">
+                {downloadTotal > 0 ? Math.round((downloadProgress / downloadTotal) * 100) : 0}%
+             </span>
+           </div>
+        )}
+
+        {updateStatus === "installing" && <span>Installing update...</span>}
+        {updateStatus === "ready" && <span>Ready to relaunch!</span>}
+      </div>
+    </div>
+  ) : null;
+
   if (!currentPath) {
     return (
       <div className="container welcome-screen">
@@ -199,6 +287,7 @@ function App() {
           <button onClick={createProject}>Create New Project</button>
           <button onClick={loadProject}>Load Existing Project</button>
         </div>
+        {updateBanner}
       </div>
     );
   }
@@ -238,6 +327,8 @@ function App() {
           <ParametersEditor params={params} setParams={setParams} />
         </div>
       </main>
+
+      {updateBanner}
     </div>
   );
 }

@@ -31,5 +31,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+    "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/keenon/ShortStack/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcxNkM2NDBCMkM4OTBBRkIKUldUN0Nva3NDMlJzY2FLTnhrMlhZTkcydlUySWw4YnEwNWhNbFlRSndGLzJMalRLaXZHQ1pwNjAK"
+    }
   }
 }

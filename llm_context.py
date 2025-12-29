@@ -3,7 +3,7 @@ import sys
 import pyperclip
 
 # Directories to scan relative to the script location
-TARGET_DIRS = ["src", "src-tauri/src"]
+TARGET_DIRS = ["src", "src-tauri/src", ".github/workflows"]
 
 # Extensions to include (add or remove as needed)
 VALID_EXTENSIONS = {
