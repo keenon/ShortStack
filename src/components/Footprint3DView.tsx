@@ -1410,6 +1410,12 @@ useImperativeHandle(ref, () => ({
 
   const flattenedMeshes = useMemo(() => flattenMeshes(footprint, allFootprints, params), [footprint, allFootprints, params]);
 
+  const activeMeshIsEditable = useMemo(() => {
+      if (!selectedId) return false;
+      const flat = flattenedMeshes.find(m => m.selectableId === selectedId);
+      return flat ? flat.isEditable : false;
+  }, [selectedId, flattenedMeshes]);
+
   return (
     <div style={{ width: "100%", height: "100%", background: "#111" }}>
       <Canvas 
@@ -1483,9 +1489,11 @@ useImperativeHandle(ref, () => ({
           <GizmoViewport axisColors={['#9d4b4b', '#2f7f4f', '#3b5b9d']} labelColor="white" />
         </GizmoHelper>
       </Canvas>
-      <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.5)', pointerEvents: 'none', fontSize: '12px' }}>
-         Select Mesh: 'T' for Translate, 'R' for Rotate
-      </div>
+      {activeMeshIsEditable && (
+        <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.5)', pointerEvents: 'none', fontSize: '12px' }}>
+           Select Mesh: 'T' for Translate, 'R' for Rotate
+        </div>
+      )}
     </div>
   );
 });

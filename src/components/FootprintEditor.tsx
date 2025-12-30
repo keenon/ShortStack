@@ -214,13 +214,15 @@ const MeshListPanel = ({
     selectedId,
     onSelect,
     onDelete,
-    onRename
+    onRename,
+    updateMesh
 }: {
     meshes: FootprintMesh[];
     selectedId: string | null;
     onSelect: (id: string) => void;
     onDelete: (id: string) => void;
     onRename: (id: string, name: string) => void;
+    updateMesh: (id: string, field: string, val: any) => void;
 }) => {
     return (
         <div className="fp-left-subpanel">
@@ -229,18 +231,36 @@ const MeshListPanel = ({
                 {meshes.map(mesh => (
                     <div key={mesh.id}
                         className={`shape-item ${mesh.id === selectedId ? "selected" : ""}`}
+                        style={{ flexDirection: 'column', alignItems: 'flex-start' }}
                         onClick={() => onSelect(mesh.id)}
                     >
-                        <div style={{ marginRight: '8px', fontSize: '0.8em', color: '#888', textTransform: 'uppercase' }}>
-                            {mesh.format}
+                        <div style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
+                            <div style={{ marginRight: '8px', fontSize: '0.8em', color: '#888', textTransform: 'uppercase' }}>
+                                {mesh.format}
+                            </div>
+                            <input 
+                                type="text" 
+                                value={mesh.name} 
+                                onChange={(e) => onRename(mesh.id, e.target.value)} 
+                                className="shape-name-edit" 
+                                onClick={(e) => e.stopPropagation()}
+                            />
+                            <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(mesh.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
                         </div>
-                        <input 
-                            type="text" 
-                            value={mesh.name} 
-                            onChange={(e) => onRename(mesh.id, e.target.value)} 
-                            className="shape-name-edit" 
-                        />
-                        <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(mesh.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
+                        
+                        <div style={{ display: 'flex', width: '100%', marginTop: '5px' }}>
+                             <button
+                                className={`vis-toggle-btn ${mesh.renderingType !== "hidden" ? "visible" : ""}`}
+                                style={{ fontSize: '0.8em', padding: '2px 8px', width: '100%' }}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    const newType = mesh.renderingType === "hidden" ? "solid" : "hidden";
+                                    updateMesh(mesh.id, "renderingType", newType);
+                                }}
+                             >
+                                {mesh.renderingType === "hidden" ? "Show" : "Hide"}
+                             </button>
+                        </div>
                     </div>
                 ))}
                 {meshes.length === 0 && <div className="empty-state-small">Drag & Drop STL/OBJ/STEP files onto 3D view.</div>}
@@ -764,7 +784,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 selectedId={selectedShapeId}
                 onSelect={setSelectedShapeId}
                 onDelete={deleteMesh}
-                onRename={updateMesh}
+                onRename={(id, name) => updateMesh(id, "name", name)}
+                updateMesh={updateMesh}
             />
         </div>
 
