@@ -1,13 +1,12 @@
 // src/components/Footprint3DView.tsx
-// import React, { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, useCallback } from "react";
 import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from "@react-three/drei";
+import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls } from "@react-three/drei";
 import * as THREE from "three";
-import { STLLoader } from "three-stdlib";
+import { STLLoader, OBJLoader } from "three-stdlib";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference, FootprintMesh } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
-import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
+import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
 import Module from "manifold-3d";
 // @ts-ignore
 import wasmUrl from "manifold-3d/manifold.wasm?url";
@@ -28,6 +27,7 @@ interface Props {
   // NEW: Selection Props
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onUpdateMesh: (id: string, field: string, val: any) => void;
 }
 
 export interface Footprint3DViewHandle {
@@ -74,8 +74,6 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
       shape.lineTo(x, y + height);
       shape.lineTo(x, y);
   } else {
-        // Note to the future: These curve commands are tricky, and LLMs often swap the ordering around.
-        // Please double-check if modifying, especially around the quadraticCurveTo control points.
        shape.moveTo(x, y + r);
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
@@ -364,7 +362,6 @@ function flattenShapes(
 function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
     let points = shape.getPoints(resolution);
     
-    // FIXED: Cleanup duplicate end point if present (Manifold prefers implicit close)
     if (points.length > 1 && points[0].distanceTo(points[points.length-1]) < 0.001) {
         points.pop();
     }
@@ -380,9 +377,7 @@ function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
         return hPts.map(p => [p.x, p.y]);
     });
     
-    // Manifold expects [contour, hole, hole, ...] or [contour]
     const contours = [contour, ...holes];
-    // Use string literal "EvenOdd"
     return new wasm.CrossSection(contours, "EvenOdd");
 }
 
@@ -398,7 +393,6 @@ function generateProceduralFillet(
 ) {
     let minDimension = Infinity;
     
-    // Generates a contour at a specific inward offset
     const getContour = (offset: number): THREE.Vector2[] => {
         let rawPoints: THREE.Vector2[] = [];
         
@@ -450,7 +444,6 @@ function generateProceduralFillet(
             rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, contextFp, allFootprints);
         }
 
-        // --- FILTERING ---
         if (rawPoints.length > 0) {
             const clean: THREE.Vector2[] = [rawPoints[0]];
             for(let i=1; i<rawPoints.length; i++) {
@@ -462,16 +455,12 @@ function generateProceduralFillet(
                 clean.pop();
             }
             
-            // --- WINDING NORMALIZATION (The Fix) ---
-            // Calculate signed area to detect winding direction
             let area = 0;
             for (let i = 0; i < clean.length; i++) {
                 const j = (i + 1) % clean.length;
                 area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
             }
             
-            // If area is negative (Clockwise), reverse to make it Counter-Clockwise
-            // This ensures Lines (CW) match Circles/Rects (CCW)
             if (area < 0) {
                 clean.reverse();
             }
@@ -528,6 +517,10 @@ function generateProceduralFillet(
 
     if (!topologyValid) return null;
 
+    // Note for posterity: winding order is important in all the subsequent code.
+    // Please don't change it without checking the result visually.
+    // If you get failures in manifold status, changing this is likely the culprit.
+
     const getIdx = (layerIdx: number, ptIdx: number) => {
         return layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
     };
@@ -536,16 +529,11 @@ function generateProceduralFillet(
         rawIndices.push(i1, i2, i3);
     };
 
-    // A. Top Cap
-    // Standard winding for CCW input
     const topFaces = THREE.ShapeUtils.triangulateShape(baseProfile, []);
     topFaces.forEach(face => {
         pushTri(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2]));
     });
 
-    // B. Walls
-    // REVERTED to Standard Logic: (v1, v2, v4) + (v2, v3, v4)
-    // Since we forced inputs to be CCW, this logic (which worked for Circles) now works for Lines too.
     for(let l=0; l<layers.length-1; l++) {
         for(let i=0; i<vertsPerLayer; i++) {
             const curr = i;
@@ -560,8 +548,6 @@ function generateProceduralFillet(
         }
     }
 
-    // C. Bottom Cap
-    // Standard winding for CCW input
     const lastL = layers.length - 1;
     const botProfile = getContour(layers[lastL].offset);
     
@@ -583,7 +569,6 @@ function generateProceduralFillet(
         });
     }
 
-    // 2. Merge Vertices & Fix Indexing
     const PRECISION = 1e-5;
     const decimalShift = 1 / PRECISION;
     
@@ -620,7 +605,6 @@ function generateProceduralFillet(
 
         if (a === b || b === c || a === c) continue;
         
-        // Geometric area check
         const ax = uniqueVerts[a*3], ay = uniqueVerts[a*3+1], az = uniqueVerts[a*3+2];
         const bx = uniqueVerts[b*3], by = uniqueVerts[b*3+1], bz = uniqueVerts[b*3+2];
         const cx = uniqueVerts[c*3], cy = uniqueVerts[c*3+1], cz = uniqueVerts[c*3+2];
@@ -671,7 +655,6 @@ function generateProceduralFillet(
 // MESH PARSING
 // ------------------------------------------------------------------
 
-// Global cache to avoid re-parsing same base64 mesh
 const meshGeometryCache = new Map<string, THREE.BufferGeometry>();
 
 async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<THREE.BufferGeometry | null> {
@@ -689,20 +672,29 @@ async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<T
             const geometry = loader.parse(buffer);
             meshGeometryCache.set(cacheKey, geometry);
             return geometry;
+        } else if (mesh.format === "obj") {
+             const text = new TextDecoder().decode(buffer);
+             const loader = new OBJLoader();
+             const group = loader.parse(text);
+             const geometries: THREE.BufferGeometry[] = [];
+             group.traverse((child) => {
+                 if ((child as THREE.Mesh).isMesh) {
+                     geometries.push((child as THREE.Mesh).geometry);
+                 }
+             });
+             if (geometries.length > 0) {
+                 const merged = mergeBufferGeometries(geometries);
+                 meshGeometryCache.set(cacheKey, merged);
+                 return merged;
+             }
         } else if (mesh.format === "step") {
-            // FIX: Robust check for module
             if (!occtModule) {
                 console.error("OCCT Module not initialized.");
                 return null;
             }
-            
             try {
-                // Pass the buffer directly to ReadStepFile
-                // The library handles memory management for the buffer input
                 const result = occtModule.ReadStepFile(new Uint8Array(buffer), null);
-                
                 if (result && result.meshes && result.meshes.length > 0) {
-                    // Combine all sub-meshes
                     const geometries: THREE.BufferGeometry[] = [];
                     for(const m of result.meshes) {
                         const geom = new THREE.BufferGeometry();
@@ -738,9 +730,6 @@ async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<T
 // COMPONENTS
 // ------------------------------------------------------------------
 
-/**
- * Renders a single layer as a solid block with cuts subtracted (using manifold-3d).
- */
 const LayerSolid = ({
   layer,
   footprint,
@@ -771,12 +760,10 @@ const LayerSolid = ({
   const centerZ = boardShape ? 0 : (bounds.minY + bounds.maxY) / 2;
   const centerY = bottomZ + thickness / 2;
 
-  // Flatten shapes
   const flatShapes = useMemo(() => {
     return flattenShapes(footprint, footprint.shapes, allFootprints, params);
   }, [footprint, allFootprints, params]);
 
-  // Compute Geometry using Manifold
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [hasError, setHasError] = useState(false);
 
@@ -796,7 +783,6 @@ const LayerSolid = ({
         const { Manifold } = manifoldModule;
         const CSG_EPSILON = 0.01;
 
-        // 1. Create Base
         let base: any;
         if (boardShape) {
             const cs = collect(shapeToManifold(manifoldModule, boardShape));
@@ -804,18 +790,15 @@ const LayerSolid = ({
             const rotated = collect(ext.rotate([-90, 0, 0]));
             base = collect(rotated.translate([0, -thickness/2, 0]));
         } else {
-            // Box
             base = collect(Manifold.cube([width, thickness, depth], true));
         }
 
         const failedFillets: THREE.BufferGeometry[] = [];
 
-        // Sequential Processing (Painter's Algorithm)
         [...flatShapes].reverse().forEach((item) => {
             const shape = item.shape;
             if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;
 
-            // 1. Calculate Target Depth & Radius
             let actualDepth = thickness;
             let endmillRadius = 0;
 
@@ -831,7 +814,6 @@ const LayerSolid = ({
                 actualDepth = Math.max(0, Math.min(val, thickness));
             }
 
-            // SAFETY: Clamp radius to avoid self-intersection inside ExtrudeGeometry
             let safeRadius = endmillRadius;
             if (shape.type === "circle") {
                  const d = evaluateExpression((shape as any).diameter, params);
@@ -850,11 +832,9 @@ const LayerSolid = ({
             const hasRadius = safeRadius > 0.001;
             const shouldRound = isPartialCut && hasRadius;
 
-            // 2. Vertical Logic
             const throughHeight = thickness + 0.2; 
-            const throughY = 0; // Center
+            const throughY = 0; 
 
-            // If rounding is enabled, the "fill" part needs to account for the fillet
             let fillHeight = thickness - actualDepth;
             if (shouldRound) fillHeight += safeRadius;
 
@@ -866,12 +846,10 @@ const LayerSolid = ({
                     : (thickness / 2 - fillHeight / 2);
             }
 
-            // 3. Position Logic
             const localX = item.x - centerX;
             const localZ = centerZ - item.y;
-            const globalRot = item.rotation; // Degrees
+            const globalRot = item.rotation; 
 
-            // 4. Create Shape Functions
             const createTool = (extraOffset = 0, height: number) => {
                 let tool = null;
 
@@ -921,8 +899,6 @@ const LayerSolid = ({
                 return tool;
             };
 
-            // A. THROUGH CUT (The "Eraser")
-            // This removes material from previous shapes in this footprint
             const toolCut = createTool(0, throughHeight);
             if (toolCut) {
                 const moved = collect(toolCut.translate([localX, throughY, localZ]));
@@ -930,9 +906,7 @@ const LayerSolid = ({
                 base = diff;
             }
 
-            // B. FILL (Add material back)
             if (shouldFill) {
-                // Use epsilon for fill to ensure overlap
                 const toolFill = createTool(CSG_EPSILON, fillHeight);
                 if (toolFill) {
                     const moved = collect(toolFill.translate([localX, fillY, localZ]));
@@ -941,7 +915,6 @@ const LayerSolid = ({
                 }
             }
 
-            // C. ROUNDED CUT (FILLET)
             if (shouldRound) {
                 const result = generateProceduralFillet(
                     manifoldModule, 
@@ -963,7 +936,6 @@ const LayerSolid = ({
                         const topY = thickness / 2;
                         final = collect(r.translate([localX, topY, localZ]));
                     } else {
-                        // Bottom carve: Drill enters from bottom.
                         const flipped = collect(r.rotate([180, 0, 0]));
                         final = collect(flipped.translate([localX, -thickness/2, localZ]));
                     }
@@ -972,12 +944,10 @@ const LayerSolid = ({
                     base = diff;
 
                 } else if (result && result.vertProperties && result.triVerts) {
-                    // Failed to convert to manifold. Store for display (red wireframe).
                     const geom = new THREE.BufferGeometry();
                     geom.setAttribute('position', new THREE.BufferAttribute(result.vertProperties, 3));
                     geom.setIndex(new THREE.BufferAttribute(result.triVerts, 1));
                     
-                    // Apply transforms manually to match where it would have been
                     geom.rotateY(globalRot * (Math.PI / 180));
                     
                     if (layer.carveSide === "Top") {
@@ -999,7 +969,6 @@ const LayerSolid = ({
             return;
         }
 
-        // 6. Convert to Mesh
         const mesh = base.getMesh();
         const bufferGeom = new THREE.BufferGeometry();
         
@@ -1029,26 +998,14 @@ const LayerSolid = ({
         ref={(ref) => registerMesh && registerMesh(layer.id, ref)}
         geometry={geometry || undefined}
     >
-      {/* 
-          Main Solid Material 
-          - Logic updated: Always visible.
-          - On Error: Opaque red, FrontSide only (to catch inverted normals).
-          - Normal: Layer color, transparent.
-      */}
       <meshStandardMaterial 
           color={hasError ? "#ff6666" : layer.color} 
           transparent={!hasError} 
           opacity={hasError ? 1.0 : 0.9} 
           flatShading 
-          side={THREE.FrontSide} // Strict FrontSide helps identify flipped normals (backfaces won't render or will be dark)
+          side={THREE.FrontSide} 
           visible={true} 
       />
-
-      {/* 
-          Wireframe Overlay (Only on Error)
-          - Renders a slightly larger black/dark-red wireframe on top of the solid
-          - Helps visualize the topology/triangulation
-      */}
       {hasError && geometry && (
         <mesh geometry={geometry}>
           <meshBasicMaterial 
@@ -1067,21 +1024,21 @@ const LayerSolid = ({
 interface FlatMesh {
     mesh: FootprintMesh;
     globalTransform: THREE.Matrix4;
+    selectableId: string; // The ID to select when clicking (parent ref or self)
+    isEditable: boolean; // Only true if direct child of current footprint
 }
 
-// Recursive flattener for meshes
 function flattenMeshes(
     rootFp: Footprint, 
     allFootprints: Footprint[], 
     params: Parameter[],
-    transform = new THREE.Matrix4()
+    transform = new THREE.Matrix4(),
+    ancestorRefId: string | null = null
 ): FlatMesh[] {
     let result: FlatMesh[] = [];
 
-    // Add local meshes
     if (rootFp.meshes) {
         rootFp.meshes.forEach(m => {
-            // Apply local mesh transform to the accumulated footprint transform
             const x = evaluate(m.x, params);
             const y = evaluate(m.y, params);
             const z = evaluate(m.z, params);
@@ -1093,32 +1050,18 @@ function flattenMeshes(
             const rot = new THREE.Euler(rx, ry, rz, 'XYZ');
             meshMat.makeRotationFromEuler(rot);
             meshMat.setPosition(x, y, z); 
-            // NOTE: CAD view is Y-up in 3D?
-            // In Footprint editor 2D: X is right, Y is up (SVG style). 
-            // In 3D view: we usually map 2D (x, y) to 3D (x, -y, z=0) or (x, z, y=0).
-            // The LayerSolid uses `localZ = centerZ - item.y` implying Y in 2D maps to Z in 3D (inverted).
-            // And X maps to X.
-            // Let's standardise on the transform passed in.
-            
-            // However, Footprint3DView maps shapes with:
-            // X -> X
-            // Y -> -Z (approx)
-            // But here `m.x`, `m.y`, `m.z` are explicit 3D coordinates.
-            // So we just apply them relative to the footprint origin.
-            
-            // IMPORTANT: The footprint recursion transform is in "2D plane logic".
-            // We need to convert that to 3D logic.
-            // But `flattenShapes` calculates `globalX` and `globalY`. 
-            
-            // Let's assume standard 3D logic for the mesh properties relative to parent.
-            // The `transform` passed in is the GLOBAL transform of the parent footprint in 3D space.
             
             const finalMat = transform.clone().multiply(meshMat);
-            result.push({ mesh: m, globalTransform: finalMat });
+            
+            result.push({ 
+                mesh: m, 
+                globalTransform: finalMat,
+                selectableId: ancestorRefId || m.id,
+                isEditable: ancestorRefId === null
+            });
         });
     }
 
-    // Recurse children
     rootFp.shapes.forEach(s => {
         if (s.type === "footprint") {
              const ref = s as FootprintReference;
@@ -1128,17 +1071,19 @@ function flattenMeshes(
                  const y = evaluate(ref.y, params);
                  const angle = evaluate(ref.angle, params);
                  
-                 // Create transform for child footprint relative to current
-                 // 2D (x, y) maps to 3D (x, 0, -y) typically in this view setup
-                 // Rotation is around Y axis in 3D (since Z is depth in 2D)
-                 
                  const childMat = new THREE.Matrix4();
                  childMat.makeRotationY(angle * Math.PI / 180);
                  childMat.setPosition(x, 0, -y);
                  
                  const globalChildMat = transform.clone().multiply(childMat);
                  
-                 result = result.concat(flattenMeshes(child, allFootprints, params, globalChildMat));
+                 result = result.concat(flattenMeshes(
+                     child, 
+                     allFootprints, 
+                     params, 
+                     globalChildMat,
+                     ancestorRefId || ref.id // Pass the top-most reference ID down
+                 ));
              }
         }
     });
@@ -1150,15 +1095,19 @@ const MeshObject = ({
     meshData, 
     occtModule,
     isSelected,
-    onSelect
+    onSelect,
+    onUpdate
 }: { 
     meshData: FlatMesh, 
     occtModule: any,
     isSelected: boolean,
-    onSelect: () => void
+    onSelect: () => void,
+    onUpdate: (id: string, field: string, val: any) => void
 }) => {
-    const { mesh, globalTransform } = meshData;
+    const { mesh, globalTransform, isEditable } = meshData;
     const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
+    const meshRef = useRef<THREE.Mesh>(null);
+    const controlRef = useRef<any>(null);
 
     useEffect(() => {
         let mounted = true;
@@ -1168,47 +1117,140 @@ const MeshObject = ({
         return () => { mounted = false; };
     }, [mesh, occtModule]);
 
+    // Handle Transform Changes
+    const handleTransformEnd = () => {
+        if (!meshRef.current) return;
+        
+        const newPos = meshRef.current.position;
+        const newRot = meshRef.current.rotation;
+
+        // Calculate Deltas from original mesh state (as TransformControls modifies the object directly)
+        // Original values are in globalTransform, but `meshRef` started there.
+        // Wait, TransformControls modifies the ref. React props are stale.
+        // We need to compare against what the props say (which is current expression value).
+        // Since we want `modifyExpression` to work with deltas, we calculate delta from where it *was* before drag.
+        
+        // HOWEVER, `globalTransform` puts it in world space.
+        // If the mesh is Editable (direct child), `globalTransform` is just the mesh transform (assuming identity parent).
+        // BUT `Footprint3DView` places everything inside a root group, so transforms are relative to 0,0,0 of that view.
+        
+        if (isEditable) {
+            // Retrieve current numeric values from expressions to diff against
+            // Note: `meshData.globalTransform` holds the computed values.
+            const p = new THREE.Vector3();
+            const q = new THREE.Quaternion();
+            const s = new THREE.Vector3();
+            globalTransform.decompose(p, q, s);
+            const originalEuler = new THREE.Euler().setFromQuaternion(q);
+
+            const dx = newPos.x - p.x;
+            const dy = newPos.y - p.y;
+            const dz = newPos.z - p.z;
+            
+            const dRx = (newRot.x - originalEuler.x) * (180 / Math.PI);
+            const dRy = (newRot.y - originalEuler.y) * (180 / Math.PI);
+            const dRz = (newRot.z - originalEuler.z) * (180 / Math.PI);
+            
+            if (Math.abs(dx) > 1e-4) onUpdate(mesh.id, "x", modifyExpression(mesh.x, dx));
+            if (Math.abs(dy) > 1e-4) onUpdate(mesh.id, "y", modifyExpression(mesh.y, dy));
+            if (Math.abs(dz) > 1e-4) onUpdate(mesh.id, "z", modifyExpression(mesh.z, dz));
+            
+            if (Math.abs(dRx) > 1e-4) onUpdate(mesh.id, "rotationX", modifyExpression(mesh.rotationX, dRx));
+            if (Math.abs(dRy) > 1e-4) onUpdate(mesh.id, "rotationY", modifyExpression(mesh.rotationY, dRy));
+            if (Math.abs(dRz) > 1e-4) onUpdate(mesh.id, "rotationZ", modifyExpression(mesh.rotationZ, dRz));
+        }
+    };
+
     if (!geometry || mesh.renderingType === "hidden") return null;
 
     const color = isSelected ? "#646cff" : (mesh.color || "#ccc");
     const emissive = isSelected ? "#3333aa" : "#000000";
 
     return (
-        <mesh 
-            geometry={geometry} 
-            matrix={globalTransform}
-            matrixAutoUpdate={false} // Use the matrix we computed
-            onClick={(e) => {
-                e.stopPropagation();
-                onSelect();
-            }}
-        >
-            {mesh.renderingType === "wireframe" ? (
-                <meshBasicMaterial color={color} wireframe />
-            ) : (
-                <meshStandardMaterial 
-                    color={color} 
-                    emissive={emissive} 
-                    emissiveIntensity={0.2}
+        <>
+            <mesh 
+                ref={meshRef}
+                geometry={geometry} 
+                // We apply matrix manually because TransformControls needs to read/write properties.
+                // Using `matrix` prop with `matrixAutoUpdate={false}` makes it hard for TransformControls.
+                // Instead, decompose and set props.
+                position={new THREE.Vector3().setFromMatrixPosition(globalTransform)}
+                quaternion={new THREE.Quaternion().setFromRotationMatrix(globalTransform)}
+                scale={new THREE.Vector3().setFromMatrixScale(globalTransform)}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onSelect();
+                }}
+            >
+                {mesh.renderingType === "wireframe" ? (
+                    <meshBasicMaterial color={color} wireframe />
+                ) : (
+                    <meshStandardMaterial 
+                        color={color} 
+                        emissive={emissive} 
+                        emissiveIntensity={0.2}
+                    />
+                )}
+            </mesh>
+            
+            {isSelected && isEditable && (
+                <TransformControls 
+                    ref={controlRef}
+                    object={meshRef} 
+                    mode="translate" // Can switch to rotate with a UI toggle if desired, defaulted to translate or combined?
+                    // TransformControls in drei supports mode switching? No, usually one mode.
+                    // For now, let's allow translating. Adding rotation handles might require UI state.
+                    // Or we can use GizmoHelper to switch? Simplest is just Translate for now as per "dragging".
+                    // But prompt says "dragging and rotating".
+                    // We can render two controls or toggle. Let's assume Translate for now, or check modifier keys.
+                    // Standard Three behavior: Pressing 'R' toggles? Not built-in.
+                    // We will just enable both translation and rotation via standard gizmo if possible?
+                    // TransformControls usually shows arrows.
+                    onMouseUp={handleTransformEnd}
                 />
             )}
-        </mesh>
+            
+            {/* Separate Rotation Controls if selected? Or let user switch in UI? 
+                For this implementation, let's overlay Rotation controls if the user holds Shift? 
+                Or simply display both? TransformControls doesn't support both simultaneously well.
+                Let's stick to Translation as primary "Drag", and Rotation via side panel, 
+                UNLESS we add a mode toggle. 
+                
+                Actually, let's check modifier keys in the view to toggle mode.
+            */}
+            {isSelected && isEditable && (
+                <TransformControlsModeSwitcher controlRef={controlRef} />
+            )}
+        </>
     );
 };
 
+// Helper to switch modes
+const TransformControlsModeSwitcher = ({ controlRef }: { controlRef: any }) => {
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (controlRef.current) {
+                if (e.key === 'r') controlRef.current.setMode('rotate');
+                if (e.key === 't') controlRef.current.setMode('translate');
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [controlRef]);
+    return null;
+};
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive, selectedId, onSelect }, ref) => {
+
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
   const hasInitiallySnapped = useRef(false);
   const [firstMeshReady, setFirstMeshReady] = useState(false);
   
-  // Initialize Manifold and OCCT
   const [manifoldModule, setManifoldModule] = useState<any>(null);
   const [occtModule, setOcctModule] = useState<any>(null);
   
   useEffect(() => {
-    // Load Manifold WASM
     Module({
         locateFile: ((path: string) => {
             if (path.endsWith('.wasm')) {
@@ -1221,7 +1263,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         setManifoldModule(m);
     });
 
-    // Load OCCT WASM
     initOCCT({
         locateFile: (name: string) => {
             if (name.endsWith('.wasm')) {
@@ -1243,7 +1284,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     const box = new THREE.Box3();
     let hasMeshes = false;
 
-    // Iterate through all visible meshes to compute the total bounding box
     Object.values(meshRefs.current).forEach((mesh) => {
         if (mesh && mesh.geometry) {
             mesh.updateMatrixWorld();
@@ -1256,7 +1296,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     });
 
     if (!hasMeshes) {
-        // Default fallback if no meshes are visible
         camera.position.set(50, 50, 50);
         controls.target.set(0, 0, 0);
         controls.update();
@@ -1268,21 +1307,15 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     const size = new THREE.Vector3();
     box.getSize(size);
 
-    // Calculate the required distance to fit the bounding box in the camera's FOV
     const maxDim = Math.max(size.x, size.y, size.z);
     const fov = camera.fov * (Math.PI / 180);
-    
-    // Take aspect ratio into account for wide bounding boxes
     const aspect = camera.aspect || 1;
     const fovH = 2 * Math.atan(Math.tan(fov / 2) * aspect);
     const effectiveFOV = Math.min(fov, fovH);
     
     let distance = maxDim / (2 * Math.tan(effectiveFOV / 2));
-    
-    // Add 30% margin for "comfortable" framing
     distance *= 1.3;
 
-    // Position camera at a standard isometric-ish angle relative to the center
     const direction = new THREE.Vector3(1, 1, 1).normalize();
     camera.position.copy(center).add(direction.multiplyScalar(distance));
     
@@ -1290,7 +1323,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     controls.update();
   }, []);
 
-  // Snap to home the first time computing the mesh finishes
   useEffect(() => {
     if (firstMeshReady && !hasInitiallySnapped.current && is3DActive) {
         fitToHome();
@@ -1304,18 +1336,13 @@ useImperativeHandle(ref, () => ({
         const mesh = meshRefs.current[layerId];
         if (!mesh || !mesh.geometry) return null;
 
-        // 1. Clone the geometry
         let geom = mesh.geometry.clone();
-
-        // 2. Apply transform
         mesh.updateMatrixWorld();
         geom.applyMatrix4(mesh.matrixWorld);
 
-        // 3. Clean
         geom.deleteAttribute('uv');
         geom.deleteAttribute('normal');
 
-        // 4. Merge
         try {
             geom = mergeVertices(geom, 1e-4);
         } catch (e) {
@@ -1337,7 +1364,6 @@ useImperativeHandle(ref, () => ({
       return null;
   }, [footprint, params, allFootprints]);
 
-  // 1. Calculate Bounding Box of all shapes (or board outline) + Padding
   const bounds = useMemo(() => {
     const PADDING = 10;
     
@@ -1355,7 +1381,6 @@ useImperativeHandle(ref, () => ({
         return { minX: minX - PADDING, maxX: maxX + PADDING, minY: minY - PADDING, maxY: maxY + PADDING };
     }
 
-    // Basic bounds of root shapes
     if (!footprint.shapes || footprint.shapes.length === 0) {
         return { minX: -PADDING, maxX: PADDING, minY: -PADDING, maxY: PADDING };
     }
@@ -1395,7 +1420,7 @@ useImperativeHandle(ref, () => ({
 
         <group>
           {(() => {
-            let currentZ = 0; // This tracks height (Y in 3D)
+            let currentZ = 0; 
             return [...stackup].reverse().map((layer) => {
               const thickness = evaluateExpression(layer.thicknessExpression, params);
               
@@ -1416,7 +1441,6 @@ useImperativeHandle(ref, () => ({
                   registerMesh={(id, mesh) => { 
                       if (mesh) {
                         meshRefs.current[id] = mesh; 
-                        // Once geometry is set, indicate we have something to snap to
                         if (mesh.geometry) setFirstMeshReady(true);
                       } else {
                         delete meshRefs.current[id]; 
@@ -1437,8 +1461,9 @@ useImperativeHandle(ref, () => ({
                     key={m.mesh.id + idx} 
                     meshData={m} 
                     occtModule={occtModule} 
-                    isSelected={selectedId === m.mesh.id}
-                    onSelect={() => onSelect(m.mesh.id)}
+                    isSelected={selectedId === m.selectableId}
+                    onSelect={() => onSelect(m.selectableId)}
+                    onUpdate={onUpdateMesh}
                 />
             ))}
         </group>
@@ -1455,35 +1480,29 @@ useImperativeHandle(ref, () => ({
           <GizmoViewport axisColors={['#9d4b4b', '#2f7f4f', '#3b5b9d']} labelColor="white" />
         </GizmoHelper>
       </Canvas>
+      <div style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.5)', pointerEvents: 'none', fontSize: '12px' }}>
+         Select Mesh: 'T' for Translate, 'R' for Rotate
+      </div>
     </div>
   );
 });
 
-// Helper to generate Binary STL from Three.js BufferGeometry
-// Duplicated from Layout3DView to avoid dependency issues
 function geometryToSTL(geometry: THREE.BufferGeometry): Uint8Array {
-    // Ensure non-indexed geometry for simplicity
     const geom = geometry.toNonIndexed();
     const pos = geom.getAttribute('position');
-    const count = pos.count; // Number of vertices
+    const count = pos.count;
     const triangleCount = Math.floor(count / 3);
 
-    // Binary STL Header: 80 bytes (Header) + 4 bytes (Count) + 50 bytes per triangle
     const bufferLen = 80 + 4 + (50 * triangleCount);
     const buffer = new ArrayBuffer(bufferLen);
     const view = new DataView(buffer);
 
-    // Header (80 bytes) - leaving zeroed or add text
-    // ...
-
-    // Triangle Count (4 bytes, little endian)
     view.setUint32(80, triangleCount, true);
 
     let offset = 84;
     for (let i = 0; i < triangleCount; i++) {
         const i3 = i * 3;
 
-        // Vertices
         const ax = pos.getX(i3);
         const ay = pos.getY(i3);
         const az = pos.getZ(i3);
@@ -1496,7 +1515,6 @@ function geometryToSTL(geometry: THREE.BufferGeometry): Uint8Array {
         const cy = pos.getY(i3 + 2);
         const cz = pos.getZ(i3 + 2);
 
-        // Calculate Normal (Cross product)
         const ux = bx - ax;
         const uy = by - ay;
         const uz = bz - az;
@@ -1509,42 +1527,35 @@ function geometryToSTL(geometry: THREE.BufferGeometry): Uint8Array {
         let ny = uz * vx - ux * vz;
         let nz = ux * vy - uy * vx;
 
-        // Normalize
         const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
         if (len > 0) {
             nx /= len; ny /= len; nz /= len;
         }
 
-        // Write Normal (12 bytes)
         view.setFloat32(offset, nx, true);
         view.setFloat32(offset + 4, ny, true);
         view.setFloat32(offset + 8, nz, true);
         offset += 12;
 
-        // Write Vertex 1 (12 bytes)
         view.setFloat32(offset, ax, true);
         view.setFloat32(offset + 4, ay, true);
         view.setFloat32(offset + 8, az, true);
         offset += 12;
 
-        // Write Vertex 2 (12 bytes)
         view.setFloat32(offset, bx, true);
         view.setFloat32(offset + 4, by, true);
         view.setFloat32(offset + 8, bz, true);
         offset += 12;
 
-        // Write Vertex 3 (12 bytes)
         view.setFloat32(offset, cx, true);
         view.setFloat32(offset + 4, cy, true);
         view.setFloat32(offset + 8, cz, true);
         offset += 12;
 
-        // Attribute Byte Count (2 bytes)
         view.setUint16(offset, 0, true);
         offset += 2;
     }
 
-    // Clean up temporary geometry if created
     if (geom !== geometry) {
         geom.dispose();
     }

@@ -243,7 +243,7 @@ const MeshListPanel = ({
                         <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(mesh.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
                     </div>
                 ))}
-                {meshes.length === 0 && <div className="empty-state-small">Drag & Drop STL/STEP files onto 3D view.</div>}
+                {meshes.length === 0 && <div className="empty-state-small">Drag & Drop STL/OBJ/STEP files onto 3D view.</div>}
             </div>
         </div>
     );
@@ -560,7 +560,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
           Array.from(e.dataTransfer.files).forEach(file => {
               const ext = file.name.split('.').pop()?.toLowerCase();
               console.log("Processing file", file.name, ext);
-              if (ext === "stl" || ext === "step" || ext === "stp") {
+              if (ext === "stl" || ext === "step" || ext === "stp" || ext === "obj") {
                   const reader = new FileReader();
                   console.log("Reading file", file.name);
                   reader.onload = () => {
@@ -570,7 +570,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                               id: crypto.randomUUID(),
                               name: file.name,
                               content: base64,
-                              format: ext === "stl" ? "stl" : "step",
+                              format: ext === "stl" ? "stl" : (ext === "obj" ? "obj" : "step"),
                               x: "0", y: "0", z: "0",
                               rotationX: "0", rotationY: "0", rotationZ: "0",
                               renderingType: "solid"
@@ -848,6 +848,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                     is3DActive={viewMode === "3D"} 
                     selectedId={selectedShapeId}
                     onSelect={setSelectedShapeId}
+                    onUpdateMesh={updateMesh} // Passed to allow Gizmo updates
                 />
             </div>
             </div>
