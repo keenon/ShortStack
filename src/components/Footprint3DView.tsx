@@ -3,7 +3,7 @@ import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, 
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls } from "@react-three/drei";
 import * as THREE from "three";
-import { STLLoader, OBJLoader } from "three-stdlib";
+import { STLLoader, OBJLoader, GLTFLoader, GLTFExporter } from "three-stdlib";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference, FootprintMesh } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
 import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
@@ -33,6 +33,7 @@ interface Props {
 export interface Footprint3DViewHandle {
     resetCamera: () => void;
     getLayerSTL: (layerId: string) => Uint8Array | null;
+    processDroppedFile: (file: File) => Promise<FootprintMesh | null>;
 }
 
 // ------------------------------------------------------------------
@@ -51,6 +52,16 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
         bytes[i] = binary_string.charCodeAt(i);
     }
     return bytes.buffer;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
 }
 
 // ------------------------------------------------------------------
@@ -710,6 +721,28 @@ async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<T
                 console.error("Error reading STEP file via OCCT:", err);
                 return null;
             }
+        } else if (mesh.format === "glb") {
+            const loader = new GLTFLoader();
+            return new Promise((resolve) => {
+                loader.parse(buffer, '', (gltf) => {
+                    const geometries: THREE.BufferGeometry[] = [];
+                    gltf.scene.traverse((child) => {
+                        if ((child as THREE.Mesh).isMesh) {
+                            geometries.push((child as THREE.Mesh).geometry);
+                        }
+                    });
+                    if (geometries.length > 0) {
+                        const merged = mergeBufferGeometries(geometries);
+                        meshGeometryCache.set(cacheKey, merged);
+                        resolve(merged);
+                    } else {
+                        resolve(null);
+                    }
+                }, (err) => {
+                    console.error("GLB Parse error", err);
+                    resolve(null);
+                });
+            });
         }
     } catch (e) {
         console.error("Failed to load mesh", e);
@@ -1329,6 +1362,71 @@ useImperativeHandle(ref, () => ({
         geom.dispose();
         
         return data;
+    },
+    processDroppedFile: async (file: File): Promise<FootprintMesh | null> => {
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        if (!ext) return null;
+        
+        // Read file content
+        const buffer = await file.arrayBuffer();
+        
+        // Construct temporary mesh object for loader reuse
+        const tempMesh: FootprintMesh = {
+            id: "temp",
+            name: file.name,
+            content: arrayBufferToBase64(buffer),
+            format: (ext === "stp" || ext === "step") ? "step" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "stl")),
+            renderingType: "solid",
+            x: "0", y: "0", z: "0",
+            rotationX: "0", rotationY: "0", rotationZ: "0"
+        };
+        
+        // If it's already GLB/GLTF, return as is
+        if (tempMesh.format === "glb") {
+            return { ...tempMesh, id: crypto.randomUUID() };
+        }
+
+        // Otherwise load and convert
+        const geometry = await loadMeshGeometry(tempMesh, occtModule);
+        if (!geometry) {
+            if (tempMesh.format === "step" && !occtModule) {
+                alert("3D Engine is initializing, please wait a moment and try again.");
+            }
+            return null;
+        }
+
+        // Convert to GLB
+        const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
+        const exporter = new GLTFExporter();
+        
+        return new Promise((resolve) => {
+            exporter.parse(
+                mesh,
+                (result) => {
+                    if (result instanceof ArrayBuffer) {
+                        const glbBase64 = arrayBufferToBase64(result);
+                        resolve({
+                            id: crypto.randomUUID(),
+                            name: file.name,
+                            content: glbBase64,
+                            format: "glb",
+                            renderingType: "solid",
+                            x: "0", y: "0", z: "0",
+                            rotationX: "0", rotationY: "0", rotationZ: "0"
+                        });
+                    } else {
+                        // Should not happen with binary: true
+                        console.error("GLTFExporter returned JSON instead of binary");
+                        resolve(null);
+                    }
+                },
+                (err) => {
+                    console.error("GLTF Export failed", err);
+                    resolve(null);
+                },
+                { binary: true }
+            );
+        });
     }
   }));
 

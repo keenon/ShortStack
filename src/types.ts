@@ -94,7 +94,7 @@ export interface FootprintMesh {
   id: string;
   name: string;
   content: string; // Base64 encoded file content
-  format: "stl" | "step" | "obj";
+  format: "stl" | "step" | "obj" | "glb";
   renderingType: "solid" | "wireframe" | "hidden";
   color?: string;
   // Position

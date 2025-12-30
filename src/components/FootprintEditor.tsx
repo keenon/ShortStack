@@ -579,27 +579,35 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
           Array.from(e.dataTransfer.files).forEach(file => {
               const ext = file.name.split('.').pop()?.toLowerCase();
-              console.log("Processing file", file.name, ext);
-              if (ext === "stl" || ext === "step" || ext === "stp" || ext === "obj") {
-                  const reader = new FileReader();
-                  console.log("Reading file", file.name);
-                  reader.onload = () => {
-                      if (reader.result instanceof ArrayBuffer) {
-                          const base64 = arrayBufferToBase64(reader.result);
-                          const newMesh: FootprintMesh = {
-                              id: crypto.randomUUID(),
-                              name: file.name,
-                              content: base64,
-                              format: ext === "stl" ? "stl" : (ext === "obj" ? "obj" : "step"),
-                              x: "0", y: "0", z: "0",
-                              rotationX: "0", rotationY: "0", rotationZ: "0",
-                              renderingType: "solid"
-                          };
-                          onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), newMesh] });
-                          setSelectedShapeId(newMesh.id);
-                      }
-                  };
-                  reader.readAsArrayBuffer(file);
+              if (ext === "stl" || ext === "step" || ext === "stp" || ext === "obj" || ext === "glb" || ext === "gltf") {
+                  if (footprint3DRef.current) {
+                      footprint3DRef.current.processDroppedFile(file).then(newMesh => {
+                          if (newMesh) {
+                              onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), newMesh] });
+                              setSelectedShapeId(newMesh.id);
+                          }
+                      });
+                  } else {
+                      // Fallback for 2D mode or uninitialized 3D view: Load raw as before
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                          if (reader.result instanceof ArrayBuffer) {
+                              const base64 = arrayBufferToBase64(reader.result);
+                              const newMesh: FootprintMesh = {
+                                  id: crypto.randomUUID(),
+                                  name: file.name,
+                                  content: base64,
+                                  format: (ext === "stl" ? "stl" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "step"))),
+                                  x: "0", y: "0", z: "0",
+                                  rotationX: "0", rotationY: "0", rotationZ: "0",
+                                  renderingType: "solid"
+                              };
+                              onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), newMesh] });
+                              setSelectedShapeId(newMesh.id);
+                          }
+                      };
+                      reader.readAsArrayBuffer(file);
+                  }
               }
           });
       }
