@@ -1,7 +1,13 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintCircle, FootprintLine } from "../types";
 import { evaluateExpression, interpolateColor, resolvePoint } from "../utils/footprintUtils";
+
+// Helper for Cubic Bezier evaluation at t (1D)
+function bezier1D(p0: number, p1: number, p2: number, p3: number, t: number): number {
+    const mt = 1 - t;
+    return (mt * mt * mt * p0) + (3 * mt * mt * t * p1) + (3 * mt * t * t * p2) + (t * t * t * p3);
+}
 
 // RECURSIVE SHAPE RENDERER
 export const RecursiveShapeRenderer = ({
@@ -16,6 +22,11 @@ export const RecursiveShapeRenderer = ({
   handleRadius,
   rootFootprint, // NEW: Context for point resolution
   layerVisibility,
+  hoveredPointIndex, // NEW
+  setHoveredPointIndex, // NEW
+  hoveredMidpointIndex, // NEW
+  setHoveredMidpointIndex, // NEW
+  onAddMidpoint, // NEW
 }: {
   shape: FootprintShape;
   allFootprints: Footprint[];
@@ -28,6 +39,11 @@ export const RecursiveShapeRenderer = ({
   handleRadius: number;
   rootFootprint: Footprint; // NEW
   layerVisibility: Record<string, boolean>;
+  hoveredPointIndex?: number | null;
+  setHoveredPointIndex?: (index: number | null) => void;
+  hoveredMidpointIndex?: number | null;
+  setHoveredMidpointIndex?: (index: number | null) => void;
+  onAddMidpoint?: (shapeId: string, index: number) => void;
 }) => {
   // --- BOARD OUTLINE RENDERER ---
   if (shape.type === "boardOutline") {
@@ -41,6 +57,11 @@ export const RecursiveShapeRenderer = ({
               handleRadius={handleRadius}
               rootFootprint={rootFootprint}
               allFootprints={allFootprints}
+              hoveredPointIndex={hoveredPointIndex}
+              setHoveredPointIndex={setHoveredPointIndex}
+              hoveredMidpointIndex={hoveredMidpointIndex}
+              setHoveredMidpointIndex={setHoveredMidpointIndex}
+              onAddMidpoint={onAddMidpoint}
           />
       );
   }
@@ -257,6 +278,8 @@ export const RecursiveShapeRenderer = ({
         });
 
         let d = "";
+        const midPoints = []; // Store calculated midpoints for + buttons
+        
         if (pts.length > 0) {
             d = `M ${pts[0].x} ${-pts[0].y}`;
             for (let i = 0; i < pts.length - 1; i++) {
@@ -268,6 +291,19 @@ export const RecursiveShapeRenderer = ({
                 const cp1y = -(curr.y + (curr.hOut?.y || 0)); // SVG Y is inverted
                 const cp2x = next.x + (next.hIn?.x || 0);
                 const cp2y = -(next.y + (next.hIn?.y || 0));
+
+                // Calculate visual midpoint for "+" button
+                // If handles exist, use t=0.5 on cubic bezier. 
+                // CRITICAL: Calculate in Cartesian coordinates first, then invert Y for rendering.
+                if (curr.hOut || next.hIn) {
+                    const midX = bezier1D(curr.x, curr.x + (curr.hOut?.x || 0), next.x + (next.hIn?.x || 0), next.x, 0.5);
+                    const midY = bezier1D(curr.y, curr.y + (curr.hOut?.y || 0), next.y + (next.hIn?.y || 0), next.y, 0.5);
+                    // Render at (midX, -midY)
+                    midPoints.push({ index: i, x: midX, y: -midY });
+                } else {
+                    // Simple average
+                    midPoints.push({ index: i, x: (curr.x + next.x) / 2, y: -(curr.y + next.y) / 2 });
+                }
                 
                 d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${next.x} ${-next.y}`;
             }
@@ -278,19 +314,24 @@ export const RecursiveShapeRenderer = ({
           const elements = [];
           
           // Anchor Point: Green if snapped to a guide
-          const anchorFill = pt.isSnapped ? "#00ff00" : "#fff";
+          // NEW: Check hover state
+          const isHovered = hoveredPointIndex === idx;
+          const anchorFill = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
+          const anchorRadius = isHovered ? handleRadius * 1.3 : handleRadius;
 
           elements.push(
               <circle 
                   key={`anchor-${idx}`}
                   cx={pt.x} cy={-pt.y} 
-                  r={handleRadius} // Use scaled radius
+                  r={anchorRadius} 
                   fill={anchorFill} stroke="#646cff" strokeWidth={1}
                   vectorEffect="non-scaling-stroke"
                   onMouseDown={(e) => {
                       e.stopPropagation();
                       onMouseDown(e, shape.id, idx);
                   }}
+                  onMouseEnter={() => setHoveredPointIndex && setHoveredPointIndex(idx)}
+                  onMouseLeave={() => setHoveredPointIndex && setHoveredPointIndex(null)}
               />
           );
 
@@ -319,6 +360,29 @@ export const RecursiveShapeRenderer = ({
           return elements;
       }) : null;
 
+      // NEW: Render Midpoint Buttons
+      const midButtons = isSelected ? midPoints.map(m => {
+          const isHovered = hoveredMidpointIndex === m.index;
+          const bgFill = isHovered ? "#ffaa00" : "#333";
+          const strokeColor = isHovered ? "#fff" : "#666";
+          const plusColor = isHovered ? "#000" : "white";
+          const r = handleRadius * (isHovered ? 1.0 : 0.8); // Increased baseline size
+
+          return (
+            <g 
+                key={`mid-${m.index}`} 
+                style={{ cursor: "pointer" }}
+                onClick={(e) => { e.stopPropagation(); onAddMidpoint && onAddMidpoint(shape.id, m.index); }}
+                onMouseEnter={() => setHoveredMidpointIndex && setHoveredMidpointIndex(m.index)}
+                onMouseLeave={() => setHoveredMidpointIndex && setHoveredMidpointIndex(null)}
+            >
+                <circle cx={m.x} cy={m.y} r={r} fill={bgFill} stroke={strokeColor} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+                <line x1={m.x - r * 0.5} y1={m.y} x2={m.x + r * 0.5} y2={m.y} stroke={plusColor} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                <line x1={m.x} y1={m.y - r * 0.5} x2={m.x} y2={m.y + r * 0.5} stroke={plusColor} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+            </g>
+          );
+      }) : null;
+
       return (
           <g>
             <path 
@@ -332,6 +396,7 @@ export const RecursiveShapeRenderer = ({
                 style={{ ...commonProps.style, opacity: isSelected ? 1 : 0.8 }}
             />
             {handles}
+            {midButtons}
           </g>
       );
   }
@@ -349,6 +414,11 @@ export const BoardOutlineRenderer = ({
   handleRadius,
   rootFootprint,
   allFootprints,
+  hoveredPointIndex, // NEW
+  setHoveredPointIndex, // NEW
+  hoveredMidpointIndex, // NEW
+  setHoveredMidpointIndex, // NEW
+  onAddMidpoint, // NEW
 }: {
   shape: FootprintBoardOutline;
   isSelected: boolean;
@@ -358,6 +428,11 @@ export const BoardOutlineRenderer = ({
   handleRadius: number;
   rootFootprint: Footprint;
   allFootprints: Footprint[];
+  hoveredPointIndex?: number | null;
+  setHoveredPointIndex?: (index: number | null) => void;
+  hoveredMidpointIndex?: number | null;
+  setHoveredMidpointIndex?: (index: number | null) => void;
+  onAddMidpoint?: (shapeId: string, index: number) => void;
 }) => {
     const points = shape.points;
     const stroke = isSelected ? "#646cff" : "#555";
@@ -379,6 +454,8 @@ export const BoardOutlineRenderer = ({
     });
 
     let d = "";
+    const midPoints = [];
+
     if (pts.length > 0) {
         d = `M ${pts[0].x} ${-pts[0].y}`;
         for (let i = 0; i < pts.length; i++) {
@@ -388,6 +465,17 @@ export const BoardOutlineRenderer = ({
             const cp1y = -(curr.y + (curr.hOut?.y || 0));
             const cp2x = next.x + (next.hIn?.x || 0);
             const cp2y = -(next.y + (next.hIn?.y || 0));
+            
+            // Midpoint calc
+            if (curr.hOut || next.hIn) {
+                // Calculate in Cartesian, invert Y for render
+                const midX = bezier1D(curr.x, curr.x + (curr.hOut?.x || 0), next.x + (next.hIn?.x || 0), next.x, 0.5);
+                const midY = bezier1D(curr.y, curr.y + (curr.hOut?.y || 0), next.y + (next.hIn?.y || 0), next.y, 0.5);
+                midPoints.push({ index: i, x: midX, y: -midY });
+            } else {
+                midPoints.push({ index: i, x: (curr.x + next.x) / 2, y: -(curr.y + next.y) / 2 });
+            }
+
             d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${next.x} ${-next.y}`;
         }
         d += " Z";
@@ -395,13 +483,18 @@ export const BoardOutlineRenderer = ({
 
     const handles = isSelected ? pts.map((pt, idx) => {
         const elements = [];
-        const anchorColor = pt.isSnapped ? "#00ff00" : "#fff";
+        const isHovered = hoveredPointIndex === idx;
+        const anchorColor = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
+        const anchorRadius = isHovered ? handleRadius * 1.3 : handleRadius;
 
         elements.push(
             <circle key={`bo-anchor-${idx}`} cx={pt.x} cy={-pt.y} 
-                r={handleRadius} // Use scaled radius
+                r={anchorRadius} 
                 fill={anchorColor} stroke="#646cff" strokeWidth={1} vectorEffect="non-scaling-stroke"
-                onMouseDown={(e) => { e.stopPropagation(); onMouseDown(e, shape.id, idx); }} />
+                onMouseDown={(e) => { e.stopPropagation(); onMouseDown(e, shape.id, idx); }}
+                onMouseEnter={() => setHoveredPointIndex && setHoveredPointIndex(idx)}
+                onMouseLeave={() => setHoveredPointIndex && setHoveredPointIndex(null)}
+            />
         );
         if (pt.hIn) {
             const hx = pt.x + pt.hIn.x;
@@ -428,12 +521,36 @@ export const BoardOutlineRenderer = ({
         return elements;
     }) : null;
 
+    // NEW: Midpoint Buttons
+    const midButtons = isSelected ? midPoints.map(m => {
+        const isHovered = hoveredMidpointIndex === m.index;
+        const bgFill = isHovered ? "#ffaa00" : "#333";
+        const strokeColor = isHovered ? "#fff" : "#666";
+        const plusColor = isHovered ? "#000" : "white";
+        const r = handleRadius * (isHovered ? 1.0 : 0.8);
+
+        return (
+            <g 
+            key={`mid-${m.index}`} 
+            style={{ cursor: "pointer" }}
+            onClick={(e) => { e.stopPropagation(); onAddMidpoint && onAddMidpoint(shape.id, m.index); }}
+            onMouseEnter={() => setHoveredMidpointIndex && setHoveredMidpointIndex(m.index)}
+            onMouseLeave={() => setHoveredMidpointIndex && setHoveredMidpointIndex(null)}
+            >
+                <circle cx={m.x} cy={m.y} r={r} fill={bgFill} stroke={strokeColor} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+                <line x1={m.x - r * 0.5} y1={m.y} x2={m.x + r * 0.5} y2={m.y} stroke={plusColor} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                <line x1={m.x} y1={m.y - r * 0.5} x2={m.x} y2={m.y + r * 0.5} stroke={plusColor} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+            </g>
+        );
+    }) : null;
+
     return (
         <g>
             <path d={d} fill="none" stroke="transparent" strokeWidth={10} vectorEffect="non-scaling-stroke" style={{ cursor: "pointer" }}
                 onMouseDown={(e) => onMouseDown(e, shape.id)} />
             <path d={d} fill="none" stroke={stroke} strokeWidth={strokeWidth} strokeDasharray={strokeDasharray} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "none" }} />
             {handles}
+            {midButtons}
         </g>
     );
 };

@@ -1,6 +1,6 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
-import { Fragment, useMemo } from "react";
+import { Fragment, useMemo, useRef, useEffect } from "react";
 import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
@@ -14,6 +14,11 @@ const FootprintPropertiesPanel = ({
   updateFootprint,
   params,
   stackup,
+  hoveredPointIndex,
+  setHoveredPointIndex,
+  scrollToPointIndex,
+  hoveredMidpointIndex,
+  setHoveredMidpointIndex,
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -23,11 +28,26 @@ const FootprintPropertiesPanel = ({
   updateFootprint: (field: string, val: any) => void;
   params: Parameter[];
   stackup: StackupLayer[];
+  hoveredPointIndex: number | null;
+  setHoveredPointIndex: (index: number | null) => void;
+  scrollToPointIndex: number | null;
+  hoveredMidpointIndex: number | null;
+  setHoveredMidpointIndex: (index: number | null) => void;
 }) => {
   
   // Get available wire guides for Snapping
   // We memoize this to prevent recalculation on every render unless footprint structure changes
   const availableGuides = useMemo(() => getAvailableWireGuides(footprint, allFootprints), [footprint, allFootprints]);
+
+  // NEW: Refs for scrolling
+  const rowRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  // NEW: Effect to scroll to point
+  useEffect(() => {
+    if (scrollToPointIndex !== null && rowRefs.current.has(scrollToPointIndex)) {
+        rowRefs.current.get(scrollToPointIndex)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [scrollToPointIndex]);
 
   // Helper to render property editors for a Point (used in Lines and Board Outline)
   const renderPointEditor = (p: Point, idx: number, updateFn: (newP: Point) => void, removeFn: () => void, allowHandles: boolean = true) => {
@@ -36,8 +56,20 @@ const FootprintPropertiesPanel = ({
       const guideHasIn = !!snappedGuide?.handleIn;
       const guideHasOut = !!snappedGuide?.handleOut;
 
+      const isHovered = hoveredPointIndex === idx;
+
       return (
-        <div className="point-block" key={p.id}>
+        <div 
+            className="point-block" 
+            key={p.id}
+            ref={(el) => {
+                if (el) rowRefs.current.set(idx, el);
+                else rowRefs.current.delete(idx);
+            }}
+            onMouseEnter={() => setHoveredPointIndex(idx)}
+            onMouseLeave={() => setHoveredPointIndex(null)}
+            style={isHovered ? { border: '1px solid #646cff' } : {}}
+        >
             <div className="point-header">
                 <span>Point {idx + 1}</span>
                 <button className="icon-btn danger" onClick={removeFn} title="Remove Point">×</button>
@@ -222,8 +254,34 @@ const FootprintPropertiesPanel = ({
                                 }
                             )}
                             {idx < points.length - 1 && (
-                                <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
-                                    <button onClick={() => addMidpoint(idx)} style={{ cursor: "pointer", padding: "4px 8px", fontSize: "0.8rem", background: "#333", border: "1px solid #555", color: "#fff", borderRadius: "4px" }} title="Insert Midpoint">+ Midpoint</button>
+                                <div 
+                                    style={{ 
+                                        display: "flex", 
+                                        justifyContent: "center", 
+                                        margin: "5px 0",
+                                        border: hoveredMidpointIndex === idx ? '1px dashed #646cff' : '1px dashed transparent',
+                                        borderRadius: '4px',
+                                        transition: 'border-color 0.2s'
+                                    }}
+                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
+                                    onMouseLeave={() => setHoveredMidpointIndex(null)}
+                                >
+                                    <button 
+                                        onClick={() => addMidpoint(idx)} 
+                                        style={{ 
+                                            cursor: "pointer", 
+                                            padding: "4px 8px", 
+                                            fontSize: "0.8rem", 
+                                            background: hoveredMidpointIndex === idx ? "#3b5b9d" : "#333", 
+                                            border: "1px solid #555", 
+                                            color: "#fff", 
+                                            borderRadius: "4px",
+                                            transition: 'background-color 0.2s'
+                                        }} 
+                                        title="Insert Midpoint"
+                                    >
+                                        + Midpoint
+                                    </button>
                                 </div>
                             )}
                         </Fragment>
@@ -527,15 +585,41 @@ const FootprintPropertiesPanel = ({
                                 }
                             )}
                             {idx < (shape as FootprintLine).points.length - 1 && (
-                                <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
-                                    <button onClick={() => {
+                                <div 
+                                    style={{ 
+                                        display: "flex", 
+                                        justifyContent: "center", 
+                                        margin: "5px 0",
+                                        border: hoveredMidpointIndex === idx ? '1px dashed #646cff' : '1px dashed transparent',
+                                        borderRadius: '4px',
+                                        transition: 'border-color 0.2s'
+                                    }}
+                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
+                                    onMouseLeave={() => setHoveredMidpointIndex(null)}
+                                >
+                                    <button 
+                                        onClick={() => {
                                             const newPoints = [...(shape as FootprintLine).points];
                                             const p1 = newPoints[idx];
                                             const p2 = newPoints[idx + 1];
                                             const newPoint = { id: crypto.randomUUID(), x: calcMid(p1.x, p2.x), y: calcMid(p1.y, p2.y) };
                                             newPoints.splice(idx + 1, 0, newPoint);
                                             updateShape(shape.id, "points", newPoints);
-                                        }} style={{ cursor: "pointer", padding: "4px 8px", fontSize: "0.8rem", background: "#333", border: "1px solid #555", color: "#fff", borderRadius: "4px" }} title="Insert Midpoint">+ Midpoint</button>
+                                        }} 
+                                        style={{ 
+                                            cursor: "pointer", 
+                                            padding: "4px 8px", 
+                                            fontSize: "0.8rem", 
+                                            background: hoveredMidpointIndex === idx ? "#3b5b9d" : "#333", 
+                                            border: "1px solid #555", 
+                                            color: "#fff", 
+                                            borderRadius: "4px",
+                                            transition: 'background-color 0.2s'
+                                        }} 
+                                        title="Insert Midpoint"
+                                    >
+                                        + Midpoint
+                                    </button>
                                 </div>
                             )}
                         </Fragment>

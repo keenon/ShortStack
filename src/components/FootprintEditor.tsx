@@ -2,9 +2,9 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, calcMid } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import './FootprintEditor.css';
@@ -278,6 +278,12 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   
+  // NEW: State for point interaction
+  const [hoveredPointIndex, setHoveredPointIndex] = useState<number | null>(null);
+  const [scrollToPointIndex, setScrollToPointIndex] = useState<number | null>(null);
+  // NEW: State for midpoint interaction
+  const [hoveredMidpointIndex, setHoveredMidpointIndex] = useState<number | null>(null);
+
   const footprintRef = useRef(footprint);
   useEffect(() => {
     footprintRef.current = footprint;
@@ -443,6 +449,11 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       if (viewMode !== "2D") return;
       setSelectedShapeId(id);
       
+      // NEW: Trigger scroll to point properties if a specific point was clicked
+      if (pointIndex !== undefined) {
+          setScrollToPointIndex(pointIndex);
+      }
+
       const shape = footprint.shapes.find(s => s.id === id);
       if (!shape) return;
       isShapeDragging.current = true;
@@ -458,6 +469,9 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       e.stopPropagation(); e.preventDefault();
       if (viewMode !== "2D") return;
       setSelectedShapeId(id);
+      
+      // NEW: Trigger scroll
+      setScrollToPointIndex(pointIndex);
 
       const shape = footprint.shapes.find(s => s.id === id);
       if (!shape) return;
@@ -578,6 +592,36 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     }
 
     setSelectedShapeId(newShape.id);
+  };
+
+  // NEW: Handle adding midpoint from 2D view
+  const handleAddMidpoint = (shapeId: string, index: number) => {
+    const shape = footprint.shapes.find(s => s.id === shapeId);
+    if (!shape) return;
+    if (shape.type !== "line" && shape.type !== "boardOutline") return;
+    
+    // Type guard/assertion for points presence
+    const points = (shape as any).points as Point[];
+    const p1 = points[index];
+    // For Board Outline (closed), the last point connects to first. 
+    // Line renderer iterates up to length-1, so index+1 is safe. 
+    // Board Outline renderer iterates up to length, using modulo for next.
+    const p2 = points[(index + 1) % points.length];
+
+    if (!p1 || !p2) return;
+
+    const newPoint: Point = {
+        id: crypto.randomUUID(),
+        x: calcMid(p1.x, p2.x),
+        y: calcMid(p1.y, p2.y)
+    };
+
+    const newPoints = [...points];
+    newPoints.splice(index + 1, 0, newPoint);
+    
+    onUpdate({ ...footprint, shapes: footprint.shapes.map(s => s.id === shapeId ? { ...s, points: newPoints } : s) });
+    // Keep shape selected
+    setSelectedShapeId(shapeId);
   };
 
   const updateShape = (shapeId: string, field: string, val: any) => {
@@ -896,8 +940,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
         <div className="fp-center-column">
             <div className="view-toggle-bar">
-                <button className={`view-toggle-btn ${viewMode === "2D" ? "active" : ""}`} onClick={() => setViewMode("2D")}>2D Canvas</button>
-                <button className={`view-toggle-btn ${viewMode === "3D" ? "active" : ""}`} onClick={() => setViewMode("3D")}>3D Preview</button>
+                <button className={`view-toggle-btn ${viewMode === "2D" ? "active" : ""}`} onClick={() => setViewMode("2D")}>Sketch</button>
+                <button className={`view-toggle-btn ${viewMode === "3D" ? "active" : ""}`} onClick={() => setViewMode("3D")}>3D View</button>
             </div>
 
             <div 
@@ -941,7 +985,12 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                                 onHandleDown={handleHandleMouseDown}
                                 handleRadius={handleRadius}
                                 rootFootprint={footprint}
-                                layerVisibility={layerVisibility} 
+                                layerVisibility={layerVisibility}
+                                hoveredPointIndex={hoveredPointIndex}
+                                setHoveredPointIndex={setHoveredPointIndex}
+                                hoveredMidpointIndex={hoveredMidpointIndex}
+                                setHoveredMidpointIndex={setHoveredMidpointIndex}
+                                onAddMidpoint={handleAddMidpoint}
                             />
                         );
                     })}
@@ -978,6 +1027,11 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 updateFootprint={updateFootprintField}
                 params={params} 
                 stackup={stackup}
+                hoveredPointIndex={hoveredPointIndex}
+                setHoveredPointIndex={setHoveredPointIndex}
+                scrollToPointIndex={scrollToPointIndex}
+                hoveredMidpointIndex={hoveredMidpointIndex}
+                setHoveredMidpointIndex={setHoveredMidpointIndex}
               />
               {activeShape && (
                 <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
