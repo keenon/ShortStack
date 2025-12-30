@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, calcMid } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, calcMid, bezier1D } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import './FootprintEditor.css';
@@ -602,18 +602,50 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     
     // Type guard/assertion for points presence
     const points = (shape as any).points as Point[];
-    const p1 = points[index];
-    // For Board Outline (closed), the last point connects to first. 
-    // Line renderer iterates up to length-1, so index+1 is safe. 
-    // Board Outline renderer iterates up to length, using modulo for next.
-    const p2 = points[(index + 1) % points.length];
+    const p1Raw = points[index];
+    const p2Raw = points[(index + 1) % points.length]; // Modulo for closed loop
 
-    if (!p1 || !p2) return;
+    if (!p1Raw || !p2Raw) return;
+
+    // Resolve points to numeric values (handling parameters and snaps)
+    const p1 = resolvePoint(p1Raw, footprint, allFootprints, params);
+    const p2 = resolvePoint(p2Raw, footprint, allFootprints, params);
+
+    let midX, midY;
+
+    // Check if we need Bezier interpolation
+    // handleOut is p1's outgoing handle, handleIn is p2's incoming handle
+    if (p1.handleOut || p2.handleIn) {
+        // Control points (relative to anchors in resolved point structure)
+        // p1.handleOut is {x, y} vector relative to p1
+        const cp1x = p1.x + (p1.handleOut?.x || 0);
+        const cp1y = p1.y + (p1.handleOut?.y || 0);
+        
+        // p2.handleIn is {x, y} vector relative to p2
+        const cp2x = p2.x + (p2.handleIn?.x || 0);
+        const cp2y = p2.y + (p2.handleIn?.y || 0);
+
+        midX = bezier1D(p1.x, cp1x, cp2x, p2.x, 0.5);
+        midY = bezier1D(p1.y, cp1y, cp2y, p2.y, 0.5);
+    } else {
+        // Linear midpoint
+        midX = (p1.x + p2.x) / 2;
+        midY = (p1.y + p2.y) / 2;
+    }
+
+    // If Board Outline, adjust for Shape Origin
+    if (shape.type === "boardOutline") {
+        const originX = evaluateExpression(shape.x, params);
+        const originY = evaluateExpression(shape.y, params);
+        midX -= originX;
+        midY -= originY;
+    }
 
     const newPoint: Point = {
         id: crypto.randomUUID(),
-        x: calcMid(p1.x, p2.x),
-        y: calcMid(p1.y, p2.y)
+        // Convert back to string, rounded to 4 decimals to avoid float garbage
+        x: parseFloat(midX.toFixed(4)).toString(),
+        y: parseFloat(midY.toFixed(4)).toString()
     };
 
     const newPoints = [...points];

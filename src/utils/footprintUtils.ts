@@ -132,6 +132,12 @@ export const calcMid = (v1: string, v2: string) => {
     return `(${v1} + ${v2}) / 2`;
 };
 
+// NEW: Cubic Bezier calculation for 1D coordinate
+export function bezier1D(p0: number, p1: number, p2: number, p3: number, t: number): number {
+    const mt = 1 - t;
+    return (mt * mt * mt * p0) + (3 * mt * mt * t * p1) + (3 * mt * t * t * p2) + (t * t * t * p3);
+}
+
 export function getRecursiveLayers(
   footprintId: string, 
   allFootprints: Footprint[], 

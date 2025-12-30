@@ -259,12 +259,7 @@ const FootprintPropertiesPanel = ({
                                         display: "flex", 
                                         justifyContent: "center", 
                                         margin: "5px 0",
-                                        border: hoveredMidpointIndex === idx ? '1px dashed #646cff' : '1px dashed transparent',
-                                        borderRadius: '4px',
-                                        transition: 'border-color 0.2s'
                                     }}
-                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
-                                    onMouseLeave={() => setHoveredMidpointIndex(null)}
                                 >
                                     <button 
                                         onClick={() => addMidpoint(idx)} 
@@ -273,12 +268,15 @@ const FootprintPropertiesPanel = ({
                                             padding: "4px 8px", 
                                             fontSize: "0.8rem", 
                                             background: hoveredMidpointIndex === idx ? "#3b5b9d" : "#333", 
-                                            border: "1px solid #555", 
+                                            border: hoveredMidpointIndex === idx ? "1px solid #646cff" : "1px solid #555", 
                                             color: "#fff", 
                                             borderRadius: "4px",
-                                            transition: 'background-color 0.2s'
+                                            transition: 'background-color 0.2s, border-color 0.2s',
+                                            boxShadow: hoveredMidpointIndex === idx ? "0 0 5px rgba(100, 108, 255, 0.5)" : "none"
                                         }} 
                                         title="Insert Midpoint"
+                                        onMouseEnter={() => setHoveredMidpointIndex(idx)}
+                                        onMouseLeave={() => setHoveredMidpointIndex(null)}
                                     >
                                         + Midpoint
                                     </button>
@@ -590,12 +588,7 @@ const FootprintPropertiesPanel = ({
                                         display: "flex", 
                                         justifyContent: "center", 
                                         margin: "5px 0",
-                                        border: hoveredMidpointIndex === idx ? '1px dashed #646cff' : '1px dashed transparent',
-                                        borderRadius: '4px',
-                                        transition: 'border-color 0.2s'
                                     }}
-                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
-                                    onMouseLeave={() => setHoveredMidpointIndex(null)}
                                 >
                                     <button 
                                         onClick={() => {
@@ -611,12 +604,15 @@ const FootprintPropertiesPanel = ({
                                             padding: "4px 8px", 
                                             fontSize: "0.8rem", 
                                             background: hoveredMidpointIndex === idx ? "#3b5b9d" : "#333", 
-                                            border: "1px solid #555", 
+                                            border: hoveredMidpointIndex === idx ? "1px solid #646cff" : "1px solid #555", 
                                             color: "#fff", 
                                             borderRadius: "4px",
-                                            transition: 'background-color 0.2s'
+                                            transition: 'background-color 0.2s, border-color 0.2s',
+                                            boxShadow: hoveredMidpointIndex === idx ? "0 0 5px rgba(100, 108, 255, 0.5)" : "none"
                                         }} 
                                         title="Insert Midpoint"
+                                        onMouseEnter={() => setHoveredMidpointIndex(idx)}
+                                        onMouseLeave={() => setHoveredMidpointIndex(null)}
                                     >
                                         + Midpoint
                                     </button>

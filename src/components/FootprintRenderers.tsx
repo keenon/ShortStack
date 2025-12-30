@@ -366,13 +366,14 @@ export const RecursiveShapeRenderer = ({
           const bgFill = isHovered ? "#ffaa00" : "#333";
           const strokeColor = isHovered ? "#fff" : "#666";
           const plusColor = isHovered ? "#000" : "white";
-          const r = handleRadius * (isHovered ? 1.0 : 0.8); // Increased baseline size
+          const r = handleRadius * (isHovered ? 1.0 : 0.8);
 
           return (
             <g 
                 key={`mid-${m.index}`} 
                 style={{ cursor: "pointer" }}
                 onClick={(e) => { e.stopPropagation(); onAddMidpoint && onAddMidpoint(shape.id, m.index); }}
+                onMouseDown={(e) => e.stopPropagation()} // FIX: Prevent deselecting line
                 onMouseEnter={() => setHoveredMidpointIndex && setHoveredMidpointIndex(m.index)}
                 onMouseLeave={() => setHoveredMidpointIndex && setHoveredMidpointIndex(null)}
             >
@@ -534,6 +535,7 @@ export const BoardOutlineRenderer = ({
             key={`mid-${m.index}`} 
             style={{ cursor: "pointer" }}
             onClick={(e) => { e.stopPropagation(); onAddMidpoint && onAddMidpoint(shape.id, m.index); }}
+            onMouseDown={(e) => e.stopPropagation()} // FIX: Prevent deselecting board outline
             onMouseEnter={() => setHoveredMidpointIndex && setHoveredMidpointIndex(m.index)}
             onMouseLeave={() => setHoveredMidpointIndex && setHoveredMidpointIndex(null)}
             >
