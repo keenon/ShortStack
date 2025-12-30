@@ -34,6 +34,7 @@ export interface Footprint3DViewHandle {
     resetCamera: () => void;
     getLayerSTL: (layerId: string) => Uint8Array | null;
     processDroppedFile: (file: File) => Promise<FootprintMesh | null>;
+    convertMeshToGlb: (mesh: FootprintMesh) => Promise<FootprintMesh | null>;
 }
 
 // ------------------------------------------------------------------
@@ -65,7 +66,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 // ------------------------------------------------------------------
-// GEOMETRY GENERATION
+// GEOMETRY GENERATION (Remaining geometry code omitted for brevity as it is unchanged)
 // ------------------------------------------------------------------
 
 function createRoundedRectShape(width: number, height: number, radius: number): THREE.Shape {
@@ -293,7 +294,7 @@ function createBoardShape(points: Point[], params: Parameter[], rootFootprint: F
 }
 
 // ------------------------------------------------------------------
-// FLATTENING LOGIC
+// FLATTENING LOGIC & MANIFOLD UTILS
 // ------------------------------------------------------------------
 
 interface FlatShape {
@@ -361,10 +362,6 @@ function flattenShapes(
 
     return result;
 }
-
-// ------------------------------------------------------------------
-// MANIFOLD UTILS
-// ------------------------------------------------------------------
 
 function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
     let points = shape.getPoints(resolution);
@@ -751,7 +748,7 @@ async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<T
 }
 
 // ------------------------------------------------------------------
-// COMPONENTS
+// COMPONENTS (LayerSolid, FlatMesh, FlattenMeshes, etc. omitted)
 // ------------------------------------------------------------------
 
 const LayerSolid = ({
@@ -1338,7 +1335,45 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     }
   }, [firstMeshReady, is3DActive, fitToHome]);
 
-useImperativeHandle(ref, () => ({
+  // NEW: Refactoring reusable logic for export/conversion
+  const convertGeometryToMeshObject = async (mesh: FootprintMesh): Promise<FootprintMesh | null> => {
+      // 1. Get geometry
+      const geometry = await loadMeshGeometry(mesh, occtModule);
+      if (!geometry) {
+          // If we failed to load (e.g. OCCT missing for STEP), return null
+          return null;
+      }
+
+      // 2. Convert to GLB
+      const threeMesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
+      const exporter = new GLTFExporter();
+
+      return new Promise((resolve) => {
+          exporter.parse(
+              threeMesh,
+              (result) => {
+                  if (result instanceof ArrayBuffer) {
+                      const glbBase64 = arrayBufferToBase64(result);
+                      resolve({
+                          ...mesh,
+                          content: glbBase64,
+                          format: "glb"
+                      });
+                  } else {
+                      console.error("GLTFExporter returned JSON instead of binary");
+                      resolve(null);
+                  }
+              },
+              (err) => {
+                  console.error("GLTF Export failed", err);
+                  resolve(null);
+              },
+              { binary: true }
+          );
+      });
+  };
+
+  useImperativeHandle(ref, () => ({
     resetCamera: fitToHome,
     getLayerSTL: (layerId: string) => {
         const mesh = meshRefs.current[layerId];
@@ -1372,7 +1407,7 @@ useImperativeHandle(ref, () => ({
         
         // Construct temporary mesh object for loader reuse
         const tempMesh: FootprintMesh = {
-            id: "temp",
+            id: crypto.randomUUID(),
             name: file.name,
             content: arrayBufferToBase64(buffer),
             format: (ext === "stp" || ext === "step") ? "step" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "stl")),
@@ -1383,50 +1418,15 @@ useImperativeHandle(ref, () => ({
         
         // If it's already GLB/GLTF, return as is
         if (tempMesh.format === "glb") {
-            return { ...tempMesh, id: crypto.randomUUID() };
+            return tempMesh;
         }
 
-        // Otherwise load and convert
-        const geometry = await loadMeshGeometry(tempMesh, occtModule);
-        if (!geometry) {
-            if (tempMesh.format === "step" && !occtModule) {
-                alert("3D Engine is initializing, please wait a moment and try again.");
-            }
-            return null;
-        }
-
-        // Convert to GLB
-        const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
-        const exporter = new GLTFExporter();
-        
-        return new Promise((resolve) => {
-            exporter.parse(
-                mesh,
-                (result) => {
-                    if (result instanceof ArrayBuffer) {
-                        const glbBase64 = arrayBufferToBase64(result);
-                        resolve({
-                            id: crypto.randomUUID(),
-                            name: file.name,
-                            content: glbBase64,
-                            format: "glb",
-                            renderingType: "solid",
-                            x: "0", y: "0", z: "0",
-                            rotationX: "0", rotationY: "0", rotationZ: "0"
-                        });
-                    } else {
-                        // Should not happen with binary: true
-                        console.error("GLTFExporter returned JSON instead of binary");
-                        resolve(null);
-                    }
-                },
-                (err) => {
-                    console.error("GLTF Export failed", err);
-                    resolve(null);
-                },
-                { binary: true }
-            );
-        });
+        // Convert to GLB immediately
+        return await convertGeometryToMeshObject(tempMesh);
+    },
+    convertMeshToGlb: async (mesh: FootprintMesh): Promise<FootprintMesh | null> => {
+        if (mesh.format === "glb") return mesh;
+        return await convertGeometryToMeshObject(mesh);
     }
   }));
 

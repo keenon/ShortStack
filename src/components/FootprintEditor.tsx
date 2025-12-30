@@ -275,6 +275,7 @@ const MeshListPanel = ({
 
 export default function FootprintEditor({ footprint, allFootprints, onUpdate, onClose, params, stackup }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
+  const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   
   const footprintRef = useRef(footprint);
   useEffect(() => {
@@ -309,6 +310,49 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   const shapeDragStartPos = useRef({ x: 0, y: 0 });
   const shapeDragStartData = useRef<any>(null);
   const dragTargetRef = useRef<{ id: string; pointIdx?: number; handleType?: 'in' | 'out'; } | null>(null);
+
+  // HEALING EFFECT: Convert non-GLB meshes to GLB
+  useEffect(() => {
+    if (!footprint.meshes || footprint.meshes.length === 0) return;
+    
+    const nonGlb = footprint.meshes.filter(m => m.format !== "glb");
+    if (nonGlb.length === 0) return;
+
+    // Only attempt to heal if we have a ref to the 3D view (which contains the engine)
+    if (!footprint3DRef.current) return;
+
+    const healMeshes = async () => {
+        setProcessingMessage("Optimizing 3D Meshes...");
+        // Yield to render to show message
+        await new Promise(r => setTimeout(r, 100));
+
+        let changed = false;
+        const newMeshes = [...footprint.meshes!];
+
+        for (const mesh of nonGlb) {
+            try {
+                const converted = await footprint3DRef.current?.convertMeshToGlb(mesh);
+                if (converted) {
+                    const idx = newMeshes.findIndex(m => m.id === mesh.id);
+                    if (idx !== -1) {
+                        newMeshes[idx] = converted;
+                        changed = true;
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to heal mesh", mesh.name, e);
+            }
+        }
+
+        if (changed) {
+            updateFootprintField("meshes", newMeshes);
+            console.log("Healed JSON: Converted meshes to GLB");
+        }
+        setProcessingMessage(null);
+    };
+
+    healMeshes();
+  }, [footprint.meshes, footprint3DRef.current]);
 
   useEffect(() => { viewBoxRef.current = viewBox; }, [viewBox]);
 
@@ -577,39 +621,64 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       console.log("Drop detected", e.dataTransfer.files);
 
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-          Array.from(e.dataTransfer.files).forEach(file => {
-              const ext = file.name.split('.').pop()?.toLowerCase();
-              if (ext === "stl" || ext === "step" || ext === "stp" || ext === "obj" || ext === "glb" || ext === "gltf") {
-                  if (footprint3DRef.current) {
-                      footprint3DRef.current.processDroppedFile(file).then(newMesh => {
-                          if (newMesh) {
-                              onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), newMesh] });
-                              setSelectedShapeId(newMesh.id);
-                          }
-                      });
-                  } else {
-                      // Fallback for 2D mode or uninitialized 3D view: Load raw as before
-                      const reader = new FileReader();
-                      reader.onload = () => {
-                          if (reader.result instanceof ArrayBuffer) {
-                              const base64 = arrayBufferToBase64(reader.result);
-                              const newMesh: FootprintMesh = {
-                                  id: crypto.randomUUID(),
-                                  name: file.name,
-                                  content: base64,
-                                  format: (ext === "stl" ? "stl" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "step"))),
-                                  x: "0", y: "0", z: "0",
-                                  rotationX: "0", rotationY: "0", rotationZ: "0",
-                                  renderingType: "solid"
-                              };
-                              onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), newMesh] });
-                              setSelectedShapeId(newMesh.id);
-                          }
-                      };
-                      reader.readAsArrayBuffer(file);
+          // Show spinner
+          setProcessingMessage("Processing 3D File...");
+          
+          // Use timeout to allow render to update UI before heavy lifting
+          setTimeout(() => {
+              const files = Array.from(e.dataTransfer.files);
+              let processedCount = 0;
+              const newMeshes: FootprintMesh[] = [];
+
+              const processNext = async (index: number) => {
+                  if (index >= files.length) {
+                      // All done
+                      if (newMeshes.length > 0) {
+                           onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), ...newMeshes] });
+                           setSelectedShapeId(newMeshes[newMeshes.length - 1].id);
+                      }
+                      setProcessingMessage(null);
+                      return;
                   }
-              }
-          });
+
+                  const file = files[index];
+                  const ext = file.name.split('.').pop()?.toLowerCase();
+                  
+                  if (ext === "stl" || ext === "step" || ext === "stp" || ext === "obj" || ext === "glb" || ext === "gltf") {
+                       if (footprint3DRef.current) {
+                           const newMesh = await footprint3DRef.current.processDroppedFile(file);
+                           if (newMesh) newMeshes.push(newMesh);
+                       } else {
+                           // Fallback for 2D mode or uninitialized 3D view
+                           const reader = new FileReader();
+                           await new Promise<void>((resolve) => {
+                               reader.onload = () => {
+                                  if (reader.result instanceof ArrayBuffer) {
+                                      const base64 = arrayBufferToBase64(reader.result);
+                                      const newMesh: FootprintMesh = {
+                                          id: crypto.randomUUID(),
+                                          name: file.name,
+                                          content: base64,
+                                          format: (ext === "stl" ? "stl" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "step"))),
+                                          x: "0", y: "0", z: "0",
+                                          rotationX: "0", rotationY: "0", rotationZ: "0",
+                                          renderingType: "solid"
+                                      };
+                                      newMeshes.push(newMesh);
+                                  }
+                                  resolve();
+                               };
+                               reader.readAsArrayBuffer(file);
+                           });
+                       }
+                  }
+                  
+                  processedCount++;
+                  processNext(index + 1);
+              };
+
+              processNext(0);
+          }, 50);
       }
   };
 
@@ -733,6 +802,14 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
   return (
     <div className="footprint-editor-container">
+      {/* PROCESSING OVERLAY */}
+      {processingMessage && (
+          <div className="processing-overlay">
+              <div className="spinner"></div>
+              <div className="processing-text">{processingMessage}</div>
+          </div>
+      )}
+
       <div className="fp-toolbar">
         <button className="secondary" onClick={onClose}>← Back</button>
         <input className="toolbar-name-input" type="text" value={footprint.name} onChange={(e) => updateFootprintName(e.target.value)} />
@@ -923,10 +1000,10 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 }
 
 // ------------------------------------------------------------------
-// HELPER: Collect Export Shapes Recursively
+// HELPER: Collect Export Shapes Recursively (Omitted for brevity as unchanged)
 // ------------------------------------------------------------------
 function collectExportShapes(
-    contextFootprint: Footprint, // The footprint defining the shapes
+    contextFootprint: Footprint, 
     shapes: FootprintShape[],
     allFootprints: Footprint[],
     params: Parameter[],
