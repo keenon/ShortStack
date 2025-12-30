@@ -78,9 +78,6 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
        shape.lineTo(x + width - r, y + height);
-       // Note: while it may be tempting to think this should be (x + width, y, x + width, y + height - r),
-       // the correct control point is (x + width, y + height, x + width, y + height - r).
-       // Please do not edit this line! It has been tested and verified.
        shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
        shape.lineTo(x + width, y + r);
        shape.quadraticCurveTo(x + width, y, x + width - r, y);
@@ -212,7 +209,6 @@ function getLineOutlinePoints(
         const startAng = Math.atan2(vFirst.y, vFirst.x);
         
         // Arc from Right Rail start to Left Rail start
-        // We stop 1 step short of the end because the loop wraps back to contour[0]
         for (let i = 1; i < arcDivisions; i++) {
             const t = i / arcDivisions;
             const ang = startAng - t * Math.PI;
@@ -290,15 +286,14 @@ function createBoardShape(points: Point[], params: Parameter[], rootFootprint: F
 // ------------------------------------------------------------------
 
 interface FlatShape {
-    shape: FootprintShape; // The actual primitive shape
-    x: number;             // Global X in mm
-    y: number;             // Global Y in mm
-    rotation: number;      // Global Rotation in degrees
+    shape: FootprintShape;
+    x: number;
+    y: number;
+    rotation: number;
     originalId: string;
-    contextFp: Footprint;  // Context for resolving snaps
+    contextFp: Footprint;
 }
 
-// Recursively traverse footprint references to build a flat list of primitives with absolute transforms
 function flattenShapes(
     contextFp: Footprint,
     shapes: FootprintShape[], 
@@ -307,14 +302,13 @@ function flattenShapes(
     transform = { x: 0, y: 0, rotation: 0 },
     depth = 0
 ): FlatShape[] {
-    if (depth > 10) return []; // Safety break
+    if (depth > 10) return [];
 
     let result: FlatShape[] = [];
 
     shapes.forEach(shape => {
-        if (shape.type === "wireGuide") return; // SKIP VIRTUAL WIRE GUIDES
+        if (shape.type === "wireGuide") return;
 
-        // Calculate Global Transform for this specific shape
         const localX = evaluate(shape.x, params);
         const localY = evaluate(shape.y, params);
         
@@ -335,7 +329,6 @@ function flattenShapes(
             const ref = shape as FootprintReference;
             const target = allFootprints.find(f => f.id === ref.footprintId);
             if (target) {
-                // Recurse
                 const children = flattenShapes(target, target.shapes, allFootprints, params, {
                     x: globalX,
                     y: globalY,
@@ -371,7 +364,6 @@ function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
     
     const contour = points.map(p => [p.x, p.y]);
 
-    // Handle holes
     const holes = shape.holes.map(h => {
         let hPts = h.getPoints(resolution);
         if (hPts.length > 1 && hPts[0].distanceTo(hPts[hPts.length-1]) < 0.001) {
@@ -519,10 +511,6 @@ function generateProceduralFillet(
     });
 
     if (!topologyValid) return null;
-
-    // Note for posterity: winding order is important in all the subsequent code.
-    // Please don't change it without checking the result visually.
-    // If you get failures in manifold status, changing this is likely the culprit.
 
     const getIdx = (layerIdx: number, ptIdx: number) => {
         return layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
@@ -1085,7 +1073,7 @@ function flattenMeshes(
                      allFootprints, 
                      params, 
                      globalChildMat,
-                     ancestorRefId || ref.id // Pass the top-most reference ID down
+                     ancestorRefId || ref.id
                  ));
              }
         }
@@ -1093,6 +1081,21 @@ function flattenMeshes(
 
     return result;
 }
+
+// Helper component to switch modes with keyboard
+const TransformControlsModeSwitcher = ({ controlRef }: { controlRef: any }) => {
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (controlRef.current) {
+                if (e.key === 'r') controlRef.current.setMode('rotate');
+                if (e.key === 't') controlRef.current.setMode('translate');
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [controlRef]);
+    return null;
+};
 
 const MeshObject = ({ 
     meshData, 
@@ -1110,7 +1113,11 @@ const MeshObject = ({
     const { mesh, globalTransform, isEditable } = meshData;
     const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
     const meshRef = useRef<THREE.Mesh>(null);
+
+    // Ghost object for TransformControls to follow
+    const ghostRef = useRef<THREE.Object3D>(null);
     const controlRef = useRef<any>(null);
+    const [isDragging, setIsDragging] = useState(false);
 
     useEffect(() => {
         let mounted = true;
@@ -1120,48 +1127,42 @@ const MeshObject = ({
         return () => { mounted = false; };
     }, [mesh, occtModule]);
 
-    // Handle Transform Changes
-    const handleTransformEnd = () => {
-        if (!meshRef.current) return;
-        
-        const newPos = meshRef.current.position;
-        const newRot = meshRef.current.rotation;
-
-        // Calculate Deltas from original mesh state (as TransformControls modifies the object directly)
-        // Original values are in globalTransform, but `meshRef` started there.
-        // Wait, TransformControls modifies the ref. React props are stale.
-        // We need to compare against what the props say (which is current expression value).
-        // Since we want `modifyExpression` to work with deltas, we calculate delta from where it *was* before drag.
-        
-        // HOWEVER, `globalTransform` puts it in world space.
-        // If the mesh is Editable (direct child), `globalTransform` is just the mesh transform (assuming identity parent).
-        // BUT `Footprint3DView` places everything inside a root group, so transforms are relative to 0,0,0 of that view.
-        
-        if (isEditable) {
-            // Retrieve current numeric values from expressions to diff against
-            // Note: `meshData.globalTransform` holds the computed values.
-            const p = new THREE.Vector3();
-            const q = new THREE.Quaternion();
-            const s = new THREE.Vector3();
-            globalTransform.decompose(p, q, s);
-            const originalEuler = new THREE.Euler().setFromQuaternion(q);
-
-            const dx = newPos.x - p.x;
-            const dy = newPos.y - p.y;
-            const dz = newPos.z - p.z;
-            
-            const dRx = (newRot.x - originalEuler.x) * (180 / Math.PI);
-            const dRy = (newRot.y - originalEuler.y) * (180 / Math.PI);
-            const dRz = (newRot.z - originalEuler.z) * (180 / Math.PI);
-            
-            if (Math.abs(dx) > 1e-4) onUpdate(mesh.id, "x", modifyExpression(mesh.x, dx));
-            if (Math.abs(dy) > 1e-4) onUpdate(mesh.id, "y", modifyExpression(mesh.y, dy));
-            if (Math.abs(dz) > 1e-4) onUpdate(mesh.id, "z", modifyExpression(mesh.z, dz));
-            
-            if (Math.abs(dRx) > 1e-4) onUpdate(mesh.id, "rotationX", modifyExpression(mesh.rotationX, dRx));
-            if (Math.abs(dRy) > 1e-4) onUpdate(mesh.id, "rotationY", modifyExpression(mesh.rotationY, dRy));
-            if (Math.abs(dRz) > 1e-4) onUpdate(mesh.id, "rotationZ", modifyExpression(mesh.rotationZ, dRz));
+    // Sync Ghost to globalTransform when NOT dragging to avoid loops
+    useEffect(() => {
+        if (!isDragging && ghostRef.current) {
+            ghostRef.current.position.setFromMatrixPosition(globalTransform);
+            ghostRef.current.quaternion.setFromRotationMatrix(globalTransform);
+            ghostRef.current.scale.setFromMatrixScale(globalTransform);
         }
+    }, [globalTransform, isDragging]);
+
+    const handleChange = () => {
+        if (!ghostRef.current || !isEditable) return;
+        
+        const ghostPos = ghostRef.current.position;
+        const ghostRot = ghostRef.current.rotation; // Euler
+        
+        // Decompose current state transform to compare
+        const currentPos = new THREE.Vector3().setFromMatrixPosition(globalTransform);
+        const currentRot = new THREE.Euler().setFromRotationMatrix(globalTransform);
+
+        // Calculate delta from where the state IS to where the gizmo IS
+        const dx = ghostPos.x - currentPos.x;
+        const dy = ghostPos.y - currentPos.y;
+        const dz = ghostPos.z - currentPos.z;
+        
+        // Rotation diff (approximate for small steps)
+        const dRx = (ghostRot.x - currentRot.x) * (180/Math.PI);
+        const dRy = (ghostRot.y - currentRot.y) * (180/Math.PI);
+        const dRz = (ghostRot.z - currentRot.z) * (180/Math.PI);
+
+        if (Math.abs(dx) > 1e-4) onUpdate(mesh.id, "x", modifyExpression(mesh.x, dx));
+        if (Math.abs(dy) > 1e-4) onUpdate(mesh.id, "y", modifyExpression(mesh.y, dy));
+        if (Math.abs(dz) > 1e-4) onUpdate(mesh.id, "z", modifyExpression(mesh.z, dz));
+        
+        if (Math.abs(dRx) > 1e-4) onUpdate(mesh.id, "rotationX", modifyExpression(mesh.rotationX, dRx));
+        if (Math.abs(dRy) > 1e-4) onUpdate(mesh.id, "rotationY", modifyExpression(mesh.rotationY, dRy));
+        if (Math.abs(dRz) > 1e-4) onUpdate(mesh.id, "rotationZ", modifyExpression(mesh.rotationZ, dRz));
     };
 
     if (!geometry || mesh.renderingType === "hidden") return null;
@@ -1174,9 +1175,7 @@ const MeshObject = ({
             <mesh 
                 ref={meshRef}
                 geometry={geometry} 
-                // We apply matrix manually because TransformControls needs to read/write properties.
-                // Using `matrix` prop with `matrixAutoUpdate={false}` makes it hard for TransformControls.
-                // Instead, decompose and set props.
+                // Render visible mesh purely from props (state leads rendering)
                 position={new THREE.Vector3().setFromMatrixPosition(globalTransform)}
                 quaternion={new THREE.Quaternion().setFromRotationMatrix(globalTransform)}
                 scale={new THREE.Vector3().setFromMatrixScale(globalTransform)}
@@ -1197,52 +1196,25 @@ const MeshObject = ({
             </mesh>
             
             {isSelected && isEditable && (
-                <TransformControls 
-                    ref={controlRef}
-                    object={meshRef} 
-                    mode="translate" // Can switch to rotate with a UI toggle if desired, defaulted to translate or combined?
-                    // TransformControls in drei supports mode switching? No, usually one mode.
-                    // For now, let's allow translating. Adding rotation handles might require UI state.
-                    // Or we can use GizmoHelper to switch? Simplest is just Translate for now as per "dragging".
-                    // But prompt says "dragging and rotating".
-                    // We can render two controls or toggle. Let's assume Translate for now, or check modifier keys.
-                    // Standard Three behavior: Pressing 'R' toggles? Not built-in.
-                    // We will just enable both translation and rotation via standard gizmo if possible?
-                    // TransformControls usually shows arrows.
-                    onMouseUp={handleTransformEnd}
-                />
-            )}
-            
-            {/* Separate Rotation Controls if selected? Or let user switch in UI? 
-                For this implementation, let's overlay Rotation controls if the user holds Shift? 
-                Or simply display both? TransformControls doesn't support both simultaneously well.
-                Let's stick to Translation as primary "Drag", and Rotation via side panel, 
-                UNLESS we add a mode toggle. 
-                
-                Actually, let's check modifier keys in the view to toggle mode.
-            */}
-            {isSelected && isEditable && (
-                <TransformControlsModeSwitcher controlRef={controlRef} />
+                <>
+                    {/* Phantom Object for controls to attach to */}
+                    <object3D ref={ghostRef} />
+                    
+                    <TransformControls 
+                        ref={controlRef}
+                        object={ghostRef} 
+                        mode="translate" 
+                        space="local" 
+                        onMouseDown={() => setIsDragging(true)}
+                        onMouseUp={() => setIsDragging(false)}
+                        onChange={handleChange}
+                    />
+                    <TransformControlsModeSwitcher controlRef={controlRef} />
+                </>
             )}
         </>
     );
 };
-
-// Helper to switch modes
-const TransformControlsModeSwitcher = ({ controlRef }: { controlRef: any }) => {
-    useEffect(() => {
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (controlRef.current) {
-                if (e.key === 'r') controlRef.current.setMode('rotate');
-                if (e.key === 't') controlRef.current.setMode('translate');
-            }
-        };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [controlRef]);
-    return null;
-};
-
 
 const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh }, ref) => {
   const controlsRef = useRef<any>(null);
