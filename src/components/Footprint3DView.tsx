@@ -11,9 +11,8 @@ import Module from "manifold-3d";
 // @ts-ignore
 import wasmUrl from "manifold-3d/manifold.wasm?url";
 
-// OCCT Imports
-// @ts-ignore
-import initOCCT from "occt-import-js";
+// IMPORT WORKER
+import MeshWorker from "../workers/meshWorker?worker";
 // @ts-ignore
 import occtWasmUrl from "occt-import-js/dist/occt-import-js.wasm?url";
 
@@ -55,18 +54,8 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
     return bytes.buffer;
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
-  }
-  return window.btoa(binary);
-}
-
 // ------------------------------------------------------------------
-// GEOMETRY GENERATION (Remaining geometry code omitted for brevity as it is unchanged)
+// GEOMETRY GENERATION
 // ------------------------------------------------------------------
 
 function createRoundedRectShape(width: number, height: number, radius: number): THREE.Shape {
@@ -656,7 +645,7 @@ function generateProceduralFillet(
 
 const meshGeometryCache = new Map<string, THREE.BufferGeometry>();
 
-async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<THREE.BufferGeometry | null> {
+async function loadMeshGeometry(mesh: FootprintMesh): Promise<THREE.BufferGeometry | null> {
     const cacheKey = mesh.id + "_" + mesh.content.slice(0, 30); // Simple hash
     if (meshGeometryCache.has(cacheKey)) {
         return meshGeometryCache.get(cacheKey)!.clone();
@@ -686,38 +675,6 @@ async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<T
                  meshGeometryCache.set(cacheKey, merged);
                  return merged;
              }
-        } else if (mesh.format === "step") {
-            if (!occtModule) {
-                console.error("OCCT Module not initialized.");
-                return null;
-            }
-            try {
-                const result = occtModule.ReadStepFile(new Uint8Array(buffer), null);
-                if (result && result.meshes && result.meshes.length > 0) {
-                    const geometries: THREE.BufferGeometry[] = [];
-                    for(const m of result.meshes) {
-                        const geom = new THREE.BufferGeometry();
-                        const positions = new Float32Array(m.attributes.position.array);
-                        geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                        if(m.attributes.normal) {
-                             const normals = new Float32Array(m.attributes.normal.array);
-                             geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-                        }
-                        if(m.index) {
-                            const indices = new Uint16Array(m.index.array);
-                            geom.setIndex(new THREE.BufferAttribute(indices, 1));
-                        }
-                        geometries.push(geom);
-                    }
-
-                    const merged = mergeBufferGeometries(geometries);
-                    meshGeometryCache.set(cacheKey, merged);
-                    return merged;
-                }
-            } catch (err) {
-                console.error("Error reading STEP file via OCCT:", err);
-                return null;
-            }
         } else if (mesh.format === "glb") {
             const loader = new GLTFLoader();
             return new Promise((resolve) => {
@@ -740,6 +697,9 @@ async function loadMeshGeometry(mesh: FootprintMesh, occtModule: any): Promise<T
                     resolve(null);
                 });
             });
+        } else if (mesh.format === "step") {
+            console.warn("Legacy STEP format found on main thread. Processing should be handled by worker.");
+            return null; // The healing effect will catch this and convert it
         }
     } catch (e) {
         console.error("Failed to load mesh", e);
@@ -1129,13 +1089,11 @@ const TransformControlsModeSwitcher = ({ controlRef }: { controlRef: any }) => {
 
 const MeshObject = ({ 
     meshData, 
-    occtModule,
     isSelected,
     onSelect,
     onUpdate
 }: { 
     meshData: FlatMesh, 
-    occtModule: any,
     isSelected: boolean,
     onSelect: () => void,
     onUpdate: (id: string, field: string, val: any) => void
@@ -1151,11 +1109,11 @@ const MeshObject = ({
 
     useEffect(() => {
         let mounted = true;
-        loadMeshGeometry(mesh, occtModule).then(geom => {
+        loadMeshGeometry(mesh).then(geom => {
             if(mounted && geom) setGeometry(geom);
         });
         return () => { mounted = false; };
-    }, [mesh, occtModule]);
+    }, [mesh]);
 
     // Sync Ghost to globalTransform when NOT dragging to avoid loops
     useEffect(() => {
@@ -1253,9 +1211,13 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   const [firstMeshReady, setFirstMeshReady] = useState(false);
   
   const [manifoldModule, setManifoldModule] = useState<any>(null);
-  const [occtModule, setOcctModule] = useState<any>(null);
-  
+
+  // WORKER MANAGEMENT
+  const workerRef = useRef<Worker | null>(null);
+  const workerCallbacks = useRef<Map<string, {resolve: (v:any)=>void, reject: (e:any)=>void}>>(new Map());
+
   useEffect(() => {
+    // 1. Manifold Init
     Module({
         locateFile: ((path: string) => {
             if (path.endsWith('.wasm')) {
@@ -1268,18 +1230,53 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         setManifoldModule(m);
     });
 
-    initOCCT({
-        locateFile: (name: string) => {
-            if (name.endsWith('.wasm')) {
-                return occtWasmUrl;
+    // 2. Worker Init
+    if (!workerRef.current) {
+        workerRef.current = new MeshWorker();
+        
+        // NEW: Catch startup errors (like import failures)
+        workerRef.current.onerror = (err) => {
+            console.error("Worker Initialization Error:", err.message, err.filename, err.lineno);
+        };
+
+        workerRef.current.onmessage = (e) => {
+            const { id, type, payload, error } = e.data;
+            if (workerCallbacks.current.has(id)) {
+                const cb = workerCallbacks.current.get(id)!;
+                if (type === "error") cb.reject(new Error(error));
+                else cb.resolve(payload);
+                workerCallbacks.current.delete(id);
             }
-            return name;
-        }
-    }).then((m: any) => {
-        console.log("OCCT Module initialized");
-        setOcctModule(m);
-    });
+        };
+
+        // Send OCCT Init
+        const initId = crypto.randomUUID();
+        workerRef.current.postMessage({ 
+            id: initId, 
+            type: "init", 
+            payload: { wasmUrl: occtWasmUrl } 
+        });
+        
+        workerCallbacks.current.set(initId, { 
+            resolve: () => console.log("Mesh Worker Initialized"), 
+            reject: (e) => console.error("Mesh Worker Failed Init", e) 
+        });
+    }
+
+    return () => {
+        workerRef.current?.terminate();
+        workerRef.current = null;
+    };
   }, []);
+
+  const callWorker = async (type: string, payload: any): Promise<any> => {
+      if (!workerRef.current) throw new Error("Worker not initialized");
+      const id = crypto.randomUUID();
+      return new Promise((resolve, reject) => {
+          workerCallbacks.current.set(id, { resolve, reject });
+          workerRef.current!.postMessage({ id, type, payload });
+      });
+  };
 
   const fitToHome = useCallback(() => {
     const controls = controlsRef.current;
@@ -1335,44 +1332,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     }
   }, [firstMeshReady, is3DActive, fitToHome]);
 
-  // NEW: Refactoring reusable logic for export/conversion
-  const convertGeometryToMeshObject = async (mesh: FootprintMesh): Promise<FootprintMesh | null> => {
-      // 1. Get geometry
-      const geometry = await loadMeshGeometry(mesh, occtModule);
-      if (!geometry) {
-          // If we failed to load (e.g. OCCT missing for STEP), return null
-          return null;
-      }
-
-      // 2. Convert to GLB
-      const threeMesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
-      const exporter = new GLTFExporter();
-
-      return new Promise((resolve) => {
-          exporter.parse(
-              threeMesh,
-              (result) => {
-                  if (result instanceof ArrayBuffer) {
-                      const glbBase64 = arrayBufferToBase64(result);
-                      resolve({
-                          ...mesh,
-                          content: glbBase64,
-                          format: "glb"
-                      });
-                  } else {
-                      console.error("GLTFExporter returned JSON instead of binary");
-                      resolve(null);
-                  }
-              },
-              (err) => {
-                  console.error("GLTF Export failed", err);
-                  resolve(null);
-              },
-              { binary: true }
-          );
-      });
-  };
-
   useImperativeHandle(ref, () => ({
     resetCamera: fitToHome,
     getLayerSTL: (layerId: string) => {
@@ -1402,31 +1361,55 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         const ext = file.name.split('.').pop()?.toLowerCase();
         if (!ext) return null;
         
-        // Read file content
+        // Read file content as ArrayBuffer to pass to worker
         const buffer = await file.arrayBuffer();
         
-        // Construct temporary mesh object for loader reuse
-        const tempMesh: FootprintMesh = {
-            id: crypto.randomUUID(),
-            name: file.name,
-            content: arrayBufferToBase64(buffer),
-            format: (ext === "stp" || ext === "step") ? "step" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "stl")),
-            renderingType: "solid",
-            x: "0", y: "0", z: "0",
-            rotationX: "0", rotationY: "0", rotationZ: "0"
-        };
+        const format = (ext === "stp" || ext === "step") ? "step" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "stl"));
         
-        // If it's already GLB/GLTF, return as is
-        if (tempMesh.format === "glb") {
-            return tempMesh;
+        try {
+            // Offload to worker
+            const result = await callWorker("convert", {
+                buffer,
+                format,
+                fileName: file.name
+            });
+            
+            return {
+                id: crypto.randomUUID(),
+                name: file.name,
+                content: result.base64,
+                format: result.format, // Should be 'glb'
+                renderingType: "solid",
+                x: "0", y: "0", z: "0",
+                rotationX: "0", rotationY: "0", rotationZ: "0"
+            };
+        } catch (e) {
+            console.error("Worker Conversion Failed", e);
+            // Alert user visually since the spinner just dies
+            alert(`File processing failed: ${e instanceof Error ? e.message : String(e)}`);
+            return null;
         }
-
-        // Convert to GLB immediately
-        return await convertGeometryToMeshObject(tempMesh);
     },
     convertMeshToGlb: async (mesh: FootprintMesh): Promise<FootprintMesh | null> => {
         if (mesh.format === "glb") return mesh;
-        return await convertGeometryToMeshObject(mesh);
+
+        try {
+            const buffer = base64ToArrayBuffer(mesh.content);
+            const result = await callWorker("convert", {
+                buffer,
+                format: mesh.format,
+                fileName: mesh.name
+            });
+            
+            return {
+                ...mesh,
+                content: result.base64,
+                format: result.format
+            };
+        } catch (e) {
+             console.error("Worker Healing Failed", e);
+             return null;
+        }
     }
   }));
 
@@ -1539,7 +1522,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                 <MeshObject 
                     key={m.mesh.id + idx} 
                     meshData={m} 
-                    occtModule={occtModule} 
                     isSelected={selectedId === m.selectableId}
                     onSelect={() => onSelect(m.selectableId)}
                     onUpdate={onUpdateMesh}

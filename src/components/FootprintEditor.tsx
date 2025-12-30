@@ -618,15 +618,28 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       e.preventDefault();
       e.stopPropagation();
 
-      console.log("Drop detected", e.dataTransfer.files);
-
+      // NEW: Explicitly extract files using items fallback for WebKit/Tauri
+      let files: File[] = [];
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          files = Array.from(e.dataTransfer.files);
+      } else if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+          for (let i = 0; i < e.dataTransfer.items.length; i++) {
+              const item = e.dataTransfer.items[i];
+              if (item.kind === 'file') {
+                  const f = item.getAsFile();
+                  if (f) files.push(f);
+              }
+          }
+      }
+
+      console.log("Drop detected. Files found:", files.length);
+
+      if (files.length > 0) {
           // Show spinner
           setProcessingMessage("Processing 3D File...");
           
           // Use timeout to allow render to update UI before heavy lifting
           setTimeout(() => {
-              const files = Array.from(e.dataTransfer.files);
               let processedCount = 0;
               const newMeshes: FootprintMesh[] = [];
 
@@ -685,6 +698,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   const handleDragOver = (e: React.DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      // NEW: Explicitly allow copy effect for drop
+      e.dataTransfer.dropEffect = 'copy';
   };
   
   const updateMesh = (meshId: string, field: string, val: any) => {
