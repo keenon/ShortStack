@@ -1,7 +1,7 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintWireGuide } from "../types";
-import { evaluateExpression, interpolateColor, BOARD_OUTLINE_ID, resolvePoint } from "../utils/footprintUtils";
+import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline } from "../types";
+import { evaluateExpression, interpolateColor, resolvePoint } from "../utils/footprintUtils";
 
 // RECURSIVE SHAPE RENDERER
 export const RecursiveShapeRenderer = ({
@@ -29,6 +29,22 @@ export const RecursiveShapeRenderer = ({
   rootFootprint: Footprint; // NEW
   layerVisibility: Record<string, boolean>;
 }) => {
+  // --- BOARD OUTLINE RENDERER ---
+  if (shape.type === "boardOutline") {
+      return (
+          <BoardOutlineRenderer 
+              shape={shape as FootprintBoardOutline}
+              isSelected={isSelected}
+              params={params}
+              onMouseDown={onMouseDown}
+              onHandleDown={onHandleDown}
+              handleRadius={handleRadius}
+              rootFootprint={rootFootprint}
+              allFootprints={allFootprints}
+          />
+      );
+  }
+
   // --- WIRE GUIDE RENDERER (Virtual Shape) ---
   if (shape.type === "wireGuide") {
     const wg = shape as FootprintWireGuide;
@@ -323,9 +339,9 @@ export const RecursiveShapeRenderer = ({
   return null;
 };
 
-// NEW: Board Outline Renderer (Closed Loop)
+// BOARD OUTLINE RENDERER
 export const BoardOutlineRenderer = ({
-  points,
+  shape,
   isSelected,
   params,
   onMouseDown,
@@ -334,7 +350,7 @@ export const BoardOutlineRenderer = ({
   rootFootprint,
   allFootprints,
 }: {
-  points: Point[];
+  shape: FootprintBoardOutline;
   isSelected: boolean;
   params: Parameter[];
   onMouseDown: (e: React.MouseEvent, id: string, idx?: number) => void;
@@ -343,15 +359,19 @@ export const BoardOutlineRenderer = ({
   rootFootprint: Footprint;
   allFootprints: Footprint[];
 }) => {
+    const points = shape.points;
     const stroke = isSelected ? "#646cff" : "#555";
     const strokeWidth = isSelected ? 3 : 2;
     const strokeDasharray = isSelected ? "0" : "5,5";
 
+    const originX = evaluateExpression(shape.x, params);
+    const originY = evaluateExpression(shape.y, params);
+
     const pts = points.map(p => {
         const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
         return {
-            x: resolved.x,
-            y: resolved.y,
+            x: originX + resolved.x,
+            y: originY + resolved.y,
             hIn: resolved.handleIn,
             hOut: resolved.handleOut,
             isSnapped: !!p.snapTo
@@ -381,7 +401,7 @@ export const BoardOutlineRenderer = ({
             <circle key={`bo-anchor-${idx}`} cx={pt.x} cy={-pt.y} 
                 r={handleRadius} // Use scaled radius
                 fill={anchorColor} stroke="#646cff" strokeWidth={1} vectorEffect="non-scaling-stroke"
-                onMouseDown={(e) => { e.stopPropagation(); onMouseDown(e, BOARD_OUTLINE_ID, idx); }} />
+                onMouseDown={(e) => { e.stopPropagation(); onMouseDown(e, shape.id, idx); }} />
         );
         if (pt.hIn) {
             const hx = pt.x + pt.hIn.x;
@@ -391,7 +411,7 @@ export const BoardOutlineRenderer = ({
                 <circle key={`bo-handle-in-${idx}`} cx={hx} cy={hy} 
                     r={handleRadius * 0.8} // Smaller control handles
                     fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
-                    onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, BOARD_OUTLINE_ID, idx, 'in'); }} />
+                    onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'in'); }} />
             );
         }
         if (pt.hOut) {
@@ -402,7 +422,7 @@ export const BoardOutlineRenderer = ({
                 <circle key={`bo-handle-out-${idx}`} cx={hx} cy={hy} 
                     r={handleRadius * 0.8}
                     fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
-                    onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, BOARD_OUTLINE_ID, idx, 'out'); }} />
+                    onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'out'); }} />
             );
         }
         return elements;
@@ -411,7 +431,7 @@ export const BoardOutlineRenderer = ({
     return (
         <g>
             <path d={d} fill="none" stroke="transparent" strokeWidth={10} vectorEffect="non-scaling-stroke" style={{ cursor: "pointer" }}
-                onMouseDown={(e) => onMouseDown(e, BOARD_OUTLINE_ID)} />
+                onMouseDown={(e) => onMouseDown(e, shape.id)} />
             <path d={d} fill="none" stroke={stroke} strokeWidth={strokeWidth} strokeDasharray={strokeDasharray} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "none" }} />
             {handles}
         </g>

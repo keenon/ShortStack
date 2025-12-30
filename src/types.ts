@@ -20,7 +20,7 @@ export interface StackupLayer {
 
 // --- FOOTPRINT TYPES ---
 
-export type ShapeType = "circle" | "rect" | "line" | "footprint" | "wireGuide";
+export type ShapeType = "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline";
 
 export interface LayerAssignment {
     depth: string;
@@ -62,6 +62,13 @@ export interface FootprintWireGuide extends BaseShape {
   handleOut?: { x: string; y: string };
 }
 
+export interface FootprintBoardOutline extends BaseShape {
+  type: "boardOutline";
+  x: string;
+  y: string;
+  points: Point[];
+}
+
 export interface Point {
   id: string;
   x: string;
@@ -88,7 +95,7 @@ export interface FootprintReference extends BaseShape {
   footprintId: string; // The ID of the child footprint
 }
 
-export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide;
+export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide | FootprintBoardOutline;
 
 export interface FootprintMesh {
   id: string;
@@ -113,7 +120,8 @@ export interface Footprint {
   shapes: FootprintShape[];
   meshes?: FootprintMesh[]; // NEW: Meshes
   isBoard?: boolean;      // NEW: Marks if this footprint is a standalone board
-  boardOutline?: Point[]; // NEW: Outline points if isBoard is true
+  boardOutline?: Point[]; // DEPRECATED: Points for legacy single outline
+  boardOutlineAssignments?: Record<string, string>; // Maps LayerID -> ShapeID
 }
 
 export interface FootprintInstance {

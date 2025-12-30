@@ -7,7 +7,7 @@ import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -183,9 +183,37 @@ function App() {
           
           // New properties sanitization
           if (fp.isBoard === undefined) { fp.isBoard = false; needsUpgrade = true; }
-          if (fp.isBoard && !fp.boardOutline) { fp.boardOutline = []; needsUpgrade = true; }
+          
+          // Legacy migration: Move boardOutline array into a boardOutline Shape
+          let processedShapes = fp.shapes || [];
+          if (fp.isBoard && Array.isArray(fp.boardOutline) && fp.boardOutline.length > 0) {
+              needsUpgrade = true;
+              const legacyOutlineShape: FootprintBoardOutline = {
+                  id: "LEGACY_OUTLINE",
+                  type: "boardOutline",
+                  name: "Main Outline",
+                  x: "0",
+                  y: "0",
+                  points: fp.boardOutline,
+                  assignedLayers: {}
+              };
+              processedShapes = [legacyOutlineShape, ...processedShapes];
+          }
 
-          const sanitizedShapes = (fp.shapes || []).map((s: any) => {
+          // Initialize Board Outline Assignments
+          const boardOutlineAssignments: Record<string, string> = fp.boardOutlineAssignments || {};
+          const outlines = processedShapes.filter((s: any) => s.type === "boardOutline");
+          
+          if (fp.isBoard && outlines.length > 0) {
+              newStackup.forEach(layer => {
+                  if (!boardOutlineAssignments[layer.id]) {
+                      boardOutlineAssignments[layer.id] = outlines[0].id;
+                      needsUpgrade = true;
+                  }
+              });
+          }
+
+          const sanitizedShapes = (processedShapes || []).map((s: any) => {
             if (!s.id || !s.assignedLayers || s.name === undefined) needsUpgrade = true;
             
             // Normalize Assigned Layers
@@ -219,10 +247,19 @@ function App() {
               baseShape.cornerRadius = s.cornerRadius ?? "0";
             } else if (s.type === "circle") {
               baseShape.diameter = s.diameter ?? "10";
+            } else if (s.type === "boardOutline") {
+              baseShape.points = s.points || [];
             }
             return baseShape as FootprintShape;
           });
-          return { ...fp, id: fp.id || crypto.randomUUID(), shapes: sanitizedShapes };
+
+          return { 
+              ...fp, 
+              id: fp.id || crypto.randomUUID(), 
+              shapes: sanitizedShapes, 
+              boardOutline: undefined, // Clear legacy
+              boardOutlineAssignments 
+          };
         });
 
         if (needsUpgrade) {

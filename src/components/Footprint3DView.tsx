@@ -4,7 +4,7 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
 import { STLLoader, OBJLoader, GLTFLoader, GLTFExporter } from "three-stdlib";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference, FootprintMesh } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference, FootprintMesh, FootprintBoardOutline } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
 import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
 import Module from "manifold-3d";
@@ -246,13 +246,17 @@ function createLineShape(
   return s;
 }
 
-function createBoardShape(points: Point[], params: Parameter[], rootFootprint: Footprint, allFootprints: Footprint[]): THREE.Shape | null {
+function createBoardShape(outlineShape: FootprintBoardOutline, params: Parameter[], rootFootprint: Footprint, allFootprints: Footprint[]): THREE.Shape | null {
+    const points = outlineShape.points;
     if (!points || points.length < 3) return null;
     const shape = new THREE.Shape();
 
+    const originX = evaluateExpression(outlineShape.x, params);
+    const originY = evaluateExpression(outlineShape.y, params);
+
     const p0Raw = points[0];
     const p0 = resolvePoint(p0Raw, rootFootprint, allFootprints, params);
-    shape.moveTo(p0.x, p0.y);
+    shape.moveTo(originX + p0.x, originY + p0.y);
     
     for(let i = 0; i < points.length; i++) {
         const currRaw = points[i];
@@ -274,9 +278,9 @@ function createBoardShape(points: Point[], params: Parameter[], rootFootprint: F
             const cp2x = x2 + (next.handleIn ? next.handleIn.x : 0);
             const cp2y = y2 + (next.handleIn ? next.handleIn.y : 0);
             
-            shape.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+            shape.bezierCurveTo(originX + cp1x, originY + cp1y, originX + cp2x, originY + cp2y, originX + x2, originY + y2);
         } else {
-            shape.lineTo(x2, y2);
+            shape.lineTo(originX + x2, originY + y2);
         }
     }
     return shape;
@@ -308,7 +312,7 @@ function flattenShapes(
     let result: FlatShape[] = [];
 
     shapes.forEach(shape => {
-        if (shape.type === "wireGuide") return;
+        if (shape.type === "wireGuide" || shape.type === "boardOutline") return;
 
         const localX = evaluate(shape.x, params);
         const localY = evaluate(shape.y, params);
@@ -719,9 +723,8 @@ const LayerSolid = ({
   bottomZ,
   thickness,
   bounds,
-  boardShape,
-  registerMesh,
-  manifoldModule
+  manifoldModule,
+  registerMesh
 }: {
   layer: StackupLayer;
   footprint: Footprint;
@@ -730,13 +733,31 @@ const LayerSolid = ({
   bottomZ: number;
   thickness: number;
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
-  boardShape: THREE.Shape | null;
-  registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
   manifoldModule: any;
+  registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
 }) => {
   const width = bounds.maxX - bounds.minX;
   const depth = bounds.maxY - bounds.minY; 
   
+  const boardShape = useMemo(() => {
+      if (!footprint.isBoard) return null;
+
+      // Resolve Assigned Board Outline
+      const assignments = footprint.boardOutlineAssignments || {};
+      const assignedId = assignments[layer.id];
+      let outlineShape = footprint.shapes.find(s => s.id === assignedId) as FootprintBoardOutline | undefined;
+
+      // Fallback: If no assignment, use the first available outline
+      if (!outlineShape) {
+          outlineShape = footprint.shapes.find(s => s.type === "boardOutline") as FootprintBoardOutline | undefined;
+      }
+
+      if (outlineShape) {
+          return createBoardShape(outlineShape, params, footprint, allFootprints);
+      }
+      return null;
+  }, [footprint, layer.id, params, allFootprints]);
+
   const centerX = boardShape ? 0 : (bounds.minX + bounds.maxX) / 2;
   const centerZ = boardShape ? 0 : (bounds.minY + bounds.maxY) / 2;
   const centerY = bottomZ + thickness / 2;
@@ -1423,26 +1444,24 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     }
   }));
 
-  const boardShape = useMemo(() => {
-      if (footprint.isBoard && footprint.boardOutline && footprint.boardOutline.length >= 3) {
-          return createBoardShape(footprint.boardOutline, params, footprint, allFootprints);
-      }
-      return null;
-  }, [footprint, params, allFootprints]);
-
   const bounds = useMemo(() => {
     const PADDING = 10;
-    
-    if (footprint.isBoard && footprint.boardOutline && footprint.boardOutline.length >= 3) {
+    const outlines = footprint.shapes.filter(s => s.type === "boardOutline") as FootprintBoardOutline[];
+
+    if (footprint.isBoard && outlines.length > 0) {
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        footprint.boardOutline.forEach(pRaw => {
-             const p = resolvePoint(pRaw, footprint, allFootprints, params);
-             const x = p.x;
-             const y = p.y;
-             if (x < minX) minX = x;
-             if (x > maxX) maxX = x;
-             if (y < minY) minY = y;
-             if (y > maxY) maxY = y;
+        outlines.forEach(outline => {
+            const originX = evaluateExpression(outline.x, params);
+            const originY = evaluateExpression(outline.y, params);
+            outline.points.forEach(pRaw => {
+                const p = resolvePoint(pRaw, footprint, allFootprints, params);
+                const x = originX + p.x;
+                const y = originY + p.y;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            });
         });
         return { minX: minX - PADDING, maxX: maxX + PADDING, minY: minY - PADDING, maxY: maxY + PADDING };
     }
@@ -1508,7 +1527,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                   bottomZ={currentZ}
                   thickness={thickness}
                   bounds={bounds}
-                  boardShape={boardShape}
                   manifoldModule={manifoldModule}
                   registerMesh={(id, mesh) => { 
                       if (mesh) {

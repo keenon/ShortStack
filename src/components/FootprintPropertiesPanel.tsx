@@ -1,9 +1,9 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
 import { Fragment, useMemo } from "react";
-import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide } from "../types";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import { BOARD_OUTLINE_ID, modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
+import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
 
 const FootprintPropertiesPanel = ({
   footprint,
@@ -122,9 +122,14 @@ const FootprintPropertiesPanel = ({
       );
   };
 
+  const shape = footprint.shapes.find(s => s.id === selectedId);
+
   // SPECIAL CASE: Board Outline
-  if (selectedId === BOARD_OUTLINE_ID && footprint.isBoard && footprint.boardOutline) {
-      const points = footprint.boardOutline;
+  if (shape?.type === "boardOutline") {
+      const bo = shape as FootprintBoardOutline;
+      const points = bo.points;
+      const assignments = footprint.boardOutlineAssignments || {};
+
       const addMidpoint = (index: number) => {
           const p1 = points[index];
           const p2 = points[index + 1];
@@ -136,12 +141,68 @@ const FootprintPropertiesPanel = ({
           };
           const newPoints = [...points];
           newPoints.splice(index + 1, 0, newPoint);
-          updateFootprint("boardOutline", newPoints);
+          updateShape(shape.id, "points", newPoints);
       };
 
       return (
           <div className="properties-panel">
-            <h3>Board Outline</h3>
+            <h3>Board Outline Properties</h3>
+
+            {/* Exclusive Layer Selection */}
+            <div className="prop-section">
+                <h4>Applied Layers</h4>
+                <div className="layer-list">
+                    {stackup.map(layer => {
+                        const assignedId = assignments[layer.id];
+                        const isChecked = assignedId === shape.id;
+                        
+                        // Find name of outline actually using this layer
+                        const otherOutline = assignedId && assignedId !== shape.id ? footprint.shapes.find(s => s.id === assignedId) : null;
+
+                        return (
+                            <div key={layer.id} className="layer-assignment-row">
+                                <input 
+                                    type="checkbox" 
+                                    checked={isChecked} 
+                                    onChange={(e) => {
+                                        const newAss = { ...assignments };
+                                        if (e.target.checked) {
+                                            newAss[layer.id] = shape.id;
+                                        } else {
+                                            // Fallback to first outline if unchecking
+                                            const firstOutline = footprint.shapes.find(s => s.type === "boardOutline");
+                                            newAss[layer.id] = firstOutline ? firstOutline.id : "";
+                                        }
+                                        updateFootprint("boardOutlineAssignments", newAss);
+                                    }}
+                                />
+                                <div className="layer-color-badge" style={{ backgroundColor: layer.color }} />
+                                <span className="layer-name">{layer.name}</span>
+                                {!isChecked && otherOutline && (
+                                    <small style={{ color: '#888', fontStyle: 'italic', marginLeft: 'auto' }}>
+                                        Using: {otherOutline.name}
+                                    </small>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            <div className="prop-group">
+                <label>Name</label>
+                <input type="text" value={shape.name} onChange={(e) => updateShape(shape.id, "name", e.target.value)} />
+            </div>
+
+            <div className="prop-group">
+                <label>Origin X</label>
+                <ExpressionEditor value={bo.x} onChange={(val) => updateShape(shape.id, "x", val)} params={params} placeholder="0" />
+            </div>
+            <div className="prop-group">
+                <label>Origin Y</label>
+                <ExpressionEditor value={bo.y} onChange={(val) => updateShape(shape.id, "y", val)} params={params} placeholder="0" />
+            </div>
+
             <div className="prop-group">
                 <label>Outline Points</label>
                 <div className="points-list-container">
@@ -153,11 +214,11 @@ const FootprintPropertiesPanel = ({
                                 (newP) => {
                                     const newPoints = [...points];
                                     newPoints[idx] = newP;
-                                    updateFootprint("boardOutline", newPoints);
+                                    updateShape(shape.id, "points", newPoints);
                                 },
                                 () => {
                                     const newPoints = points.filter((_, i) => i !== idx);
-                                    updateFootprint("boardOutline", newPoints);
+                                    updateShape(shape.id, "points", newPoints);
                                 }
                             )}
                             {idx < points.length - 1 && (
@@ -171,7 +232,7 @@ const FootprintPropertiesPanel = ({
                             const newPoints = [...points];
                             const last = newPoints[newPoints.length - 1] || { x: "0", y: "0" };
                             newPoints.push({ id: crypto.randomUUID(), x: modifyExpression(last.x, 10), y: modifyExpression(last.y, 0), });
-                            updateFootprint("boardOutline", newPoints);
+                            updateShape(shape.id, "points", newPoints);
                         }}>+ Add Point</button>
                 </div>
             </div>
@@ -237,7 +298,6 @@ const FootprintPropertiesPanel = ({
       );
   }
 
-  const shape = footprint.shapes.find(s => s.id === selectedId);
   if (!shape) return null;
 
   // NEW: Wire Guide Properties

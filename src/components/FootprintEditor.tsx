@@ -2,10 +2,10 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { BOARD_OUTLINE_ID, modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint } from "../utils/footprintUtils";
-import { RecursiveShapeRenderer, BoardOutlineRenderer } from "./FootprintRenderers";
+import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint } from "../utils/footprintUtils";
+import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import './FootprintEditor.css';
 
@@ -110,6 +110,7 @@ const ShapeListPanel = ({
   updateFootprint,
   stackup,
   isShapeVisible,
+  addShape
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -121,18 +122,16 @@ const ShapeListPanel = ({
   updateFootprint: (field: string, val: any) => void;
   stackup: StackupLayer[];
   isShapeVisible: (shape: FootprintShape) => boolean;
+  addShape: (type: any) => void;
 }) => {
   
   const handleBoardToggle = (checked: boolean) => {
       updateFootprint("isBoard", checked);
-      if (checked && (!footprint.boardOutline || footprint.boardOutline.length === 0)) {
-          const defaultOutline = [
-             { id: crypto.randomUUID(), x: "-10", y: "-10" },
-             { id: crypto.randomUUID(), x: "10", y: "-10" },
-             { id: crypto.randomUUID(), x: "10", y: "10" },
-             { id: crypto.randomUUID(), x: "-10", y: "10" },
-          ];
-          updateFootprint("boardOutline", defaultOutline);
+      if (checked) {
+          const hasOutline = footprint.shapes.some(s => s.type === "boardOutline");
+          if (!hasOutline) {
+              addShape("boardOutline");
+          }
       }
   };
 
@@ -148,13 +147,10 @@ const ShapeListPanel = ({
       </div>
 
       <div className="shape-list-container">
-        {footprint.isBoard && (
-            <div className={`shape-item ${selectedShapeId === BOARD_OUTLINE_ID ? "selected" : ""}`} onClick={() => onSelect(BOARD_OUTLINE_ID)}>
-                <span className="shape-name-edit" style={{ fontWeight: 'bold' }}>Board Outline</span>
-            </div>
-        )}
-
         {footprint.shapes.map((shape, index) => {
+          // If not a board, hide outline shapes in the list
+          if (!footprint.isBoard && shape.type === "boardOutline") return null;
+
           const visible = isShapeVisible(shape);
           
           let hasError = false;
@@ -171,6 +167,10 @@ const ShapeListPanel = ({
           let usedLayers: StackupLayer[] = [];
           if (shape.type === "footprint") {
               usedLayers = getRecursiveLayers((shape as FootprintReference).footprintId, allFootprints, stackup);
+          } else if (shape.type === "boardOutline") {
+              // Show layers explicitly assigned to this outline
+              const assignments = footprint.boardOutlineAssignments || {};
+              usedLayers = stackup.filter(l => assignments[l.id] === shape.id);
           } else {
               usedLayers = stackup.filter(l => shape.assignedLayers && shape.assignedLayers[l.id] !== undefined);
           }
@@ -202,7 +202,7 @@ const ShapeListPanel = ({
             </div>
           </div>
         )})}
-        {footprint.shapes.length === 0 && !footprint.isBoard && <div className="empty-state-small">No shapes added.</div>}
+        {footprint.shapes.length === 0 && <div className="empty-state-small">No shapes added.</div>}
       </div>
     </div>
   );
@@ -241,7 +241,7 @@ const MeshListPanel = ({
                             <input 
                                 type="text" 
                                 value={mesh.name} 
-                                onChange={(e) => onRename(mesh.id, e.target.value)} 
+                                onChange={(e) => updateMesh(mesh.id, "name", e.target.value)} 
                                 className="shape-name-edit" 
                                 onClick={(e) => e.stopPropagation()}
                             />
@@ -442,20 +442,13 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       if (viewMode !== "2D") return;
       setSelectedShapeId(id);
       
-      if (id === BOARD_OUTLINE_ID) {
-          if (!footprint.boardOutline) return;
-          isShapeDragging.current = true;
-          dragTargetRef.current = { id, pointIdx: pointIndex }; 
-          shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
-          shapeDragStartData.current = JSON.parse(JSON.stringify(footprint.boardOutline));
-      } else {
-          const shape = footprint.shapes.find(s => s.id === id);
-          if (!shape) return;
-          isShapeDragging.current = true;
-          dragTargetRef.current = { id, pointIdx: pointIndex };
-          shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
-          shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
-      }
+      const shape = footprint.shapes.find(s => s.id === id);
+      if (!shape) return;
+      isShapeDragging.current = true;
+      dragTargetRef.current = { id, pointIdx: pointIndex };
+      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+      shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
+      
       window.addEventListener('mousemove', handleShapeMouseMove);
       window.addEventListener('mouseup', handleShapeMouseUp);
   };
@@ -465,20 +458,13 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       if (viewMode !== "2D") return;
       setSelectedShapeId(id);
 
-      if (id === BOARD_OUTLINE_ID) {
-           if (!footprint.boardOutline) return;
-           isShapeDragging.current = true;
-           dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
-           shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
-           shapeDragStartData.current = JSON.parse(JSON.stringify(footprint.boardOutline));
-      } else {
-          const shape = footprint.shapes.find(s => s.id === id);
-          if (!shape) return;
-          isShapeDragging.current = true;
-          dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
-          shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
-          shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
-      }
+      const shape = footprint.shapes.find(s => s.id === id);
+      if (!shape) return;
+      isShapeDragging.current = true;
+      dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
+      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+      shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
+      
       window.addEventListener('mousemove', handleShapeMouseMove);
       window.addEventListener('mouseup', handleShapeMouseUp);
   };
@@ -495,68 +481,45 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       const currentFP = footprintRef.current;
       const { id, pointIdx, handleType } = dragTargetRef.current;
       
-      if (id === BOARD_OUTLINE_ID) {
-          const startPoints = shapeDragStartData.current as Point[];
-          const newPoints = [...startPoints];
-          if (handleType && pointIdx !== undefined) {
-               const p = newPoints[pointIdx];
-               if (p.snapTo) return; // Cannot drag handles of a point snapped to a guide
-               if (handleType === 'in' && p.handleIn) {
-                   newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorld) } };
-               } else if (handleType === 'out' && p.handleOut) {
-                   newPoints[pointIdx] = { ...p, handleOut: { x: modifyExpression(p.handleOut.x, dxWorld), y: modifyExpression(p.handleOut.y, dyWorld) } };
-               }
-          } else if (pointIdx !== undefined) {
-               const p = newPoints[pointIdx];
-               if (p.snapTo) return; // Cannot drag position of a point snapped to a guide
-               newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) };
-          } else {
-               for(let i=0; i<newPoints.length; i++) {
-                   newPoints[i] = { ...newPoints[i], x: modifyExpression(newPoints[i].x, dxWorld), y: modifyExpression(newPoints[i].y, dyWorld) };
-               }
-          }
-          onUpdate({ ...currentFP, boardOutline: newPoints });
-      } else {
-          const startShape = shapeDragStartData.current as FootprintShape;
-          const updatedShapes = currentFP.shapes.map(s => {
-              if (s.id === id) {
-                  if (s.type === "line" && startShape.type === "line") {
-                      const newPoints = [...startShape.points];
-                      if (handleType && pointIdx !== undefined) {
-                          const p = newPoints[pointIdx];
-                          if (p.snapTo) return s; // Cannot drag handles of a point snapped to a guide
-                          if (handleType === 'in' && p.handleIn) {
-                              newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorld) } };
-                          } else if (handleType === 'out' && p.handleOut) {
-                              newPoints[pointIdx] = { ...p, handleOut: { x: modifyExpression(p.handleOut.x, dxWorld), y: modifyExpression(p.handleOut.y, dyWorld) } };
-                          }
-                      } else if (pointIdx !== undefined) {
-                          const p = newPoints[pointIdx];
-                          if (p.snapTo) return s; // Cannot drag position of a point snapped to a guide
-                          newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) };
-                      } else {
-                          const allMoved = newPoints.map(p => ({ ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) }));
-                          return { ...s, points: allMoved };
+      const startShape = shapeDragStartData.current as FootprintShape;
+      const updatedShapes = currentFP.shapes.map(s => {
+          if (s.id === id) {
+              if ((s.type === "line" || s.type === "boardOutline") && (startShape.type === "line" || startShape.type === "boardOutline")) {
+                  const newPoints = [...startShape.points];
+                  if (handleType && pointIdx !== undefined) {
+                      const p = newPoints[pointIdx];
+                      if (p.snapTo) return s; // Cannot drag handles of a point snapped to a guide
+                      if (handleType === 'in' && p.handleIn) {
+                          newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorld) } };
+                      } else if (handleType === 'out' && p.handleOut) {
+                          newPoints[pointIdx] = { ...p, handleOut: { x: modifyExpression(p.handleOut.x, dxWorld), y: modifyExpression(p.handleOut.y, dyWorld) } };
                       }
-                      return { ...s, points: newPoints };
-                  } 
-                  if ((s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide") && (startShape.type === "circle" || startShape.type === "rect" || startShape.type === "footprint" || startShape.type === "wireGuide")) {
-                      // Wire Guides have handle properties too (handleIn, handleOut), check if drag target is handle
-                      if (s.type === "wireGuide" && handleType) {
-                           const startWg = startShape as FootprintWireGuide;
-                           if (handleType === 'in' && startWg.handleIn) {
-                               return { ...s, handleIn: { x: modifyExpression(startWg.handleIn.x, dxWorld), y: modifyExpression(startWg.handleIn.y, dyWorld) } };
-                           } else if (handleType === 'out' && startWg.handleOut) {
-                               return { ...s, handleOut: { x: modifyExpression(startWg.handleOut.x, dxWorld), y: modifyExpression(startWg.handleOut.y, dyWorld) } };
-                           }
-                      }
-                      return { ...s, x: modifyExpression(startShape.x, dxWorld), y: modifyExpression(startShape.y, dyWorld) };
+                  } else if (pointIdx !== undefined) {
+                      const p = newPoints[pointIdx];
+                      if (p.snapTo) return s; // Cannot drag position of a point snapped to a guide
+                      newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) };
+                  } else {
+                      const allMoved = newPoints.map(p => ({ ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) }));
+                      return { ...s, points: allMoved };
                   }
+                  return { ...s, points: newPoints };
+              } 
+              if ((s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide") && (startShape.type === "circle" || startShape.type === "rect" || startShape.type === "footprint" || startShape.type === "wireGuide")) {
+                  // Wire Guides have handle properties too (handleIn, handleOut), check if drag target is handle
+                  if (s.type === "wireGuide" && handleType) {
+                       const startWg = startShape as FootprintWireGuide;
+                       if (handleType === 'in' && startWg.handleIn) {
+                           return { ...s, handleIn: { x: modifyExpression(startWg.handleIn.x, dxWorld), y: modifyExpression(startWg.handleIn.y, dyWorld) } };
+                       } else if (handleType === 'out' && startWg.handleOut) {
+                           return { ...s, handleOut: { x: modifyExpression(startWg.handleOut.x, dxWorld), y: modifyExpression(startWg.handleOut.y, dyWorld) } };
+                       }
+                  }
+                  return { ...s, x: modifyExpression(startShape.x, dxWorld), y: modifyExpression(startShape.y, dyWorld) };
               }
-              return s;
-          });
-          onUpdate({ ...currentFP, shapes: updatedShapes });
-      }
+          }
+          return s;
+      });
+      onUpdate({ ...currentFP, shapes: updatedShapes });
   };
 
   const handleShapeMouseUp = (_e: MouseEvent) => {
@@ -568,7 +531,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   };
 
   // --- ACTIONS ---
-  const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide", footprintId?: string) => {
+  const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline", footprintId?: string) => {
     const base = { id: crypto.randomUUID(), name: `New ${type}`, assignedLayers: {}, };
     let newShape: FootprintShape;
 
@@ -588,6 +551,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0", cornerRadius: "0" };
     } else if (type === "wireGuide") {
       newShape = { ...base, type: "wireGuide", x: "0", y: "0", name: "Wire Guide" } as FootprintWireGuide;
+    } else if (type === "boardOutline") {
+      newShape = { ...base, type: "boardOutline", x: "0", y: "0", name: "Board Outline", points: [{ id: crypto.randomUUID(), x: "-10", y: "-10" }, { id: crypto.randomUUID(), x: "10", y: "-10" }, { id: crypto.randomUUID(), x: "10", y: "10" }, { id: crypto.randomUUID(), x: "-10", y: "10" }] } as FootprintBoardOutline;
     } else {
       newShape = { ...base, type: "line", thickness: "1", x: "0", y: "0", points: [{ id: crypto.randomUUID(), x: "0", y: "0" }, { id: crypto.randomUUID(), x: "10", y: "10" }] };
     }
@@ -597,6 +562,20 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     } else {
         onUpdate({ ...footprint, shapes: [...footprint.shapes, newShape] });
     }
+
+    // Automatic Layer Assignment for Board Outlines
+    if (type === "boardOutline") {
+        const assignments = { ...footprint.boardOutlineAssignments };
+        const outlines = [...footprint.shapes, newShape].filter(s => s.type === "boardOutline");
+        // If this is the first outline, assign it to all layers
+        if (outlines.length === 1) {
+            stackup.forEach(l => {
+                assignments[l.id] = newShape.id;
+            });
+            onUpdate({ ...footprint, shapes: [...footprint.shapes, newShape], boardOutlineAssignments: assignments });
+        }
+    }
+
     setSelectedShapeId(newShape.id);
   };
 
@@ -604,7 +583,26 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     onUpdate({ ...footprint, shapes: footprint.shapes.map((s) => s.id === shapeId ? { ...s, [field]: val } : s), });
   };
   const updateFootprintField = (field: string, val: any) => { onUpdate({ ...footprint, [field]: val }); };
-  const deleteShape = (shapeId: string) => { onUpdate({ ...footprint, shapes: footprint.shapes.filter(s => s.id !== shapeId) }); setSelectedShapeId(null); };
+  
+  const deleteShape = (shapeId: string) => {
+    const shapeToDelete = footprint.shapes.find(s => s.id === shapeId);
+    let newAssignments = { ...footprint.boardOutlineAssignments };
+    const newShapes = footprint.shapes.filter(s => s.id !== shapeId);
+
+    // REASSIGNMENT LOGIC for Board Outlines
+    if (shapeToDelete?.type === "boardOutline") {
+        const remainingOutlines = newShapes.filter(s => s.type === "boardOutline");
+        Object.entries(newAssignments).forEach(([layerId, assignedId]) => {
+            if (assignedId === shapeId) {
+                newAssignments[layerId] = remainingOutlines.length > 0 ? remainingOutlines[0].id : "";
+            }
+        });
+    }
+
+    onUpdate({ ...footprint, shapes: newShapes, boardOutlineAssignments: newAssignments });
+    setSelectedShapeId(null);
+  };
+
   const moveShape = (index: number, direction: -1 | 1) => {
     if (direction === -1 && index === 0) return;
     if (direction === 1 && index === footprint.shapes.length - 1) return;
@@ -744,7 +742,10 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     const layerThickness = evaluateExpression(layer.thicknessExpression, params);
 
     // Evaluate Board Outline with Handles and Snaps
-    const outline = (footprint.boardOutline || []).map(p => {
+    const assignedOutlineId = footprint.boardOutlineAssignments?.[layerId];
+    const outlineShape = footprint.shapes.find(s => s.id === assignedOutlineId) as FootprintBoardOutline | undefined;
+    
+    const outline = (outlineShape?.points || []).map(p => {
         const resolved = resolvePoint(p, footprint, allFootprints, params);
         return {
             x: resolved.x,
@@ -799,13 +800,14 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
   const activeShape = footprint.shapes.find((s) => s.id === selectedShapeId);
   const activeMesh = footprint.meshes ? footprint.meshes.find(m => m.id === selectedShapeId) : null;
-  const isBoardSelected = selectedShapeId === BOARD_OUTLINE_ID;
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
   const isShapeVisible = (shape: FootprintShape) => {
+      // Board outlines visible based on isBoard flag
+      if (shape.type === "boardOutline") return !!footprint.isBoard;
       // Wire guides always visible in editor
       if (shape.type === "wireGuide") return true;
-      // Recursive footprints are visible if not explicitly hidden (no layer assignment usually, but could implement)
+      // Recursive footprints are visible if not explicitly hidden
       if (shape.type === "footprint") return true; 
 
       const assignedIds = Object.keys(shape.assignedLayers || {});
@@ -833,6 +835,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         <button onClick={() => addShape("rect")}>+ Rect</button>
         <button onClick={() => addShape("line")}>+ Line</button>
         <button onClick={() => addShape("wireGuide")}>+ Guide</button>
+        {footprint.isBoard && <button onClick={() => addShape("boardOutline")}>+ Outline</button>}
         
         {/* Footprint Dropdown */}
         <div style={{ marginLeft: '10px', display: 'flex', alignItems: 'center' }}>
@@ -878,6 +881,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 updateFootprint={updateFootprintField}
                 stackup={stackup}
                 isShapeVisible={isShapeVisible}
+                addShape={addShape}
             />
             <MeshListPanel
                 meshes={footprint.meshes || []}
@@ -919,20 +923,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                     <line x1={viewBox.x} y1="0" x2={viewBox.x + viewBox.width} y2="0" stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
                     <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
                     
-                    {footprint.isBoard && footprint.boardOutline && (
-                        <BoardOutlineRenderer
-                            points={footprint.boardOutline}
-                            isSelected={selectedShapeId === BOARD_OUTLINE_ID}
-                            params={params}
-                            onMouseDown={handleShapeMouseDown}
-                            onHandleDown={handleHandleMouseDown}
-                            handleRadius={handleRadius}
-                            // Pass context for resolving snaps
-                            rootFootprint={footprint}
-                            allFootprints={allFootprints}
-                        />
-                    )}
-
                     {/* Shapes Rendered Reversed (Bottom to Top visual order) */}
                     {[...footprint.shapes].reverse().map((shape) => {
                         if (!isShapeVisible(shape)) return null;
@@ -976,7 +966,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         </div>
 
         <div className="fp-sidebar">
-          {activeShape || activeMesh || isBoardSelected ? (
+          {activeShape || activeMesh ? (
             <>
               <FootprintPropertiesPanel 
                 footprint={footprint}
@@ -1015,7 +1005,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 }
 
 // ------------------------------------------------------------------
-// HELPER: Collect Export Shapes Recursively (Omitted for brevity as unchanged)
+// HELPER: Collect Export Shapes Recursively
 // ------------------------------------------------------------------
 function collectExportShapes(
     contextFootprint: Footprint, 
@@ -1032,8 +1022,8 @@ function collectExportShapes(
     const reversedShapes = [...shapes].reverse();
 
     reversedShapes.forEach(shape => {
-        // SKIP WIRE GUIDES (Virtual)
-        if (shape.type === "wireGuide") return;
+        // SKIP WIRE GUIDES (Virtual) & BOARD OUTLINES
+        if (shape.type === "wireGuide" || shape.type === "boardOutline") return;
 
         // 1. Calculate Local Transform
         const lx = evaluateExpression(shape.x, params);

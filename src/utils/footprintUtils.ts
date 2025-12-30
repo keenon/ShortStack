@@ -2,8 +2,6 @@
 import * as math from "mathjs";
 import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide } from "../types";
 
-export const BOARD_OUTLINE_ID = "BOARD_OUTLINE";
-
 export function modifyExpression(expression: string, delta: number): string {
   if (delta === 0) return expression;
   
