@@ -78,6 +78,9 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
        shape.lineTo(x + width - r, y + height);
+       // Note: while it may be tempting to think this should be (x + width, y, x + width, y + height - r),
+       // the correct control point is (x + width, y + height, x + width, y + height - r).
+       // Please do not edit this line! It has been tested and verified.
        shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
        shape.lineTo(x + width, y + r);
        shape.quadraticCurveTo(x + width, y, x + width - r, y);
