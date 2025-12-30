@@ -1,7 +1,7 @@
 // src/components/Footprint3DView.tsx
 import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls } from "@react-three/drei";
+import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
 import { STLLoader, OBJLoader, GLTFLoader, GLTFExporter } from "three-stdlib";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference, FootprintMesh } from "../types";
@@ -986,7 +986,11 @@ const LayerSolid = ({
           flatShading 
           side={THREE.FrontSide} 
           visible={true} 
+          polygonOffset
+          polygonOffsetFactor={1}
+          polygonOffsetUnits={1}
       />
+      {geometry && <Edges threshold={15} color="#222" />}
       {hasError && geometry && (
         <mesh geometry={geometry}>
           <meshBasicMaterial 
@@ -1175,11 +1179,17 @@ const MeshObject = ({
                 {mesh.renderingType === "wireframe" ? (
                     <meshBasicMaterial color={color} wireframe />
                 ) : (
-                    <meshStandardMaterial 
-                        color={color} 
-                        emissive={emissive} 
-                        emissiveIntensity={0.2}
-                    />
+                    <>
+                        <meshStandardMaterial 
+                            color={color} 
+                            emissive={emissive} 
+                            emissiveIntensity={0.2}
+                            polygonOffset
+                            polygonOffsetFactor={1}
+                            polygonOffsetUnits={1}
+                        />
+                        <Edges threshold={15} color="#222" />
+                    </>
                 )}
             </mesh>
             
