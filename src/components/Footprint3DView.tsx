@@ -1015,7 +1015,14 @@ const LayerSolid = ({
           polygonOffsetFactor={1}
           polygonOffsetUnits={1}
       />
-      {geometry && <Edges threshold={15} color="#222" />}
+      {geometry && (
+            <Edges 
+                key={geometry.uuid}      // Force remount when geometry instance changes
+                geometry={geometry}      // Explicitly pass geometry to be safe
+                threshold={15} 
+                color="#222" 
+            />
+        )}
       {hasError && geometry && (
         <mesh geometry={geometry}>
           <meshBasicMaterial 
