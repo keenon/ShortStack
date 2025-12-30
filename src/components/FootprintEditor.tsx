@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
@@ -224,6 +224,7 @@ const MeshListPanel = ({
     onRename: (id: string, name: string) => void;
     updateMesh: (id: string, field: string, val: any) => void;
 }) => {
+  (onRename); // Unused for now
     return (
         <div className="fp-left-subpanel">
             <h3 style={{ marginTop: 0 }}>Meshes</h3>

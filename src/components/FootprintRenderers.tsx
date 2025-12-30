@@ -1,6 +1,6 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, Point, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline } from "../types";
 import { evaluateExpression, interpolateColor, resolvePoint } from "../utils/footprintUtils";
 
 // RECURSIVE SHAPE RENDERER

@@ -3,8 +3,8 @@ import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, 
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
-import { STLLoader, OBJLoader, GLTFLoader, GLTFExporter } from "three-stdlib";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, Point, FootprintReference, FootprintMesh, FootprintBoardOutline } from "../types";
+import { STLLoader, OBJLoader, GLTFLoader } from "three-stdlib";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
 import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
 import Module from "manifold-3d";
@@ -676,7 +676,9 @@ async function loadMeshGeometry(mesh: FootprintMesh): Promise<THREE.BufferGeomet
              });
              if (geometries.length > 0) {
                  const merged = mergeBufferGeometries(geometries);
-                 meshGeometryCache.set(cacheKey, merged);
+                 if (merged) {
+                    meshGeometryCache.set(cacheKey, merged);
+                 }
                  return merged;
              }
         } else if (mesh.format === "glb") {
@@ -691,7 +693,9 @@ async function loadMeshGeometry(mesh: FootprintMesh): Promise<THREE.BufferGeomet
                     });
                     if (geometries.length > 0) {
                         const merged = mergeBufferGeometries(geometries);
-                        meshGeometryCache.set(cacheKey, merged);
+                        if (merged) {
+                            meshGeometryCache.set(cacheKey, merged);
+                        }
                         resolve(merged);
                     } else {
                         resolve(null);
@@ -1221,7 +1225,7 @@ const MeshObject = ({
                     
                     <TransformControls 
                         ref={controlRef}
-                        object={ghostRef} 
+                        object={ghostRef as any} 
                         mode="translate" 
                         space="local" 
                         onMouseDown={() => setIsDragging(true)}
@@ -1263,14 +1267,15 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 
     // 2. Worker Init
     if (!workerRef.current) {
-        workerRef.current = new MeshWorker();
+        const worker = new MeshWorker();
+        workerRef.current = worker;
         
         // NEW: Catch startup errors (like import failures)
-        workerRef.current.onerror = (err) => {
+        worker.onerror = (err: any) => {
             console.error("Worker Initialization Error:", err.message, err.filename, err.lineno);
         };
 
-        workerRef.current.onmessage = (e) => {
+        worker.onmessage = (e: MessageEvent) => {
             const { id, type, payload, error } = e.data;
             if (workerCallbacks.current.has(id)) {
                 const cb = workerCallbacks.current.get(id)!;
@@ -1282,7 +1287,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 
         // Send OCCT Init
         const initId = crypto.randomUUID();
-        workerRef.current.postMessage({ 
+        worker.postMessage({ 
             id: initId, 
             type: "init", 
             payload: { wasmUrl: occtWasmUrl } 
