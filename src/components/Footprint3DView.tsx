@@ -823,14 +823,14 @@ const LayerSolid = ({
             let safeRadius = endmillRadius;
             if (shape.type === "circle") {
                  const d = evaluateExpression((shape as any).diameter, params);
-                 safeRadius = Math.min(safeRadius, d/2 - 0.01);
+                 safeRadius = Math.min(safeRadius, d/2 - 0.05);
             } else if (shape.type === "rect") {
                  const w = evaluateExpression((shape as FootprintRect).width, params);
                  const h = evaluateExpression((shape as FootprintRect).height, params);
-                 safeRadius = Math.min(safeRadius, Math.min(w, h)/2 - 0.01);
+                 safeRadius = Math.min(safeRadius, Math.min(w, h)/2 - 0.05);
             } else if (shape.type === "line") {
                  const t = evaluateExpression((shape as FootprintLine).thickness, params);
-                 safeRadius = Math.min(safeRadius, t/2 - 0.01);
+                 safeRadius = Math.min(safeRadius, t/2 - 0.05);
             }
             if (safeRadius < 0) safeRadius = 0;
 
