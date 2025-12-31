@@ -1,5 +1,5 @@
 // src/components/Footprint3DView.tsx
-import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, useCallback } from "react";
+import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, useLayoutEffect, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
@@ -1151,31 +1151,29 @@ const MeshObject = ({
         return () => { mounted = false; };
     }, [mesh]);
 
-    // Sync Ghost to globalTransform when NOT dragging to avoid loops
-    useEffect(() => {
-        if (!isDragging && ghostRef.current) {
-            ghostRef.current.position.setFromMatrixPosition(globalTransform);
-            ghostRef.current.quaternion.setFromRotationMatrix(globalTransform);
-            ghostRef.current.scale.setFromMatrixScale(globalTransform);
-        }
-    }, [globalTransform, isDragging]);
+    // 1. Calculate transforms from the matrix immediately during render
+    // This ensures we have the values ready to pass to the props
+    const position = useMemo(() => new THREE.Vector3().setFromMatrixPosition(globalTransform), [globalTransform]);
+    const quaternion = useMemo(() => new THREE.Quaternion().setFromRotationMatrix(globalTransform), [globalTransform]);
+    const scale = useMemo(() => new THREE.Vector3().setFromMatrixScale(globalTransform), [globalTransform]);
+
+    // REMOVED: The useEffect/useLayoutEffect for syncing ghostRef. 
+    // We now handle this via props on the <object3D> below.
 
     const handleChange = () => {
         if (!ghostRef.current || !isEditable) return;
         
         const ghostPos = ghostRef.current.position;
-        const ghostRot = ghostRef.current.rotation; // Euler
+        const ghostRot = ghostRef.current.rotation; 
         
-        // Decompose current state transform to compare
+        // Compare against the authoritative state
         const currentPos = new THREE.Vector3().setFromMatrixPosition(globalTransform);
         const currentRot = new THREE.Euler().setFromRotationMatrix(globalTransform);
 
-        // Calculate delta from where the state IS to where the gizmo IS
         const dx = ghostPos.x - currentPos.x;
         const dy = ghostPos.y - currentPos.y;
         const dz = ghostPos.z - currentPos.z;
         
-        // Rotation diff (approximate for small steps)
         const dRx = (ghostRot.x - currentRot.x) * (180/Math.PI);
         const dRy = (ghostRot.y - currentRot.y) * (180/Math.PI);
         const dRz = (ghostRot.z - currentRot.z) * (180/Math.PI);
@@ -1199,10 +1197,10 @@ const MeshObject = ({
             <mesh 
                 ref={meshRef}
                 geometry={geometry} 
-                // Render visible mesh purely from props (state leads rendering)
-                position={new THREE.Vector3().setFromMatrixPosition(globalTransform)}
-                quaternion={new THREE.Quaternion().setFromRotationMatrix(globalTransform)}
-                scale={new THREE.Vector3().setFromMatrixScale(globalTransform)}
+                // Apply transforms to visible mesh
+                position={position}
+                quaternion={quaternion}
+                scale={scale}
                 onClick={(e) => {
                     e.stopPropagation();
                     onSelect();
@@ -1227,8 +1225,16 @@ const MeshObject = ({
             
             {isSelected && isEditable && (
                 <>
-                    {/* Phantom Object for controls to attach to */}
-                    <object3D ref={ghostRef} />
+                    {/* 
+                       FIX: Pass props directly to initialize correctly.
+                       Use `undefined` when dragging so React doesn't overwrite the Gizmo's work.
+                    */}
+                    <object3D 
+                        ref={ghostRef} 
+                        position={isDragging ? undefined : position}
+                        quaternion={isDragging ? undefined : quaternion}
+                        scale={isDragging ? undefined : scale}
+                    />
                     
                     <TransformControls 
                         ref={controlRef}
