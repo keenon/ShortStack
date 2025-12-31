@@ -1,5 +1,5 @@
 // src/components/Footprint3DView.tsx
-import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, useLayoutEffect, useCallback } from "react";
+import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
