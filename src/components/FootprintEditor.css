@@ -507,7 +507,8 @@
 
 .handle-inputs {
     display: flex;
-    gap: 10px;
+    gap: 8px;
+    flex-direction: column;
 }
 
 .mini-input {

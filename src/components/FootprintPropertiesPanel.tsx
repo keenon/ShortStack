@@ -485,9 +485,9 @@ const FootprintPropertiesPanel = ({
                 
                 {isChecked && layer.type === "Carved/Printed" && (
                     <div className="layer-depth-wrapper">
-                        <div style={{ display: 'flex', gap: '5px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                             <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Depth</div>
+                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Cut Depth</div>
                                 <ExpressionEditor value={assignment.depth} onChange={(val) => {
                                         const newAssignments = { ...shape.assignedLayers };
                                         newAssignments[layer.id] = { ...assignment, depth: val };
@@ -495,7 +495,7 @@ const FootprintPropertiesPanel = ({
                                     }} params={params} placeholder="Depth" />
                             </div>
                             <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Radius</div>
+                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Ball-nose Endmill Radius</div>
                                 <ExpressionEditor value={assignment.endmillRadius} onChange={(val) => {
                                         const newAssignments = { ...shape.assignedLayers };
                                         newAssignments[layer.id] = { ...assignment, endmillRadius: val };
