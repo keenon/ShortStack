@@ -5,6 +5,8 @@
     height: 100%;
     position: relative; /* For Spinner Overlay */
 }
+
+/* Toolbar Buttons */
 .fp-toolbar {
     display: flex;
     gap: 10px;
@@ -13,6 +15,13 @@
     background: #2a2a2a;
     border-bottom: 1px solid #333;
 }
+.fp-toolbar button {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+}
+
 .fp-toolbar .spacer { flex-grow: 1; }
 
 .toolbar-name-input {
@@ -88,6 +97,16 @@
 
 .shape-item.is-hidden {
     opacity: 0.5;
+}
+
+/* Icons in Shape List */
+.shape-icon {
+    margin-right: 8px;
+    color: #888;
+    flex-shrink: 0;
+}
+.shape-item.selected .shape-icon {
+    color: #646cff;
 }
 
 .shape-layer-indicators {

@@ -4,9 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, calcMid, bezier1D } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
+import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh } from "./Icons";
 import './FootprintEditor.css';
 
 interface Props {
@@ -135,6 +136,18 @@ const ShapeListPanel = ({
       }
   };
 
+  const getIcon = (type: string) => {
+      switch(type) {
+          case "circle": return <IconCircle className="shape-icon" />;
+          case "rect": return <IconRect className="shape-icon" />;
+          case "line": return <IconLine className="shape-icon" />;
+          case "wireGuide": return <IconGuide className="shape-icon" />;
+          case "boardOutline": return <IconOutline className="shape-icon" />;
+          case "footprint": return <IconFootprint className="shape-icon" />;
+          default: return null;
+      }
+  };
+
   return (
     <div className="fp-left-subpanel">
       <h3 style={{ marginTop: 0 }}>Objects</h3>
@@ -183,6 +196,8 @@ const ShapeListPanel = ({
             onClick={() => onSelect(shape.id)}
             style={hasError ? { border: '1px solid red' } : {}}
           >
+            {getIcon(shape.type)}
+            
             <div className="shape-layer-indicators">
               {usedLayers.map(layer => (
                  <div key={layer.id} className="layer-indicator-dot" style={{ backgroundColor: layer.color }} title={layer.name} />
@@ -236,6 +251,7 @@ const MeshListPanel = ({
                         onClick={() => onSelect(mesh.id)}
                     >
                         <div style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
+                            <IconMesh className="shape-icon" />
                             <div style={{ marginRight: '8px', fontSize: '0.8em', color: '#888', textTransform: 'uppercase' }}>
                                 {mesh.format}
                             </div>
@@ -908,11 +924,11 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         <button className="secondary" onClick={onClose}>← Back</button>
         <input className="toolbar-name-input" type="text" value={footprint.name} onChange={(e) => updateFootprintName(e.target.value)} />
         <div className="spacer" />
-        <button onClick={() => addShape("circle")}>+ Circle</button>
-        <button onClick={() => addShape("rect")}>+ Rect</button>
-        <button onClick={() => addShape("line")}>+ Line</button>
-        <button onClick={() => addShape("wireGuide")}>+ Guide</button>
-        {footprint.isBoard && <button onClick={() => addShape("boardOutline")}>+ Outline</button>}
+        <button onClick={() => addShape("circle")}><IconCircle /> Circle</button>
+        <button onClick={() => addShape("rect")}><IconRect /> Rect</button>
+        <button onClick={() => addShape("line")}><IconLine /> Line</button>
+        <button onClick={() => addShape("wireGuide")}><IconGuide /> Guide</button>
+        {footprint.isBoard && <button onClick={() => addShape("boardOutline")}><IconOutline /> Outline</button>}
         
         {/* Footprint Dropdown */}
         <div style={{ marginLeft: '10px', display: 'flex', alignItems: 'center' }}>
