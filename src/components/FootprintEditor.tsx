@@ -2,12 +2,12 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
-import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh } from "./Icons";
+import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh, IconPolygon } from "./Icons";
 import './FootprintEditor.css';
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
@@ -146,6 +146,7 @@ const ShapeListPanel = ({
           case "circle": return <IconCircle className="shape-icon" />;
           case "rect": return <IconRect className="shape-icon" />;
           case "line": return <IconLine className="shape-icon" />;
+          case "polygon": return <IconPolygon className="shape-icon" />;
           case "wireGuide": return <IconGuide className="shape-icon" />;
           case "boardOutline": return <IconOutline className="shape-icon" />;
           case "footprint": return <IconFootprint className="shape-icon" />;
@@ -527,7 +528,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       const startShape = shapeDragStartData.current as FootprintShape;
       const updatedShapes = currentFP.shapes.map(s => {
           if (s.id === id) {
-              if ((s.type === "line" || s.type === "boardOutline") && (startShape.type === "line" || startShape.type === "boardOutline")) {
+              if ((s.type === "line" || s.type === "boardOutline" || s.type === "polygon") && (startShape.type === "line" || startShape.type === "boardOutline" || startShape.type === "polygon")) {
                   const newPoints = [...startShape.points];
                   if (handleType && pointIdx !== undefined) {
                       const p = newPoints[pointIdx];
@@ -680,7 +681,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   }, [handleCopy, handlePaste, handleDuplicate]);
 
   // --- ACTIONS ---
-  const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline", footprintId?: string) => {
+  const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon", footprintId?: string) => {
     const base = { id: crypto.randomUUID(), name: `New ${type}`, assignedLayers: {}, };
     let newShape: FootprintShape;
 
@@ -702,6 +703,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       newShape = { ...base, type: "wireGuide", x: "0", y: "0", name: "Wire Guide" } as FootprintWireGuide;
     } else if (type === "boardOutline") {
       newShape = { ...base, type: "boardOutline", x: "0", y: "0", name: "Board Outline", points: [{ id: crypto.randomUUID(), x: "-10", y: "-10" }, { id: crypto.randomUUID(), x: "10", y: "-10" }, { id: crypto.randomUUID(), x: "10", y: "10" }, { id: crypto.randomUUID(), x: "-10", y: "10" }] } as FootprintBoardOutline;
+    } else if (type === "polygon") {
+      newShape = { ...base, type: "polygon", x: "0", y: "0", name: "Polygon", points: [{ id: crypto.randomUUID(), x: "0", y: "10" }, { id: crypto.randomUUID(), x: "10", y: "-10" }, { id: crypto.randomUUID(), x: "-10", y: "-10" }] } as FootprintPolygon;
     } else {
       newShape = { ...base, type: "line", thickness: "1", x: "0", y: "0", points: [{ id: crypto.randomUUID(), x: "0", y: "0" }, { id: crypto.randomUUID(), x: "10", y: "10" }] };
     }
@@ -732,12 +735,14 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   const handleAddMidpoint = (shapeId: string, index: number) => {
     const shape = footprint.shapes.find(s => s.id === shapeId);
     if (!shape) return;
-    if (shape.type !== "line" && shape.type !== "boardOutline") return;
+    if (shape.type !== "line" && shape.type !== "boardOutline" && shape.type !== "polygon") return;
     
     // Type guard/assertion for points presence
     const points = (shape as any).points as Point[];
     const p1Raw = points[index];
-    const p2Raw = points[(index + 1) % points.length]; // Modulo for closed loop
+    
+    const isClosed = shape.type === "boardOutline" || shape.type === "polygon";
+    const p2Raw = isClosed ? points[(index + 1) % points.length] : points[index + 1];
 
     if (!p1Raw || !p2Raw) return;
 
@@ -767,8 +772,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         midY = (p1.y + p2.y) / 2;
     }
 
-    // If Board Outline, adjust for Shape Origin
-    if (shape.type === "boardOutline") {
+    // If Board Outline or Polygon, adjust for Shape Origin
+    if (shape.type === "boardOutline" || shape.type === "polygon") {
         const originX = evaluateExpression(shape.x, params);
         const originY = evaluateExpression(shape.y, params);
         midX -= originX;
@@ -1066,6 +1071,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         <div className="spacer" />
         <button onClick={() => addShape("circle")}><IconCircle /> Circle</button>
         <button onClick={() => addShape("rect")}><IconRect /> Rect</button>
+        <button onClick={() => addShape("polygon")}><IconPolygon /> Polygon</button>
         <button onClick={() => addShape("line")}><IconLine /> Line</button>
         <button onClick={() => addShape("wireGuide")}><IconGuide /> Guide</button>
         {footprint.isBoard && <button onClick={() => addShape("boardOutline")}><IconOutline /> Outline</button>}

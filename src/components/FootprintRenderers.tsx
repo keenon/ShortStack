@@ -1,6 +1,6 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon } from "../types";
 import { evaluateExpression, interpolateColor, resolvePoint } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
@@ -85,9 +85,9 @@ export const RecursiveShapeRenderer = ({
     // Main marker (Crosshair)
     elements.push(
       <g key="marker" style={{ cursor: "pointer" }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
-        <line x1={x - markerSize} y1={-y} x2={x + markerSize} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />
-        <line x1={x} y1={-(y - markerSize)} x2={x} y2={-(y + markerSize)} stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />
-        <circle cx={x} cy={-y} r={circleRadius} fill="transparent" stroke={stroke} strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="1,1" />
+        <line x1={x - markerSize} y1={-y} x2={x + markerSize} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />
+        <line x1={x} y1={-(y - markerSize)} x2={x} y2={-(y + markerSize)} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />
+        <circle cx={x} cy={-y} r={circleRadius} fill="transparent" stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="1,1" />
       </g>
     );
 
@@ -97,8 +97,8 @@ export const RecursiveShapeRenderer = ({
         const hx = x + evaluateExpression(wg.handleIn.x, params);
         const hy = -(y + evaluateExpression(wg.handleIn.y, params));
         elements.push(
-          <line key="h-in-l" x1={x} y1={-y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />,
-          <circle key="h-in-c" cx={hx} cy={hy} r={handleRadius * 0.8} fill={stroke} vectorEffect={vectorEffect} style={{ cursor: 'crosshair' }}
+          <line key="h-in-l" x1={x} y1={-y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />,
+          <circle key="h-in-c" cx={hx} cy={hy} r={handleRadius * 0.8} fill={stroke} vectorEffect="non-scaling-stroke" style={{ cursor: 'crosshair' }}
             onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'in'); }} />
         );
       }
@@ -106,8 +106,8 @@ export const RecursiveShapeRenderer = ({
         const hx = x + evaluateExpression(wg.handleOut.x, params);
         const hy = -(y + evaluateExpression(wg.handleOut.y, params));
         elements.push(
-          <line key="h-out-l" x1={x} y1={-y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect={vectorEffect} strokeDasharray="2,2" />,
-          <circle key="h-out-c" cx={hx} cy={hy} r={handleRadius * 0.8} fill={stroke} vectorEffect={vectorEffect} style={{ cursor: 'crosshair' }}
+          <line key="h-out-l" x1={x} y1={-y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />,
+          <circle key="h-out-c" cx={hx} cy={hy} r={handleRadius * 0.8} fill={stroke} vectorEffect="non-scaling-stroke" style={{ cursor: 'crosshair' }}
             onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'out'); }} />
         );
       }
@@ -263,6 +263,112 @@ export const RecursiveShapeRenderer = ({
     );
   }
 
+  if (shape.type === "polygon") {
+      const originX = evaluateExpression(shape.x, params);
+      const originY = evaluateExpression(shape.y, params);
+      const pts = shape.points.map(p => {
+          const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
+          return {
+              x: originX + resolved.x,
+              y: originY + resolved.y,
+              hIn: resolved.handleIn,
+              hOut: resolved.handleOut,
+              isSnapped: !!p.snapTo
+          };
+      });
+
+      let d = "";
+      const midPoints = [];
+
+      if (pts.length > 0) {
+          d = `M ${pts[0].x} ${-pts[0].y}`;
+          for (let i = 0; i < pts.length; i++) {
+              const curr = pts[i];
+              const next = pts[(i + 1) % pts.length];
+              const cp1x = curr.x + (curr.hOut?.x || 0);
+              const cp1y = -(curr.y + (curr.hOut?.y || 0));
+              const cp2x = next.x + (next.hIn?.x || 0);
+              const cp2y = -(next.y + (next.hIn?.y || 0));
+              
+              if (curr.hOut || next.hIn) {
+                  const midX = bezier1D(curr.x, curr.x + (curr.hOut?.x || 0), next.x + (next.hIn?.x || 0), next.x, 0.5);
+                  const midY = bezier1D(curr.y, curr.y + (curr.hOut?.y || 0), next.y + (next.hIn?.y || 0), next.y, 0.5);
+                  midPoints.push({ index: i, x: midX, y: -midY });
+              } else {
+                  midPoints.push({ index: i, x: (curr.x + next.x) / 2, y: -(curr.y + next.y) / 2 });
+              }
+
+              d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${next.x} ${-next.y}`;
+          }
+          d += " Z";
+      }
+
+      const handles = isSelected ? pts.map((pt, idx) => {
+          const elements = [];
+          const isHovered = hoveredPointIndex === idx;
+          const anchorColor = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
+          const anchorRadius = isHovered ? handleRadius * 1.3 : handleRadius;
+
+          elements.push(
+              <circle key={`poly-anchor-${idx}`} cx={pt.x} cy={-pt.y} 
+                  r={anchorRadius} 
+                  fill={anchorColor} stroke="#646cff" strokeWidth={1} vectorEffect="non-scaling-stroke"
+                  onMouseDown={(e) => { e.stopPropagation(); onMouseDown(e, shape.id, idx); }}
+                  onMouseEnter={() => setHoveredPointIndex && setHoveredPointIndex(idx)}
+                  onMouseLeave={() => setHoveredPointIndex && setHoveredPointIndex(null)}
+              />
+          );
+          if (pt.hIn) {
+              const hx = pt.x + pt.hIn.x;
+              const hy = -(pt.y + pt.hIn.y);
+              elements.push(
+                  <line key={`poly-line-in-${idx}`} x1={pt.x} y1={-pt.y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" />,
+                  <circle key={`poly-handle-in-${idx}`} cx={hx} cy={hy} r={handleRadius * 0.8} fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
+                      onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'in'); }} />
+              );
+          }
+          if (pt.hOut) {
+              const hx = pt.x + pt.hOut.x;
+              const hy = -(pt.y + pt.hOut.y);
+              elements.push(
+                  <line key={`poly-line-out-${idx}`} x1={pt.x} y1={-pt.y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" />,
+                  <circle key={`poly-handle-out-${idx}`} cx={hx} cy={hy} r={handleRadius * 0.8} fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
+                      onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'out'); }} />
+              );
+          }
+          return elements;
+      }) : null;
+
+      const midButtons = isSelected ? midPoints.map(m => {
+          const isHovered = hoveredMidpointIndex === m.index;
+          const bgFill = isHovered ? "#ffaa00" : "#333";
+          const strokeColor = isHovered ? "#fff" : "#666";
+          const plusColor = isHovered ? "#000" : "white";
+          const r = handleRadius * (isHovered ? 1.0 : 0.8);
+
+          return (
+              <g key={`mid-${m.index}`} style={{ cursor: "pointer" }}
+                  onClick={(e) => { e.stopPropagation(); onAddMidpoint && onAddMidpoint(shape.id, m.index); }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onMouseEnter={() => setHoveredMidpointIndex && setHoveredMidpointIndex(m.index)}
+                  onMouseLeave={() => setHoveredMidpointIndex && setHoveredMidpointIndex(null)}
+              >
+                  <circle cx={m.x} cy={m.y} r={r} fill={bgFill} stroke={strokeColor} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+                  <line x1={m.x - r * 0.5} y1={m.y} x2={m.x + r * 0.5} y2={m.y} stroke={plusColor} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                  <line x1={m.x} y1={m.y - r * 0.5} x2={m.x} y2={m.y + r * 0.5} stroke={plusColor} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+              </g>
+          );
+      }) : null;
+
+      return (
+          <g>
+              <path d={d} {...commonProps} />
+              {handles}
+              {midButtons}
+          </g>
+      );
+  }
+
   if (shape.type === "line") {
       const thickness = evaluateExpression(shape.thickness, params);
       
@@ -387,6 +493,7 @@ export const RecursiveShapeRenderer = ({
       return (
           <g>
             <path 
+                // key={shape.id} // REMOVED: SVG Paths inside g don't need unique keys if the g has one
                 d={d} 
                 {...commonProps} 
                 fill="none" 

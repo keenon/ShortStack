@@ -26,6 +26,12 @@ export const IconLine = ({ size = 16, className = "" }: IconProps) => (
   </svg>
 );
 
+export const IconPolygon = ({ size = 16, className = "" }: IconProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M12 2 L2 21 h20 L12 2 Z" />
+  </svg>
+);
+
 export const IconGuide = ({ size = 16, className = "" }: IconProps) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
     <line x1="12" y1="3" x2="12" y2="21" strokeDasharray="4 2" />

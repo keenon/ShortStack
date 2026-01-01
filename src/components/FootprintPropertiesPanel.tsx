@@ -1,7 +1,7 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
 import { Fragment, useMemo, useRef, useEffect } from "react";
-import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, MeshAsset } from "../types";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
 
@@ -168,7 +168,7 @@ const FootprintPropertiesPanel = ({
 
       const addMidpoint = (index: number) => {
           const p1 = points[index];
-          const p2 = points[index + 1];
+          const p2 = points[(index + 1) % points.length];
           if (!p1 || !p2) return;
           const newPoint: Point = {
               id: crypto.randomUUID(),
@@ -257,35 +257,34 @@ const FootprintPropertiesPanel = ({
                                     updateShape(shape.id, "points", newPoints);
                                 }
                             )}
-                            {idx < points.length - 1 && (
-                                <div 
+                            {/* Insert Midpoint Button */}
+                            <div 
+                                style={{ 
+                                    display: "flex", 
+                                    justifyContent: "center", 
+                                    margin: "5px 0",
+                                }}
+                            >
+                                <button 
+                                    onClick={() => addMidpoint(idx)} 
                                     style={{ 
-                                        display: "flex", 
-                                        justifyContent: "center", 
-                                        margin: "5px 0",
-                                    }}
+                                        cursor: "pointer", 
+                                        padding: "4px 8px", 
+                                        fontSize: "0.8rem", 
+                                        background: hoveredMidpointIndex === idx ? "#3b5b9d" : "#333", 
+                                        border: hoveredMidpointIndex === idx ? "1px solid #646cff" : "1px solid #555", 
+                                        color: "#fff", 
+                                        borderRadius: "4px",
+                                        transition: 'background-color 0.2s, border-color 0.2s',
+                                        boxShadow: hoveredMidpointIndex === idx ? "0 0 5px rgba(100, 108, 255, 0.5)" : "none"
+                                    }} 
+                                    title="Insert Midpoint"
+                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
+                                    onMouseLeave={() => setHoveredMidpointIndex(null)}
                                 >
-                                    <button 
-                                        onClick={() => addMidpoint(idx)} 
-                                        style={{ 
-                                            cursor: "pointer", 
-                                            padding: "4px 8px", 
-                                            fontSize: "0.8rem", 
-                                            background: hoveredMidpointIndex === idx ? "#3b5b9d" : "#333", 
-                                            border: hoveredMidpointIndex === idx ? "1px solid #646cff" : "1px solid #555", 
-                                            color: "#fff", 
-                                            borderRadius: "4px",
-                                            transition: 'background-color 0.2s, border-color 0.2s',
-                                            boxShadow: hoveredMidpointIndex === idx ? "0 0 5px rgba(100, 108, 255, 0.5)" : "none"
-                                        }} 
-                                        title="Insert Midpoint"
-                                        onMouseEnter={() => setHoveredMidpointIndex(idx)}
-                                        onMouseLeave={() => setHoveredMidpointIndex(null)}
-                                    >
-                                        + Midpoint
-                                    </button>
-                                </div>
-                            )}
+                                    + Midpoint
+                                </button>
+                            </div>
                         </Fragment>
                     ))}
                     <button className="secondary small-btn" onClick={() => {
@@ -298,6 +297,146 @@ const FootprintPropertiesPanel = ({
             </div>
           </div>
       );
+  }
+
+  // POLYGON Properties block
+  if (shape?.type === "polygon") {
+    const poly = shape as FootprintPolygon;
+    const points = poly.points;
+
+    const addMidpoint = (index: number) => {
+        const p1 = points[index];
+        const p2 = points[(index + 1) % points.length];
+        if (!p1 || !p2) return;
+        const newPoint: Point = {
+            id: crypto.randomUUID(),
+            x: calcMid(p1.x, p2.x),
+            y: calcMid(p1.y, p2.y)
+        };
+        const newPoints = [...points];
+        newPoints.splice(index + 1, 0, newPoint);
+        updateShape(shape.id, "points", newPoints);
+    };
+
+    return (
+        <div className="properties-panel">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <h3 style={{ margin: 0 }}>POLYGON Properties</h3>
+                <button onClick={onDuplicate} title="Duplicate Shape (Ctrl+D)" style={{ padding: '4px 10px', fontSize: '0.9em' }}>
+                    Duplicate
+                </button>
+            </div>
+
+            {/* Layer Assignment Section */}
+            <div className="prop-section">
+                <h4>Layers</h4>
+                <div className="layer-list">
+                    {stackup.length === 0 && <div className="empty-hint">No stackup layers defined.</div>}
+                    {stackup.map((layer) => {
+                        const isChecked = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
+                        const assignment = isChecked ? (shape.assignedLayers[layer.id] as LayerAssignment) : { depth: "0", endmillRadius: "0" };
+                        
+                        return (
+                            <div key={layer.id} className="layer-assignment-row">
+                                <input className="layer-checkbox" type="checkbox" checked={isChecked}
+                                    onChange={(e) => {
+                                        const newAssignments = { ...(shape.assignedLayers || {}) };
+                                        if (e.target.checked) newAssignments[layer.id] = { depth: "0", endmillRadius: "0" }; 
+                                        else delete newAssignments[layer.id];
+                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                    }}
+                                />
+                                <div className="layer-color-badge" style={{ backgroundColor: layer.color }} />
+                                <span className="layer-name" title={layer.name}>{layer.name}</span>
+                                
+                                {isChecked && layer.type === "Carved/Printed" && (
+                                    <div className="layer-depth-wrapper">
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Cut Depth</div>
+                                                <ExpressionEditor value={assignment.depth} onChange={(val) => {
+                                                        const newAssignments = { ...shape.assignedLayers };
+                                                        newAssignments[layer.id] = { ...assignment, depth: val };
+                                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                                    }} params={params} placeholder="Depth" />
+                                            </div>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Ball-nose Endmill Radius</div>
+                                                <ExpressionEditor value={assignment.endmillRadius} onChange={(val) => {
+                                                        const newAssignments = { ...shape.assignedLayers };
+                                                        newAssignments[layer.id] = { ...assignment, endmillRadius: val };
+                                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                                    }} params={params} placeholder="0" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            <div className="prop-group">
+                <label>Name</label>
+                <input type="text" value={shape.name} onChange={(e) => updateShape(shape.id, "name", e.target.value)} />
+            </div>
+
+            <div className="prop-group">
+                <label>Origin X</label>
+                <ExpressionEditor value={poly.x} onChange={(val) => updateShape(shape.id, "x", val)} params={params} placeholder="0" />
+            </div>
+            <div className="prop-group">
+                <label>Origin Y</label>
+                <ExpressionEditor value={poly.y} onChange={(val) => updateShape(shape.id, "y", val)} params={params} placeholder="0" />
+            </div>
+
+            <div className="prop-group">
+                <label>Polygon Points</label>
+                <div className="points-list-container">
+                    {points.map((p, idx) => (
+                        <Fragment key={p.id}>
+                            {renderPointEditor(
+                                p, 
+                                idx, 
+                                (newP) => {
+                                    const newPoints = [...points];
+                                    newPoints[idx] = newP;
+                                    updateShape(shape.id, "points", newPoints);
+                                },
+                                () => {
+                                    const newPoints = points.filter((_, i) => i !== idx);
+                                    updateShape(shape.id, "points", newPoints);
+                                }
+                            )}
+                            <div style={{ display: "flex", justifyContent: "center", margin: "5px 0" }}>
+                                <button 
+                                    onClick={() => addMidpoint(idx)} 
+                                    style={{ 
+                                        cursor: "pointer", padding: "4px 8px", fontSize: "0.8rem", 
+                                        background: hoveredMidpointIndex === idx ? "#3b5b9d" : "#333", 
+                                        border: hoveredMidpointIndex === idx ? "1px solid #646cff" : "1px solid #555", 
+                                        color: "#fff", borderRadius: "4px"
+                                    }} 
+                                    title="Insert Midpoint"
+                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
+                                    onMouseLeave={() => setHoveredMidpointIndex(null)}
+                                >
+                                    + Midpoint
+                                </button>
+                            </div>
+                        </Fragment>
+                    ))}
+                    <button className="secondary small-btn" onClick={() => {
+                            const newPoints = [...points];
+                            const last = newPoints[newPoints.length - 1] || { x: "0", y: "0" };
+                            newPoints.push({ id: crypto.randomUUID(), x: modifyExpression(last.x, 10), y: modifyExpression(last.y, 0), });
+                            updateShape(shape.id, "points", newPoints);
+                        }}>+ Add Point</button>
+                </div>
+            </div>
+        </div>
+    );
   }
 
   // CHECK FOR MESH SELECTION
