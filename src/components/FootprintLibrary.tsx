@@ -1,7 +1,8 @@
 // src/components/FootprintLibrary.tsx
-import React, { useState } from "react";
+import { useState, useRef } from "react";
 import { Footprint, Parameter, StackupLayer, MeshAsset } from "../types";
 import FootprintEditor from "./FootprintEditor";
+import { IconOutline, IconFootprint } from "./Icons";
 import './FootprintLibrary.css';
 
 interface Props {
@@ -15,6 +16,11 @@ interface Props {
 
 export default function FootprintLibrary({ footprints, setFootprints, params, stackup, meshAssets, onRegisterMesh }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  // --- TOOLTIP STATE ---
+  // Store initial position in state to prevent "jumping" on first render
+  const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
 
   // --- ACTIONS ---
 
@@ -36,16 +42,47 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
     }
   };
 
-  const updateFootprintName = (id: string, name: string) => {
-    setFootprints((prev) =>
-      prev.map((fp) => (fp.id === id ? { ...fp, name } : fp))
-    );
-  };
-
   const handleFootprintUpdate = (updatedFootprint: Footprint) => {
     setFootprints((prev) =>
       prev.map((fp) => (fp.id === updatedFootprint.id ? updatedFootprint : fp))
     );
+  };
+
+  // NEW: Reorder Footprints
+  const moveFootprint = (e: React.MouseEvent, index: number, direction: -1 | 1) => {
+    e.stopPropagation(); // Prevent opening the editor when clicking move buttons
+    if (direction === -1 && index === 0) return;
+    if (direction === 1 && index === footprints.length - 1) return;
+
+    const newFootprints = [...footprints];
+    const targetIndex = index + direction;
+    const temp = newFootprints[index];
+    newFootprints[index] = newFootprints[targetIndex];
+    newFootprints[targetIndex] = temp;
+
+    setFootprints(newFootprints);
+  };
+
+  // --- TOOLTIP HANDLERS ---
+  const handleIconMouseEnter = (e: React.MouseEvent, text: string) => {
+    // Set initial position immediately to avoid first-frame jump
+    setTooltip({ 
+        text, 
+        x: e.clientX + 15, 
+        y: e.clientY + 15 
+    });
+  };
+
+  const handleIconMouseLeave = () => {
+    setTooltip(null);
+  };
+
+  const handleIconMouseMove = (e: React.MouseEvent) => {
+    if (tooltipRef.current) {
+      // Update position directly via ref for performance during movement
+      tooltipRef.current.style.left = `${e.clientX + 15}px`;
+      tooltipRef.current.style.top = `${e.clientY + 15}px`;
+    }
   };
 
   // --- DERIVED STATE ---
@@ -74,46 +111,89 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
       <table className="footprint-list">
         <thead>
           <tr>
+            <th style={{ width: "60px" }}>Type</th>
             <th>Footprint Name</th>
             <th style={{ width: "100px" }}>Shapes</th>
-            <th style={{ width: "220px" }}>Actions</th>
+            <th style={{ width: "160px" }}>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {footprints.map((fp) => (
-            <tr key={fp.id}>
-              <td>
-                <input
-                  type="text"
-                  value={fp.name}
-                  onChange={(e) => updateFootprintName(fp.id, e.target.value)}
-                />
+          {footprints.map((fp, index) => (
+            <tr 
+              key={fp.id} 
+              onClick={() => setEditingId(fp.id)}
+              className="footprint-row"
+            >
+              <td style={{ textAlign: "center", verticalAlign: "middle" }}>
+                <div 
+                  className="type-icon-wrapper"
+                  onMouseEnter={(e) => handleIconMouseEnter(e, fp.isBoard ? "Standalone Board" : "Component Footprint")}
+                  onMouseLeave={handleIconMouseLeave}
+                  onMouseMove={handleIconMouseMove}
+                >
+                    {fp.isBoard ? (
+                      <div style={{ color: "#646cff", display: "flex", justifyContent: "center" }}>
+                        <IconOutline size={18} />
+                      </div>
+                    ) : (
+                      <div style={{ color: "#888", display: "flex", justifyContent: "center" }}>
+                        <IconFootprint size={18} />
+                      </div>
+                    )}
+                </div>
+              </td>
+              <td className="name-cell">
+                {fp.name}
               </td>
               <td>{fp.shapes.length}</td>
               <td className="actions-cell">
-                <button
-                  className="edit-btn"
-                  onClick={() => setEditingId(fp.id)}
-                >
-                  Edit
-                </button>
-                <button
-                  className="danger icon-btn"
-                  onClick={(e) => deleteFootprint(fp.id, e)}
-                >
-                  ✕
-                </button>
+                <div className="action-buttons">
+                  <button 
+                    className="icon-btn btn-up" 
+                    onClick={(e) => moveFootprint(e, index, -1)}
+                    disabled={index === 0}
+                    title="Move Up"
+                  >
+                    ↑
+                  </button>
+                  <button 
+                    className="icon-btn btn-down" 
+                    onClick={(e) => moveFootprint(e, index, 1)}
+                    disabled={index === footprints.length - 1}
+                    title="Move Down"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    className="danger icon-btn"
+                    onClick={(e) => deleteFootprint(fp.id, e)}
+                    title="Delete Footprint"
+                  >
+                    ✕
+                  </button>
+                </div>
               </td>
             </tr>
           ))}
           {footprints.length === 0 && (
-              <tr><td colSpan={3} style={{textAlign:'center', color:'#666'}}>No footprints yet.</td></tr>
+              <tr><td colSpan={4} style={{textAlign:'center', color:'#666'}}>No footprints yet.</td></tr>
           )}
         </tbody>
       </table>
       <button className="add-btn" onClick={addFootprint}>
         + New Footprint
       </button>
+      
+      {/* TOOLTIP ELEMENT */}
+      {tooltip && (
+        <div 
+            ref={tooltipRef} 
+            className="custom-tooltip"
+            style={{ left: tooltip.x, top: tooltip.y }}
+        >
+          {tooltip.text}
+        </div>
+      )}
     </div>
   );
 }

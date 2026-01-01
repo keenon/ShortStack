@@ -1,11 +1,49 @@
 /* src/components/FootprintLibrary.css */
+.footprint-list {
+    border-collapse: collapse;
+}
+
+.footprint-row {
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.footprint-row:hover {
+    background-color: #333;
+}
+
+.name-cell {
+    font-weight: 500;
+    color: #fff;
+}
+
 .actions-cell {
     display: flex;
     gap: 10px;
     align-items: center;
+    justify-content: flex-end; /* Align buttons to the right */
 }
 
-.edit-btn {
-    flex-grow: 1;
-    justify-content: center;
+/* Ensure buttons don't trigger the row click visual glitch */
+.footprint-row button {
+    cursor: pointer;
+}
+
+/* Tooltip Styles */
+.type-icon-wrapper {
+    display: inline-block; /* Ensure mouse events are captured on the block */
+}
+
+.custom-tooltip {
+    position: fixed;
+    background-color: #222;
+    color: #eee;
+    padding: 6px 10px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-size: 0.85em;
+    pointer-events: none; /* Allows mouse to pass through if it catches up */
+    z-index: 9999;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    white-space: nowrap;
 }
