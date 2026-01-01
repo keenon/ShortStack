@@ -1,5 +1,5 @@
 // src/components/FootprintEditor.tsx
-import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point } from "../types";
@@ -9,6 +9,9 @@ import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh } from "./Icons";
 import './FootprintEditor.css';
+
+// --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
+let GLOBAL_CLIPBOARD: { type: "shape" | "mesh", data: any } | null = null;
 
 interface Props {
   footprint: Footprint;
@@ -561,6 +564,112 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       window.removeEventListener('mouseup', handleShapeMouseUp);
   };
 
+  // ------------------------------------------------------------------
+  // COPY / PASTE / DUPLICATE LOGIC
+  // ------------------------------------------------------------------
+
+  const handleCopy = useCallback(() => {
+    if (!selectedShapeId) return;
+
+    // Check Shapes
+    const shape = footprint.shapes.find(s => s.id === selectedShapeId);
+    if (shape) {
+        GLOBAL_CLIPBOARD = { type: "shape", data: JSON.parse(JSON.stringify(shape)) };
+        return;
+    }
+
+    // Check Meshes
+    if (footprint.meshes) {
+        const mesh = footprint.meshes.find(m => m.id === selectedShapeId);
+        if (mesh) {
+            GLOBAL_CLIPBOARD = { type: "mesh", data: JSON.parse(JSON.stringify(mesh)) };
+            return;
+        }
+    }
+  }, [selectedShapeId, footprint]);
+
+  const handlePaste = useCallback(() => {
+    if (!GLOBAL_CLIPBOARD) return;
+    const { type, data } = GLOBAL_CLIPBOARD;
+
+    // 1. Clone Data
+    const newItem = JSON.parse(JSON.stringify(data));
+    
+    // 2. Assign New ID
+    newItem.id = crypto.randomUUID();
+
+    // 3. Regenerate Sub-IDs (e.g. Points in Lines/Outlines)
+    if (newItem.points && Array.isArray(newItem.points)) {
+        newItem.points = newItem.points.map((p: any) => ({
+            ...p,
+            id: crypto.randomUUID()
+        }));
+    }
+
+    // 4. Generate Unique Name
+    let baseName = newItem.name;
+    // Strip trailing increment if exists: "Shape (1)" -> "Shape"
+    const match = baseName.match(/^(.*) \(\d+\)$/);
+    if (match) baseName = match[1];
+
+    let newName = baseName;
+    let counter = 1;
+    const existingNames = new Set([
+        ...footprint.shapes.map(s => s.name),
+        ...(footprint.meshes || []).map(m => m.name)
+    ]);
+
+    while (existingNames.has(newName)) {
+        newName = `${baseName} (${counter})`;
+        counter++;
+    }
+    newItem.name = newName;
+
+    // 5. Add to Footprint
+    if (type === "shape") {
+        onUpdate({ ...footprint, shapes: [...footprint.shapes, newItem] });
+    } else if (type === "mesh") {
+        onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), newItem] });
+    }
+
+    // 6. Select the copy
+    setSelectedShapeId(newItem.id);
+  }, [footprint, onUpdate]);
+
+  const handleDuplicate = useCallback(() => {
+    if (selectedShapeId) {
+        handleCopy();
+        handlePaste();
+    }
+  }, [selectedShapeId, handleCopy, handlePaste]);
+
+  // Keyboard Shortcuts Listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+        // Ignore if focus is in an input or select
+        const target = e.target as HTMLElement;
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+
+        const isCtrl = e.ctrlKey || e.metaKey;
+
+        if (isCtrl && e.key.toLowerCase() === 'c') {
+            e.preventDefault();
+            handleCopy();
+        }
+        if (isCtrl && e.key.toLowerCase() === 'v') {
+            e.preventDefault();
+            handlePaste();
+        }
+        if (isCtrl && e.key.toLowerCase() === 'd') {
+            e.preventDefault();
+            handleDuplicate();
+        }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleCopy, handlePaste, handleDuplicate]);
+
   // --- ACTIONS ---
   const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline", footprintId?: string) => {
     const base = { id: crypto.randomUUID(), name: `New ${type}`, assignedLayers: {}, };
@@ -1080,6 +1189,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 scrollToPointIndex={scrollToPointIndex}
                 hoveredMidpointIndex={hoveredMidpointIndex}
                 setHoveredMidpointIndex={setHoveredMidpointIndex}
+                onDuplicate={handleDuplicate} // NEW
               />
               {activeShape && (
                 <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>

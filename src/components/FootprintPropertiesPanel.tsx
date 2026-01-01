@@ -19,6 +19,7 @@ const FootprintPropertiesPanel = ({
   scrollToPointIndex,
   hoveredMidpointIndex,
   setHoveredMidpointIndex,
+  onDuplicate, // NEW
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -33,6 +34,7 @@ const FootprintPropertiesPanel = ({
   scrollToPointIndex: number | null;
   hoveredMidpointIndex: number | null;
   setHoveredMidpointIndex: (index: number | null) => void;
+  onDuplicate: () => void; // NEW
 }) => {
   
   // Get available wire guides for Snapping
@@ -301,7 +303,12 @@ const FootprintPropertiesPanel = ({
   if (mesh) {
       return (
           <div className="properties-panel">
-              <h3>Mesh Properties</h3>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <h3 style={{ margin: 0 }}>Mesh Properties</h3>
+                <button onClick={onDuplicate} title="Duplicate Mesh (Ctrl+D)" style={{ padding: '4px 10px', fontSize: '0.9em' }}>
+                    Duplicate
+                </button>
+              </div>
               <div className="prop-group">
                   <label>Name</label>
                   <input type="text" value={mesh.name} onChange={(e) => updateMesh(mesh.id, "name", e.target.value)} />
@@ -356,12 +363,22 @@ const FootprintPropertiesPanel = ({
 
   if (!shape) return null;
 
+  // Header common to all remaining shape types
+  const header = (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+        <h3 style={{ margin: 0 }}>{shape.type.toUpperCase()} Properties</h3>
+        <button onClick={onDuplicate} title="Duplicate Shape (Ctrl+D)" style={{ padding: '4px 10px', fontSize: '0.9em' }}>
+            Duplicate
+        </button>
+    </div>
+  );
+
   // NEW: Wire Guide Properties
   if (shape.type === "wireGuide") {
       const wg = shape as FootprintWireGuide;
       return (
         <div className="properties-panel">
-            <h3>Wire Guide Properties</h3>
+            {header}
             <div className="prop-group">
                 <label>Name</label>
                 <input type="text" value={wg.name} onChange={(e) => updateShape(wg.id, "name", e.target.value)} />
@@ -424,7 +441,7 @@ const FootprintPropertiesPanel = ({
 
       return (
         <div className="properties-panel">
-            <h3>Recursive Footprint</h3>
+            {header}
             <div className="prop-group">
                 <label>Reference</label>
                 <div style={{ padding: '8px', background: '#333', borderRadius: '4px', color: '#fff', fontSize: '0.9em', border: '1px solid #444' }}>
@@ -459,7 +476,7 @@ const FootprintPropertiesPanel = ({
   // --- STANDARD SHAPES PROPERTIES ---
   return (
     <div className="properties-panel">
-      <h3>{shape.type.toUpperCase()} Properties</h3>
+      {header}
       
       {/* Layer Assignment Section */}
       <div className="prop-section">
