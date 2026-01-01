@@ -4,7 +4,7 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
 import { STLLoader, OBJLoader, GLTFLoader } from "three-stdlib";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, MeshAsset } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, FootprintPolygon, Point, MeshAsset } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
 import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
 import Module from "manifold-3d";
@@ -89,6 +89,145 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.quadraticCurveTo(x, y, x, y + r);
   }
   return shape;
+}
+
+// Discretize a generic polygon-like shape into a consistent vertex list
+function getPolyOutlinePoints(
+    points: Point[],
+    originX: number,
+    originY: number,
+    params: Parameter[],
+    contextFp: Footprint,
+    allFootprints: Footprint[],
+    resolution: number
+): THREE.Vector2[] {
+    if (points.length < 3) return [];
+
+    const pathPoints: THREE.Vector2[] = [];
+
+    for (let i = 0; i < points.length; i++) {
+        const currRaw = points[i];
+        const nextRaw = points[(i + 1) % points.length];
+
+        const curr = resolvePoint(currRaw, contextFp, allFootprints, params);
+        const next = resolvePoint(nextRaw, contextFp, allFootprints, params);
+
+        const x1 = originX + curr.x;
+        const y1 = originY + curr.y;
+        const x2 = originX + next.x;
+        const y2 = originY + next.y;
+
+        const hasCurve = (curr.handleOut || next.handleIn);
+
+        if (hasCurve) {
+            const cp1x = x1 + (curr.handleOut ? curr.handleOut.x : 0);
+            const cp1y = y1 + (curr.handleOut ? curr.handleOut.y : 0);
+            const cp2x = x2 + (next.handleIn ? next.handleIn.x : 0);
+            const cp2y = y2 + (next.handleIn ? next.handleIn.y : 0);
+
+            const curve = new THREE.CubicBezierCurve(
+                new THREE.Vector2(x1, y1),
+                new THREE.Vector2(cp1x, cp1y),
+                new THREE.Vector2(cp2x, cp2y),
+                new THREE.Vector2(x2, y2)
+            );
+
+            const sp = curve.getPoints(resolution);
+            sp.pop(); // Remove end point to avoid duplicate with next start
+            sp.forEach(p => pathPoints.push(p));
+        } else {
+            pathPoints.push(new THREE.Vector2(x1, y1));
+        }
+    }
+
+    // Ensure CCW Winding for consistent offsetting
+    let area = 0;
+    for (let i = 0; i < pathPoints.length; i++) {
+        const j = (i + 1) % pathPoints.length;
+        area += pathPoints[i].x * pathPoints[j].y - pathPoints[j].x * pathPoints[i].y;
+    }
+    if (area < 0) pathPoints.reverse();
+
+    return pathPoints;
+}
+
+// Inward vertex offsetting algorithm for polygons with collision clamping
+function offsetPolygonContour(points: THREE.Vector2[], offset: number): THREE.Vector2[] {
+    if (offset <= 0) return points;
+    const len = points.length;
+    const epsilon = 0.05; // Margin to avoid zero-area faces and Z-fighting
+
+    // 1. Compute Miter directions and initial unconstrained candidates
+    const info = points.map((p, i) => {
+        const prev = points[(i - 1 + len) % len];
+        const next = points[(i + 1) % len];
+        
+        // Edge directions
+        const v1 = new THREE.Vector2().subVectors(p, prev).normalize();
+        const v2 = new THREE.Vector2().subVectors(next, p).normalize();
+        
+        // Normals (inward for CCW)
+        const n1 = new THREE.Vector2(-v1.y, v1.x);
+        const n2 = new THREE.Vector2(-v2.y, v2.x);
+        
+        // Miter vector
+        const miter = new THREE.Vector2().addVectors(n1, n2).normalize();
+        const dot = miter.dot(n1);
+        const safeDot = Math.max(dot, 0.1); 
+        const scale = 1.0 / safeDot;
+        
+        const candidate = new THREE.Vector2().copy(p).addScaledVector(miter, offset * scale);
+        
+        return { pOrig: p, miter, candidate };
+    });
+
+    const result: THREE.Vector2[] = [];
+
+    // 2. Apply Constraints: Project to valid half-space of neighbor miters
+    // This allows vertices to "slide" along the barrier instead of stopping hard.
+    for (let i = 0; i < len; i++) {
+        let pos = info[i].candidate.clone();
+        
+        // Check against Previous Neighbor's Miter Line
+        const prev = info[(i - 1 + len) % len];
+        {
+            // Normal perpendicular to neighbor's miter line
+            const barrierN = new THREE.Vector2(-prev.miter.y, prev.miter.x);
+            
+            // Determine "valid" side based on where our original point was relative to neighbor
+            const refVec = new THREE.Vector2().subVectors(info[i].pOrig, prev.pOrig);
+            if (refVec.dot(barrierN) < 0) barrierN.negate();
+
+            // Distance from candidate to barrier line
+            const vec = new THREE.Vector2().subVectors(pos, prev.pOrig);
+            const dist = vec.dot(barrierN);
+
+            // If we crossed the line (dist < 0) or are too close (dist < epsilon), slide back
+            if (dist < epsilon) {
+                pos.addScaledVector(barrierN, epsilon - dist);
+            }
+        }
+
+        // Check against Next Neighbor's Miter Line
+        const next = info[(i + 1) % len];
+        {
+            const barrierN = new THREE.Vector2(-next.miter.y, next.miter.x);
+            
+            const refVec = new THREE.Vector2().subVectors(info[i].pOrig, next.pOrig);
+            if (refVec.dot(barrierN) < 0) barrierN.negate();
+
+            const vec = new THREE.Vector2().subVectors(pos, next.pOrig);
+            const dist = vec.dot(barrierN);
+
+            if (dist < epsilon) {
+                pos.addScaledVector(barrierN, epsilon - dist);
+            }
+        }
+
+        result.push(pos);
+    }
+
+    return result;
 }
 
 function getLineOutlinePoints(
@@ -391,259 +530,314 @@ function generateProceduralFillet(
     resolution = 32
 ) {
     let minDimension = Infinity;
-    
-    const getContour = (offset: number): THREE.Vector2[] => {
-        let rawPoints: THREE.Vector2[] = [];
-        
-        if (shape.type === "circle") {
-            const d = evaluateExpression((shape as any).diameter, params);
-            minDimension = d;
-            const r = Math.max(0.001, d/2 - offset); 
-            const segments = resolution;
-            for(let i=0; i<segments; i++) {
-                const theta = (i / segments) * Math.PI * 2;
-                rawPoints.push(new THREE.Vector2(Math.cos(theta) * r, Math.sin(theta) * r));
+    const rawVertices: number[] = [];
+    const rawIndices: number[] = [];
+
+    // Robust Zipper Lofting Helper (Relative Arc Length)
+    const triangulateZipper = (polyA: THREE.Vector2[], polyB: THREE.Vector2[], idxStartA: number, idxStartB: number) => {
+        // 1. Align Start Points (Closest point on B to A[0])
+        let bestDist = Infinity;
+        let offsetB = 0;
+        for(let i=0; i<polyB.length; i++) {
+            const d = polyA[0].distanceToSquared(polyB[i]);
+            if(d < bestDist) { bestDist = d; offsetB = i; }
+        }
+
+        // 2. Compute Arc Lengths
+        const getLens = (pts: THREE.Vector2[]) => {
+            const lens = [0];
+            let tot = 0;
+            for(let i=0; i<pts.length; i++) {
+                const next = pts[(i+1)%pts.length];
+                tot += pts[i].distanceTo(next);
+                lens.push(tot);
             }
-        } 
-        else if (shape.type === "rect") {
-            const wRaw = evaluateExpression((shape as FootprintRect).width, params);
-            const hRaw = evaluateExpression((shape as FootprintRect).height, params);
-            minDimension = Math.min(wRaw, hRaw);
+            return { total: tot > 0 ? tot : 1, acc: lens };
+        };
+
+        const lenA = getLens(polyA);
+        
+        // Re-order B implicitly during access for convenience, but compute real lengths
+        const rotB: THREE.Vector2[] = [];
+        for(let i=0; i<polyB.length; i++) rotB.push(polyB[(i + offsetB) % polyB.length]);
+        const lenB = getLens(rotB);
+
+        // 3. Zipper using Relative Parameter
+        let idxA = 0;
+        let idxB = 0;
+        
+        while(idxA < polyA.length || idxB < polyB.length) {
             
-            const w = Math.max(0.001, wRaw - offset * 2);
-            const h = Math.max(0.001, hRaw - offset * 2);
-            const crRaw = evaluateExpression((shape as FootprintRect).cornerRadius, params);
+            // Current vertex indices
+            const vA1 = idxStartA + (idxA % polyA.length);
+            const vA2 = idxStartA + ((idxA + 1) % polyA.length);
             
-            const halfW = w / 2;
-            const halfH = h / 2;
-            let cr = Math.max(0, crRaw - offset);
-            const limit = Math.min(halfW, halfH);
-            if (cr > limit) cr = limit;
-            
-            const segCorner = 6; 
-            const quadrants = [
-                { x: halfW - cr, y: halfH - cr, startAng: 0 },         
-                { x: -halfW + cr, y: halfH - cr, startAng: Math.PI/2 },
-                { x: -halfW + cr, y: -halfH + cr, startAng: Math.PI }, 
-                { x: halfW - cr, y: -halfH + cr, startAng: 1.5*Math.PI}
-            ];
-            quadrants.forEach(q => {
-                for(let i=0; i<segCorner; i++) {
-                    const ang = q.startAng + (i/segCorner) * (Math.PI/2);
-                    const vx = q.x + Math.cos(ang) * cr;
-                    const vy = q.y + Math.sin(ang) * cr;
-                    rawPoints.push(new THREE.Vector2(vx, vy));
+            const vB1 = idxStartB + ((idxB + offsetB) % polyB.length);
+            const vB2 = idxStartB + ((idxB + offsetB + 1) % polyB.length);
+
+            // Force finish if one side done
+            if (idxA >= polyA.length) {
+                rawIndices.push(vA1, vB1, vB2);
+                idxB++;
+                continue;
+            }
+            if (idxB >= polyB.length) {
+                rawIndices.push(vA1, vB1, vA2);
+                idxA++;
+                continue;
+            }
+
+            // Look ahead: which side is "behind" in normalized space?
+            // Current normalized progress:
+            // A: lenA.acc[idxA+1] / lenA.total
+            // B: lenB.acc[idxB+1] / lenB.total
+            const normA = lenA.acc[idxA + 1] / lenA.total;
+            const normB = lenB.acc[idxB + 1] / lenB.total;
+
+            if (normA < normB) {
+                // A makes less progress, so advance A to catch up
+                // Connect A1->A2 with B1
+                rawIndices.push(vA1, vB1, vA2);
+                idxA++;
+            } else {
+                // B makes less progress, advance B
+                // Connect B1->B2 with A1
+                rawIndices.push(vA1, vB1, vB2);
+                idxB++;
+            }
+        }
+    };
+
+    if (shape.type === "polygon") {
+        const poly = shape as FootprintPolygon;
+        const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
+        if (basePoints.length < 3) return null;
+
+        const baseCS = new manifoldModule.CrossSection([basePoints.map(p => [p.x, p.y])], "EvenOdd");
+        const steps: { z: number, offset: number }[] = [];
+        const wallBottomZ = -(depth - filletRadius);
+        steps.push({ z: 0, offset: 0 });
+        if (Math.abs(wallBottomZ) > 0.001) steps.push({ z: wallBottomZ, offset: 0 });
+        const filletSteps = 8;
+        for(let i=1; i<=filletSteps; i++) {
+            const theta = (i / filletSteps) * (Math.PI / 2);
+            steps.push({ z: wallBottomZ - Math.sin(theta) * filletRadius, offset: (1 - Math.cos(theta)) * filletRadius });
+        }
+
+        const layerData: { z: number, contours: THREE.Vector2[][], startIdx: number }[] = [];
+        let totalVerts = 0;
+        steps.forEach(step => {
+            const cs = step.offset > 0.001 ? baseCS.offset(-step.offset, "Round", 8) : baseCS;
+            const polys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
+            layerData.push({ z: step.z, contours: polys, startIdx: totalVerts });
+            polys.forEach((contour: THREE.Vector2[]) => {
+                contour.forEach(p => { rawVertices.push(p.x, step.z, -p.y); totalVerts++; });
+            });
+        });
+
+        // Triangulate Top and Bottom Caps
+        const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
+            let offset = startIdx;
+            contours.forEach(c => {
+                const tris = THREE.ShapeUtils.triangulateShape(c, []);
+                tris.forEach(t => {
+                    if (reverse) rawIndices.push(offset + t[0], offset + t[2], offset + t[1]);
+                    else rawIndices.push(offset + t[0], offset + t[1], offset + t[2]);
+                });
+                offset += c.length;
+            });
+        };
+        triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
+        triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
+
+        // Loft between layers
+        for(let l=0; l<layerData.length-1; l++) {
+            const up = layerData[l];
+            const low = layerData[l+1];
+            low.contours.forEach((lowPoly, iLow) => {
+                const lowCenter = new THREE.Vector2();
+                lowPoly.forEach(p => lowCenter.add(p));
+                lowCenter.divideScalar(lowPoly.length);
+                let bestUpIdx = -1, minDist = Infinity;
+                up.contours.forEach((upPoly, iUp) => {
+                    const upCenter = new THREE.Vector2();
+                    upPoly.forEach(p => upCenter.add(p));
+                    upCenter.divideScalar(upPoly.length);
+                    const d = upCenter.distanceToSquared(lowCenter);
+                    if (d < minDist) { minDist = d; bestUpIdx = iUp; }
+                });
+                if (bestUpIdx !== -1) {
+                    let sA = up.startIdx; for(let i=0; i<bestUpIdx; i++) sA += up.contours[i].length;
+                    let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
+                    triangulateZipper(up.contours[bestUpIdx], lowPoly, sA, sB);
                 }
             });
         }
-        else if (shape.type === "line") {
-            const t = evaluateExpression((shape as FootprintLine).thickness, params);
-            minDimension = t;
-            const effectiveT = Math.max(0.001, t - offset * 2);
-            rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, contextFp, allFootprints);
-        }
-
-        if (rawPoints.length > 0) {
-            const clean: THREE.Vector2[] = [rawPoints[0]];
-            for(let i=1; i<rawPoints.length; i++) {
-                if (rawPoints[i].distanceToSquared(clean[clean.length-1]) > 1e-9) {
-                    clean.push(rawPoints[i]);
+    } else {
+        const getContour = (offset: number): THREE.Vector2[] => {
+            let rawPoints: THREE.Vector2[] = [];
+            
+            if (shape.type === "circle") {
+                const d = evaluateExpression((shape as any).diameter, params);
+                minDimension = d;
+                const r = Math.max(0.001, d/2 - offset); 
+                const segments = resolution;
+                for(let i=0; i<segments; i++) {
+                    const theta = (i / segments) * Math.PI * 2;
+                    rawPoints.push(new THREE.Vector2(Math.cos(theta) * r, Math.sin(theta) * r));
                 }
+            } 
+            else if (shape.type === "rect") {
+                const wRaw = evaluateExpression((shape as FootprintRect).width, params);
+                const hRaw = evaluateExpression((shape as FootprintRect).height, params);
+                minDimension = Math.min(wRaw, hRaw);
+                
+                const w = Math.max(0.001, wRaw - offset * 2);
+                const h = Math.max(0.001, hRaw - offset * 2);
+                const crRaw = evaluateExpression((shape as FootprintRect).cornerRadius, params);
+                
+                const halfW = w / 2;
+                const halfH = h / 2;
+                let cr = Math.max(0, crRaw - offset);
+                const limit = Math.min(halfW, halfH);
+                if (cr > limit) cr = limit;
+                
+                const segCorner = 6; 
+                const quadrants = [
+                    { x: halfW - cr, y: halfH - cr, startAng: 0 },         
+                    { x: -halfW + cr, y: halfH - cr, startAng: Math.PI/2 },
+                    { x: -halfW + cr, y: -halfH + cr, startAng: Math.PI }, 
+                    { x: halfW - cr, y: -halfH + cr, startAng: 1.5*Math.PI}
+                ];
+                quadrants.forEach(q => {
+                    for(let i=0; i<segCorner; i++) {
+                        const ang = q.startAng + (i/segCorner) * (Math.PI/2);
+                        const vx = q.x + Math.cos(ang) * cr;
+                        const vy = q.y + Math.sin(ang) * cr;
+                        rawPoints.push(new THREE.Vector2(vx, vy));
+                    }
+                });
             }
-            if (clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) {
-                clean.pop();
+            else if (shape.type === "line") {
+                const t = evaluateExpression((shape as FootprintLine).thickness, params);
+                minDimension = t;
+                const effectiveT = Math.max(0.001, t - offset * 2);
+                rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, contextFp, allFootprints);
+            }
+
+            if (rawPoints.length > 0) {
+                const clean: THREE.Vector2[] = [rawPoints[0]];
+                for(let i=1; i<rawPoints.length; i++) {
+                    if (rawPoints[i].distanceToSquared(clean[clean.length-1]) > 1e-9) {
+                        clean.push(rawPoints[i]);
+                    }
+                }
+                if (clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) {
+                    clean.pop();
+                }
+                
+                let area = 0;
+                for (let i = 0; i < clean.length; i++) {
+                    const j = (i + 1) % clean.length;
+                    area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
+                }
+                
+                if (area < 0) {
+                    clean.reverse();
+                }
+
+                return clean;
             }
             
-            let area = 0;
-            for (let i = 0; i < clean.length; i++) {
-                const j = (i + 1) % clean.length;
-                area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
-            }
-            
-            if (area < 0) {
-                clean.reverse();
-            }
+            return rawPoints;
+        };
 
-            return clean;
+        const baseProfile = getContour(0); 
+        const vertsPerLayer = baseProfile.length;
+        
+        if (vertsPerLayer < 3) return null;
+
+        const safeR = Math.min(filletRadius, minDimension / 2 - 0.01, depth);
+        if (safeR <= 0.001) return null;
+
+        const layers: { z: number, offset: number }[] = [];
+        layers.push({ z: 0, offset: 0 });
+
+        const wallBottomZ = -(depth - safeR);
+        if (Math.abs(wallBottomZ) > 0.001) {
+            layers.push({ z: wallBottomZ, offset: 0 });
         }
-        
-        return rawPoints;
-    };
 
-    const baseProfile = getContour(0); 
-    const vertsPerLayer = baseProfile.length;
-    
-    if (vertsPerLayer < 3) return null;
-
-    const safeR = Math.min(filletRadius, minDimension / 2 - 0.01, depth);
-    if (safeR <= 0.001) return null;
-
-    const layers: { z: number, offset: number }[] = [];
-    layers.push({ z: 0, offset: 0 });
-
-    const wallBottomZ = -(depth - safeR);
-    if (Math.abs(wallBottomZ) > 0.001) {
-        layers.push({ z: wallBottomZ, offset: 0 });
-    }
-
-    const filletSteps = 8; 
-    for(let i=1; i<=filletSteps; i++) {
-        const theta = (i / filletSteps) * (Math.PI / 2);
-        const z = wallBottomZ - Math.sin(theta) * safeR;
-        const off = (1 - Math.cos(theta)) * safeR;
-        const maxOffset = minDimension / 2 - 0.001; 
-        layers.push({ z, offset: Math.min(off, maxOffset) });
-    }
-
-    const rawVertices: number[] = [];
-    const rawIndices: number[] = [];
-    let topologyValid = true;
-
-    layers.forEach((layer, idx) => {
-        const points = getContour(layer.offset);
-        
-        if (points.length !== vertsPerLayer) {
-             console.error(`Topology Mismatch: Layer ${idx} has ${points.length}, expected ${vertsPerLayer}.`);
-             topologyValid = false;
+        const filletSteps = 8; 
+        for(let i=1; i<=filletSteps; i++) {
+            const theta = (i / filletSteps) * (Math.PI / 2);
+            const z = wallBottomZ - Math.sin(theta) * safeR;
+            const off = (1 - Math.cos(theta)) * safeR;
+            const maxOffset = minDimension / 2 - 0.001; 
+            layers.push({ z, offset: Math.min(off, maxOffset) });
         }
-        
-        if (!topologyValid) return;
 
-        points.forEach(p => {
-            rawVertices.push(p.x, layer.z, -p.y); 
+        let topologyValid = true;
+        layers.forEach((layer, idx) => {
+            const points = getContour(layer.offset);
+            if (points.length !== vertsPerLayer) topologyValid = false;
+            if (!topologyValid) return;
+            points.forEach(p => rawVertices.push(p.x, layer.z, -p.y));
         });
-    });
 
-    if (!topologyValid) return null;
+        if (!topologyValid) return null;
 
-    const getIdx = (layerIdx: number, ptIdx: number) => {
-        return layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
-    };
+        const getIdx = (layerIdx: number, ptIdx: number) => layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
+        const pushTri = (i1: number, i2: number, i3: number) => rawIndices.push(i1, i2, i3);
 
-    const pushTri = (i1: number, i2: number, i3: number) => {
-        rawIndices.push(i1, i2, i3);
-    };
+        const topFaces = THREE.ShapeUtils.triangulateShape(baseProfile, []);
+        topFaces.forEach(face => pushTri(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2])));
 
-    const topFaces = THREE.ShapeUtils.triangulateShape(baseProfile, []);
-    topFaces.forEach(face => {
-        pushTri(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2]));
-    });
-
-    for(let l=0; l<layers.length-1; l++) {
-        for(let i=0; i<vertsPerLayer; i++) {
-            const curr = i;
-            const next = (i+1) % vertsPerLayer;
-            const v1 = getIdx(l, curr);
-            const v2 = getIdx(l+1, curr);
-            const v3 = getIdx(l+1, next);
-            const v4 = getIdx(l, next);
-            
-            pushTri(v1, v2, v4); 
-            pushTri(v2, v3, v4);
-        }
-    }
-
-    const lastL = layers.length - 1;
-    const botProfile = getContour(layers[lastL].offset);
-    
-    let isCollapsed = true;
-    if (botProfile.length > 0) {
-        const p0 = botProfile[0];
-        for(let i=1; i<botProfile.length; i++) {
-            if (p0.distanceToSquared(botProfile[i]) > 1e-6) {
-                isCollapsed = false;
-                break;
+        for(let l=0; l<layers.length-1; l++) {
+            for(let i=0; i<vertsPerLayer; i++) {
+                const curr = i;
+                const next = (i+1) % vertsPerLayer;
+                const v1 = getIdx(l, curr);
+                const v2 = getIdx(l+1, curr);
+                const v3 = getIdx(l+1, next);
+                const v4 = getIdx(l, next);
+                pushTri(v1, v2, v4); 
+                pushTri(v2, v3, v4);
             }
         }
-    }
-    
-    if (!isCollapsed && botProfile.length === vertsPerLayer) {
+
+        const lastL = layers.length - 1;
+        const botProfile = getContour(layers[lastL].offset);
         const botFaces = THREE.ShapeUtils.triangulateShape(botProfile, []);
-        botFaces.forEach(face => {
-            pushTri(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1]));
-        });
+        botFaces.forEach(face => pushTri(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1])));
     }
 
-    const PRECISION = 1e-5;
-    const decimalShift = 1 / PRECISION;
-    
     const uniqueVerts: number[] = [];
     const vertMap = new Map<string, number>();
     const oldToNew = new Int32Array(rawVertices.length / 3);
+    const PRECISION = 1e-5;
+    const decimalShift = 1 / PRECISION;
 
     for(let i=0; i<rawVertices.length / 3; i++) {
-        const x = rawVertices[i*3];
-        const y = rawVertices[i*3+1];
-        const z = rawVertices[i*3+2];
-        
-        const kx = Math.round(x * decimalShift);
-        const ky = Math.round(y * decimalShift);
-        const kz = Math.round(z * decimalShift);
-        const key = `${kx}_${ky}_${kz}`;
-
-        if (vertMap.has(key)) {
-            oldToNew[i] = vertMap.get(key)!;
-        } else {
-            const newIdx = uniqueVerts.length / 3;
-            uniqueVerts.push(x, y, z);
-            vertMap.set(key, newIdx);
-            oldToNew[i] = newIdx;
-        }
+        const x = rawVertices[i*3], y = rawVertices[i*3+1], z = rawVertices[i*3+2];
+        const key = `${Math.round(x*decimalShift)}_${Math.round(y*decimalShift)}_${Math.round(z*decimalShift)}`;
+        if (vertMap.has(key)) oldToNew[i] = vertMap.get(key)!;
+        else { const newIdx = uniqueVerts.length / 3; uniqueVerts.push(x, y, z); vertMap.set(key, newIdx); oldToNew[i] = newIdx; }
     }
-
     const finalIndices: number[] = [];
-    
     for(let i=0; i<rawIndices.length; i+=3) {
-        const a = oldToNew[rawIndices[i]];
-        const b = oldToNew[rawIndices[i+1]];
-        const c = oldToNew[rawIndices[i+2]];
-
+        const a = oldToNew[rawIndices[i]], b = oldToNew[rawIndices[i+1]], c = oldToNew[rawIndices[i+2]];
         if (a === b || b === c || a === c) continue;
-        
-        const ax = uniqueVerts[a*3], ay = uniqueVerts[a*3+1], az = uniqueVerts[a*3+2];
-        const bx = uniqueVerts[b*3], by = uniqueVerts[b*3+1], bz = uniqueVerts[b*3+2];
-        const cx = uniqueVerts[c*3], cy = uniqueVerts[c*3+1], cz = uniqueVerts[c*3+2];
-
-        const abx = bx - ax, aby = by - ay, abz = bz - az;
-        const acx = cx - ax, acy = cy - ay, acz = cz - az;
-        
-        const cpx = aby * acz - abz * acy;
-        const cpy = abz * acx - abx * acz;
-        const cpz = abx * acy - aby * acx;
-        
-        if (cpx*cpx + cpy*cpy + cpz*cpz > 1e-12) {
-             finalIndices.push(a, b, c);
-        }
+        finalIndices.push(a, b, c);
     }
-
-    const vertProperties = new Float32Array(uniqueVerts);
-    const triVerts = new Uint32Array(finalIndices);
 
     try {
         const mesh = new manifoldModule.Mesh();
         mesh.numProp = 3;
-        mesh.vertProperties = vertProperties;
-        mesh.triVerts = triVerts;
-        
-        const manifold = new manifoldModule.Manifold(mesh);
-        
-        if (manifold.status) {
-             const status = manifold.status();
-             let statusCode = 0;
-             if (typeof status === 'number') statusCode = status;
-             else if (status && typeof status.value === 'number') statusCode = status.value;
-             
-             if (statusCode !== 0) {
-                 console.error(`Manifold Status Error: ${statusCode}`);
-                 return { manifold: null, vertProperties, triVerts };
-             }
-        }
-        
-        return { manifold, vertProperties, triVerts };
-    } catch (e) {
-        console.error("Procedural Fillet Manifold Creation Failed", e);
-        return { manifold: null, vertProperties, triVerts };
-    }
+        mesh.vertProperties = new Float32Array(uniqueVerts);
+        mesh.triVerts = new Uint32Array(finalIndices);
+        return { manifold: new manifoldModule.Manifold(mesh), vertProperties: mesh.vertProperties, triVerts: mesh.triVerts };
+    } catch (e) { return null; }
 }
 
 // ------------------------------------------------------------------
@@ -902,6 +1096,17 @@ const LayerSolid = ({
                         const ext = collect(csRot.extrude(height));
                         const centered = collect(ext.translate([0, 0, -height/2]));
                         tool = collect(centered.rotate([-90, 0, 0]));
+                    }
+                } else if (shape.type === "polygon") {
+                    const poly = shape as FootprintPolygon;
+                    const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, 32);
+                    if (pts.length > 2) {
+                        const baseCS = new manifoldModule.CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd");
+                        const toolCS = extraOffset > 0.001 ? baseCS.offset(extraOffset, "Round", 8) : baseCS;
+                        const ext = collect(toolCS.extrude(height));
+                        const centered = collect(ext.translate([0, 0, -height/2]));
+                        const rotatedY = collect(centered.rotate([-90, 0, 0]));
+                        tool = collect(rotatedY.rotate([0, globalRot, 0]));
                     }
                 }
 
