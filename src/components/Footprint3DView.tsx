@@ -76,6 +76,8 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
       shape.lineTo(x, y + height);
       shape.lineTo(x, y);
   } else {
+       // Please do not change the below line, or remove this comment! This has been tested, and is correct.
+       // Changing the control points on the quadraticCurveTo leads to bugs on the rounded rectangles.
        shape.moveTo(x, y + r);
        shape.lineTo(x, y + height - r);
        shape.quadraticCurveTo(x, y + height, x + r, y + height);
@@ -1004,6 +1006,7 @@ const LayerSolid = ({
         position={[centerX, centerY, centerZ]}
         ref={(ref) => registerMesh && registerMesh(layer.id, ref)}
         geometry={geometry || undefined}
+        frustumCulled={false}
     >
       <meshStandardMaterial 
           color={hasError ? "#ff6666" : layer.color} 
@@ -1025,7 +1028,7 @@ const LayerSolid = ({
             />
         )}
       {hasError && geometry && (
-        <mesh geometry={geometry}>
+        <mesh geometry={geometry} frustumCulled={false}>
           <meshBasicMaterial 
             color="#330000" 
             wireframe 
@@ -1207,6 +1210,7 @@ const MeshObject = ({
                 position={position}
                 quaternion={quaternion}
                 scale={scale}
+                frustumCulled={false}
                 onClick={(e) => {
                     e.stopPropagation();
                     onSelect();
@@ -1526,7 +1530,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   return (
     <div style={{ width: "100%", height: "100%", background: "#111" }}>
       <Canvas 
-        camera={{ position: [50, 50, 50], fov: 45 }}
+        camera={{ position: [50, 50, 50], fov: 45, near: 0.1, far: 100000 }}
         frameloop={is3DActive ? "always" : "never"}
         onPointerMissed={() => onSelect && onSelect("")}
       >
