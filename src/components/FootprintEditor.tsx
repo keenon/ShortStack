@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
@@ -20,6 +20,8 @@ interface Props {
   onClose: () => void;
   params: Parameter[];
   stackup: StackupLayer[];
+  meshAssets: MeshAsset[];
+  onRegisterMesh: (asset: MeshAsset) => void;
 }
 
 // ------------------------------------------------------------------
@@ -229,6 +231,7 @@ const ShapeListPanel = ({
 // 5. MESH LIST PANEL
 const MeshListPanel = ({
     meshes,
+    meshAssets,
     selectedId,
     onSelect,
     onDelete,
@@ -236,6 +239,7 @@ const MeshListPanel = ({
     updateMesh
 }: {
     meshes: FootprintMesh[];
+    meshAssets: MeshAsset[];
     selectedId: string | null;
     onSelect: (id: string) => void;
     onDelete: (id: string) => void;
@@ -247,42 +251,45 @@ const MeshListPanel = ({
         <div className="fp-left-subpanel">
             <h3 style={{ marginTop: 0 }}>Meshes</h3>
             <div className="shape-list-container">
-                {meshes.map(mesh => (
-                    <div key={mesh.id}
-                        className={`shape-item ${mesh.id === selectedId ? "selected" : ""}`}
-                        style={{ flexDirection: 'column', alignItems: 'flex-start' }}
-                        onClick={() => onSelect(mesh.id)}
-                    >
-                        <div style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
-                            <IconMesh className="shape-icon" />
-                            <div style={{ marginRight: '8px', fontSize: '0.8em', color: '#888', textTransform: 'uppercase' }}>
-                                {mesh.format}
+                {meshes.map(mesh => {
+                    const asset = meshAssets.find(a => a.id === mesh.meshId);
+                    return (
+                        <div key={mesh.id}
+                            className={`shape-item ${mesh.id === selectedId ? "selected" : ""}`}
+                            style={{ flexDirection: 'column', alignItems: 'flex-start' }}
+                            onClick={() => onSelect(mesh.id)}
+                        >
+                            <div style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
+                                <IconMesh className="shape-icon" />
+                                <div style={{ marginRight: '8px', fontSize: '0.8em', color: '#888', textTransform: 'uppercase' }}>
+                                    {asset?.format || "???"}
+                                </div>
+                                <input 
+                                    type="text" 
+                                    value={mesh.name} 
+                                    onChange={(e) => updateMesh(mesh.id, "name", e.target.value)} 
+                                    className="shape-name-edit" 
+                                    onClick={(e) => e.stopPropagation()}
+                                />
+                                <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(mesh.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
                             </div>
-                            <input 
-                                type="text" 
-                                value={mesh.name} 
-                                onChange={(e) => updateMesh(mesh.id, "name", e.target.value)} 
-                                className="shape-name-edit" 
-                                onClick={(e) => e.stopPropagation()}
-                            />
-                            <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(mesh.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
+                            
+                            <div style={{ display: 'flex', width: '100%', marginTop: '5px' }}>
+                                 <button
+                                    className={`vis-toggle-btn ${mesh.renderingType !== "hidden" ? "visible" : ""}`}
+                                    style={{ fontSize: '0.8em', padding: '2px 8px', width: '100%' }}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        const newType = mesh.renderingType === "hidden" ? "solid" : "hidden";
+                                        updateMesh(mesh.id, "renderingType", newType);
+                                    }}
+                                 >
+                                    {mesh.renderingType === "hidden" ? "Show" : "Hide"}
+                                 </button>
+                            </div>
                         </div>
-                        
-                        <div style={{ display: 'flex', width: '100%', marginTop: '5px' }}>
-                             <button
-                                className={`vis-toggle-btn ${mesh.renderingType !== "hidden" ? "visible" : ""}`}
-                                style={{ fontSize: '0.8em', padding: '2px 8px', width: '100%' }}
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    const newType = mesh.renderingType === "hidden" ? "solid" : "hidden";
-                                    updateMesh(mesh.id, "renderingType", newType);
-                                }}
-                             >
-                                {mesh.renderingType === "hidden" ? "Show" : "Hide"}
-                             </button>
-                        </div>
-                    </div>
-                ))}
+                    );
+                })}
                 {meshes.length === 0 && <div className="empty-state-small">Drag & Drop STL/OBJ/STEP files onto 3D view.</div>}
             </div>
         </div>
@@ -293,7 +300,7 @@ const MeshListPanel = ({
 // MAIN COMPONENT
 // ------------------------------------------------------------------
 
-export default function FootprintEditor({ footprint, allFootprints, onUpdate, onClose, params, stackup }: Props) {
+export default function FootprintEditor({ footprint, allFootprints, onUpdate, onClose, params, stackup, meshAssets, onRegisterMesh }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   
@@ -341,8 +348,11 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   useEffect(() => {
     if (!footprint.meshes || footprint.meshes.length === 0) return;
     
-    const nonGlb = footprint.meshes.filter(m => m.format !== "glb");
-    if (nonGlb.length === 0) return;
+    const nonGlbInstances = footprint.meshes.filter(m => {
+        const asset = meshAssets.find(a => a.id === m.meshId);
+        return asset && asset.format !== "glb";
+    });
+    if (nonGlbInstances.length === 0) return;
 
     // Only attempt to heal if we have a ref to the 3D view (which contains the engine)
     if (!footprint3DRef.current) return;
@@ -352,33 +362,32 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         // Yield to render to show message
         await new Promise(r => setTimeout(r, 100));
 
-        let changed = false;
-        const newMeshes = [...footprint.meshes!];
+        for (const inst of nonGlbInstances) {
+            const asset = meshAssets.find(a => a.id === inst.meshId);
+            if (!asset) continue;
 
-        for (const mesh of nonGlb) {
             try {
-                const converted = await footprint3DRef.current?.convertMeshToGlb(mesh);
+                // Mock a mesh object for the converter to work with legacy signature
+                const mockMesh: FootprintMesh = { ...inst, content: asset.content, format: asset.format } as any;
+                const converted = await footprint3DRef.current?.convertMeshToGlb(mockMesh);
                 if (converted) {
-                    const idx = newMeshes.findIndex(m => m.id === mesh.id);
-                    if (idx !== -1) {
-                        newMeshes[idx] = converted;
-                        changed = true;
-                    }
+                    onRegisterMesh({
+                        id: asset.id, // Reuse ID, update content
+                        name: asset.name,
+                        content: (converted as any).content,
+                        format: "glb"
+                    });
                 }
             } catch (e) {
-                console.error("Failed to heal mesh", mesh.name, e);
+                console.error("Failed to heal mesh", asset.name, e);
             }
         }
 
-        if (changed) {
-            updateFootprintField("meshes", newMeshes);
-            console.log("Healed JSON: Converted meshes to GLB");
-        }
         setProcessingMessage(null);
     };
 
     healMeshes();
-  }, [footprint.meshes, footprint3DRef.current]);
+  }, [footprint.meshes, meshAssets, footprint3DRef.current]);
 
   useEffect(() => { viewBoxRef.current = viewBox; }, [viewBox]);
 
@@ -840,7 +849,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
           
           // Use timeout to allow render to update UI before heavy lifting
           setTimeout(() => {
-              let processedCount = 0;
               const newMeshes: FootprintMesh[] = [];
 
               const processNext = async (index: number) => {
@@ -858,35 +866,58 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                   const ext = file.name.split('.').pop()?.toLowerCase();
                   
                   if (ext === "stl" || ext === "step" || ext === "stp" || ext === "obj" || ext === "glb" || ext === "gltf") {
+                       let processedContent: string | null = null;
+                       let processedFormat: "stl" | "step" | "obj" | "glb" = "stl";
+
                        if (footprint3DRef.current) {
                            const newMesh = await footprint3DRef.current.processDroppedFile(file);
-                           if (newMesh) newMeshes.push(newMesh);
+                           if (newMesh) {
+                               processedContent = (newMesh as any).content;
+                               processedFormat = (newMesh as any).format;
+                           }
                        } else {
                            // Fallback for 2D mode or uninitialized 3D view
                            const reader = new FileReader();
                            await new Promise<void>((resolve) => {
                                reader.onload = () => {
                                   if (reader.result instanceof ArrayBuffer) {
-                                      const base64 = arrayBufferToBase64(reader.result);
-                                      const newMesh: FootprintMesh = {
-                                          id: crypto.randomUUID(),
-                                          name: file.name,
-                                          content: base64,
-                                          format: (ext === "stl" ? "stl" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "step"))),
-                                          x: "0", y: "0", z: "0",
-                                          rotationX: "0", rotationY: "0", rotationZ: "0",
-                                          renderingType: "solid"
-                                      };
-                                      newMeshes.push(newMesh);
+                                      processedContent = arrayBufferToBase64(reader.result);
+                                      processedFormat = (ext === "stl" ? "stl" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "step")));
                                   }
                                   resolve();
                                };
                                reader.readAsArrayBuffer(file);
                            });
                        }
+
+                       if (processedContent) {
+                           // DEDUPLICATION: Check if library already has this content
+                           const existingAsset = meshAssets.find(a => a.content === processedContent);
+                           let finalAssetId = "";
+                           
+                           if (existingAsset) {
+                               finalAssetId = existingAsset.id;
+                           } else {
+                               finalAssetId = crypto.randomUUID();
+                               onRegisterMesh({
+                                   id: finalAssetId,
+                                   name: file.name,
+                                   content: processedContent,
+                                   format: processedFormat
+                               });
+                           }
+
+                           newMeshes.push({
+                               id: crypto.randomUUID(),
+                               name: file.name,
+                               meshId: finalAssetId,
+                               x: "0", y: "0", z: "0",
+                               rotationX: "0", rotationY: "0", rotationZ: "0",
+                               renderingType: "solid"
+                           });
+                       }
                   }
                   
-                  processedCount++;
                   processNext(index + 1);
               };
 
@@ -1087,6 +1118,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
             />
             <MeshListPanel
                 meshes={footprint.meshes || []}
+                meshAssets={meshAssets}
                 selectedId={selectedShapeId}
                 onSelect={setSelectedShapeId}
                 onDelete={deleteMesh}
@@ -1162,6 +1194,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                     allFootprints={allFootprints} // Pass full list for recursion
                     params={params}
                     stackup={stackup}
+                    meshAssets={meshAssets}
                     visibleLayers={layerVisibility} 
                     is3DActive={viewMode === "3D"} 
                     selectedId={selectedShapeId}
@@ -1184,6 +1217,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 updateFootprint={updateFootprintField}
                 params={params} 
                 stackup={stackup}
+                meshAssets={meshAssets}
                 hoveredPointIndex={hoveredPointIndex}
                 setHoveredPointIndex={setHoveredPointIndex}
                 scrollToPointIndex={scrollToPointIndex}

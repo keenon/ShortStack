@@ -7,7 +7,7 @@ import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline, MeshAsset } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -26,6 +26,7 @@ function App() {
   const [params, setParams] = useState<Parameter[]>([]);
   const [stackup, setStackup] = useState<StackupLayer[]>([]);
   const [footprints, setFootprints] = useState<Footprint[]>([]);
+  const [meshAssets, setMeshAssets] = useState<MeshAsset[]>([]);
   
   const [activeTab, setActiveTab] = useState<Tab>("stackup");
 
@@ -89,7 +90,7 @@ function App() {
 
     const saveData = async () => {
       try {
-        const projectData: ProjectData = { params, stackup, footprints };
+        const projectData: ProjectData = { params, stackup, footprints, meshes: meshAssets };
         const content = JSON.stringify(projectData, null, 2);
         await writeTextFile(currentPath, content);
         console.log("Auto-saved to", currentPath);
@@ -100,7 +101,7 @@ function App() {
     
     const timer = setTimeout(saveData, 500);
     return () => clearTimeout(timer);
-  }, [params, stackup, footprints, currentPath]);
+  }, [params, stackup, footprints, meshAssets, currentPath]);
 
   // CREATE PROJECT
   async function createProject() {
@@ -113,12 +114,14 @@ function App() {
         const initialData: ProjectData = { 
             params: [], 
             stackup: [], 
-            footprints: [], 
+            footprints: [],
+            meshes: [],
         };
         await writeTextFile(path, JSON.stringify(initialData));
         setParams([]);
         setStackup([]);
         setFootprints([]);
+        setMeshAssets([]);
         setCurrentPath(path);
         setActiveTab("stackup");
       }
@@ -145,6 +148,7 @@ function App() {
         let rawParams: any[] = [];
         let rawStackup: any[] = [];
         let rawFootprints: any[] = [];
+        let rawMeshAssets: MeshAsset[] = [];
 
         if (Array.isArray(rawData)) {
             rawParams = rawData;
@@ -153,6 +157,7 @@ function App() {
             rawParams = rawData.params || [];
             rawStackup = rawData.stackup || [];
             rawFootprints = rawData.footprints || [];
+            rawMeshAssets = rawData.meshes || [];
             if (!rawData.params || !rawData.stackup || !rawData.footprints) needsUpgrade = true;
         }
 
@@ -176,6 +181,10 @@ function App() {
             carveSide: layer.carveSide || "Top"
           };
         });
+
+        // MIGRATION: Extract and deduplicate legacy embedded meshes
+        const assetMap = new Map<string, string>(); // content -> id
+        rawMeshAssets.forEach(asset => assetMap.set(asset.content, asset.id));
 
         // Sanitize Footprints
         const newFootprints: Footprint[] = rawFootprints.map((fp: any) => {
@@ -253,22 +262,46 @@ function App() {
             return baseShape as FootprintShape;
           });
 
+          // LEGACY MESH MIGRATION
+          const processedMeshes = (fp.meshes || []).map((m: any) => {
+              if (m.content) {
+                  needsUpgrade = true;
+                  let assetId = assetMap.get(m.content);
+                  if (!assetId) {
+                      assetId = crypto.randomUUID();
+                      const newAsset: MeshAsset = {
+                          id: assetId,
+                          name: m.name || "Imported Mesh",
+                          content: m.content,
+                          format: m.format || "stl"
+                      };
+                      rawMeshAssets.push(newAsset);
+                      assetMap.set(m.content, assetId);
+                  }
+                  const { content, format, ...instance } = m;
+                  return { ...instance, meshId: assetId };
+              }
+              return m;
+          });
+
           return { 
               ...fp, 
               id: fp.id || crypto.randomUUID(), 
               shapes: sanitizedShapes, 
+              meshes: processedMeshes,
               boardOutline: undefined, // Clear legacy
               boardOutlineAssignments 
           };
         });
 
         if (needsUpgrade) {
-          alert("This file was created with an older version of the editor. Some missing properties have been initialized to default values.");
+          alert("This file was created with an older version of the editor. Some properties have been updated to the new project structure.");
         }
 
         setParams(newParams);
         setStackup(newStackup);
         setFootprints(newFootprints);
+        setMeshAssets(rawMeshAssets);
         setCurrentPath(path as string);
         setActiveTab("stackup");
       }
@@ -278,11 +311,16 @@ function App() {
     }
   }
 
+  function registerMeshAsset(asset: MeshAsset) {
+      setMeshAssets(prev => [...prev, asset]);
+  }
+
   function closeProject() {
     setCurrentPath(null);
     setParams([]);
     setStackup([]);
     setFootprints([]);
+    setMeshAssets([]);
   }
 
   // --- UI BANNER ---
@@ -358,6 +396,8 @@ function App() {
             setFootprints={setFootprints}
             params={params}
             stackup={stackup}
+            meshAssets={meshAssets}
+            onRegisterMesh={registerMeshAsset}
           />
         </div>
         <div className={`tab-pane ${activeTab === "parameters" ? "active" : ""}`}>

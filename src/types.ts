@@ -97,11 +97,17 @@ export interface FootprintReference extends BaseShape {
 
 export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide | FootprintBoardOutline;
 
-export interface FootprintMesh {
+export interface MeshAsset {
   id: string;
   name: string;
   content: string; // Base64 encoded file content
   format: "stl" | "step" | "obj" | "glb";
+}
+
+export interface FootprintMesh {
+  id: string;
+  name: string;
+  meshId: string; // NEW: References MeshAsset.id
   renderingType: "solid" | "wireframe" | "hidden";
   color?: string;
   // Position
@@ -142,4 +148,5 @@ export interface ProjectData {
   params: Parameter[];
   stackup: StackupLayer[];
   footprints: Footprint[];
+  meshes: MeshAsset[]; // NEW: Global library
 }

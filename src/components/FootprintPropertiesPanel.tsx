@@ -1,7 +1,7 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
 import { Fragment, useMemo, useRef, useEffect } from "react";
-import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline } from "../types";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, MeshAsset } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
 
@@ -14,6 +14,7 @@ const FootprintPropertiesPanel = ({
   updateFootprint,
   params,
   stackup,
+  meshAssets,
   hoveredPointIndex,
   setHoveredPointIndex,
   scrollToPointIndex,
@@ -29,6 +30,7 @@ const FootprintPropertiesPanel = ({
   updateFootprint: (field: string, val: any) => void;
   params: Parameter[];
   stackup: StackupLayer[];
+  meshAssets: MeshAsset[];
   hoveredPointIndex: number | null;
   setHoveredPointIndex: (index: number | null) => void;
   scrollToPointIndex: number | null;
@@ -301,6 +303,7 @@ const FootprintPropertiesPanel = ({
   // CHECK FOR MESH SELECTION
   const mesh = footprint.meshes?.find(m => m.id === selectedId);
   if (mesh) {
+      const asset = meshAssets.find(a => a.id === mesh.meshId);
       return (
           <div className="properties-panel">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
@@ -312,6 +315,11 @@ const FootprintPropertiesPanel = ({
               <div className="prop-group">
                   <label>Name</label>
                   <input type="text" value={mesh.name} onChange={(e) => updateMesh(mesh.id, "name", e.target.value)} />
+              </div>
+
+              <div className="prop-group">
+                  <label>Format</label>
+                  <div style={{ fontSize: '0.9em', color: '#888', textTransform: 'uppercase' }}>{asset?.format || "Unknown"}</div>
               </div>
               
               <div className="prop-group">

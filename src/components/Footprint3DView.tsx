@@ -4,7 +4,7 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
 import { STLLoader, OBJLoader, GLTFLoader } from "three-stdlib";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, MeshAsset } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
 import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
 import Module from "manifold-3d";
@@ -21,6 +21,7 @@ interface Props {
   allFootprints: Footprint[]; // Required for recursion
   params: Parameter[];
   stackup: StackupLayer[];
+  meshAssets: MeshAsset[];
   visibleLayers?: Record<string, boolean>;
   is3DActive: boolean;
   // NEW: Selection Props
@@ -649,22 +650,22 @@ function generateProceduralFillet(
 
 const meshGeometryCache = new Map<string, THREE.BufferGeometry>();
 
-async function loadMeshGeometry(mesh: FootprintMesh): Promise<THREE.BufferGeometry | null> {
-    const cacheKey = mesh.id + "_" + mesh.content.slice(0, 30); // Simple hash
+async function loadMeshGeometry(asset: MeshAsset): Promise<THREE.BufferGeometry | null> {
+    const cacheKey = asset.id;
     if (meshGeometryCache.has(cacheKey)) {
         return meshGeometryCache.get(cacheKey)!.clone();
     }
 
-    const buffer = base64ToArrayBuffer(mesh.content);
+    const buffer = base64ToArrayBuffer(asset.content);
 
     try {
-        console.log(`Loading mesh ${mesh.id} of format ${mesh.format}`);
-        if (mesh.format === "stl") {
+        console.log(`Loading mesh asset ${asset.id} of format ${asset.format}`);
+        if (asset.format === "stl") {
             const loader = new STLLoader();
             const geometry = loader.parse(buffer);
             meshGeometryCache.set(cacheKey, geometry);
             return geometry;
-        } else if (mesh.format === "obj") {
+        } else if (asset.format === "obj") {
              const text = new TextDecoder().decode(buffer);
              const loader = new OBJLoader();
              const group = loader.parse(text);
@@ -681,7 +682,7 @@ async function loadMeshGeometry(mesh: FootprintMesh): Promise<THREE.BufferGeomet
                  }
                  return merged;
              }
-        } else if (mesh.format === "glb") {
+        } else if (asset.format === "glb") {
             const loader = new GLTFLoader();
             return new Promise((resolve) => {
                 loader.parse(buffer, '', (gltf) => {
@@ -705,7 +706,7 @@ async function loadMeshGeometry(mesh: FootprintMesh): Promise<THREE.BufferGeomet
                     resolve(null);
                 });
             });
-        } else if (mesh.format === "step") {
+        } else if (asset.format === "step") {
             console.warn("Legacy STEP format found on main thread. Processing should be handled by worker.");
             return null; // The healing effect will catch this and convert it
         }
@@ -1125,11 +1126,13 @@ const TransformControlsModeSwitcher = ({ controlRef }: { controlRef: any }) => {
 
 const MeshObject = ({ 
     meshData, 
+    meshAssets,
     isSelected,
     onSelect,
     onUpdate
 }: { 
     meshData: FlatMesh, 
+    meshAssets: MeshAsset[],
     isSelected: boolean,
     onSelect: () => void,
     onUpdate: (id: string, field: string, val: any) => void
@@ -1145,11 +1148,14 @@ const MeshObject = ({
 
     useEffect(() => {
         let mounted = true;
-        loadMeshGeometry(mesh).then(geom => {
-            if(mounted && geom) setGeometry(geom);
-        });
+        const asset = meshAssets.find(a => a.id === mesh.meshId);
+        if (asset) {
+            loadMeshGeometry(asset).then(geom => {
+                if(mounted && geom) setGeometry(geom);
+            });
+        }
         return () => { mounted = false; };
-    }, [mesh]);
+    }, [mesh, meshAssets]);
 
     // 1. Calculate transforms from the matrix immediately during render
     // This ensures we have the values ready to pass to the props
@@ -1252,7 +1258,7 @@ const MeshObject = ({
     );
 };
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh }, ref) => {
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
   const hasInitiallySnapped = useRef(false);
@@ -1431,7 +1437,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                 renderingType: "solid",
                 x: "0", y: "0", z: "0",
                 rotationX: "0", rotationY: "0", rotationZ: "0"
-            };
+            } as any;
         } catch (e) {
             console.error("Worker Conversion Failed", e);
             // Alert user visually since the spinner just dies
@@ -1440,21 +1446,22 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         }
     },
     convertMeshToGlb: async (mesh: FootprintMesh): Promise<FootprintMesh | null> => {
-        if (mesh.format === "glb") return mesh;
+        // mesh argument here is a mock passed by the healer with embedded content
+        const mock = mesh as any;
 
         try {
-            const buffer = base64ToArrayBuffer(mesh.content);
+            const buffer = base64ToArrayBuffer(mock.content);
             const result = await callWorker("convert", {
                 buffer,
-                format: mesh.format,
-                fileName: mesh.name
+                format: mock.format,
+                fileName: mock.name
             });
             
             return {
                 ...mesh,
                 content: result.base64,
                 format: result.format
-            };
+            } as any;
         } catch (e) {
              console.error("Worker Healing Failed", e);
              return null;
@@ -1568,6 +1575,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                 <MeshObject 
                     key={m.mesh.id + idx} 
                     meshData={m} 
+                    meshAssets={meshAssets}
                     isSelected={selectedId === m.selectableId}
                     onSelect={() => onSelect(m.selectableId)}
                     onUpdate={onUpdateMesh}

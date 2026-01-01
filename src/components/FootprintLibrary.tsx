@@ -1,5 +1,6 @@
+// src/components/FootprintLibrary.tsx
 import React, { useState } from "react";
-import { Footprint, Parameter, StackupLayer } from "../types";
+import { Footprint, Parameter, StackupLayer, MeshAsset } from "../types";
 import FootprintEditor from "./FootprintEditor";
 import './FootprintLibrary.css';
 
@@ -8,9 +9,11 @@ interface Props {
   setFootprints: React.Dispatch<React.SetStateAction<Footprint[]>>;
   params: Parameter[];
   stackup: StackupLayer[];
+  meshAssets: MeshAsset[];
+  onRegisterMesh: (asset: MeshAsset) => void;
 }
 
-export default function FootprintLibrary({ footprints, setFootprints, params, stackup }: Props) {
+export default function FootprintLibrary({ footprints, setFootprints, params, stackup, meshAssets, onRegisterMesh }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
 
   // --- ACTIONS ---
@@ -58,6 +61,8 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
         onClose={() => setEditingId(null)}
         params={params}
         stackup={stackup}
+        meshAssets={meshAssets}
+        onRegisterMesh={onRegisterMesh}
       />
     );
   }
