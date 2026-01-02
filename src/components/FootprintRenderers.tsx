@@ -1,6 +1,6 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline } from "../types";
 import { evaluateExpression, interpolateColor, resolvePoint } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
@@ -74,7 +74,6 @@ export const RecursiveShapeRenderer = ({
 
     // Rendered with dotted/dashed lines in green to indicate "virtual" and "guide"
     const stroke = isSelected ? "#646cff" : "#00ff00";
-    const vectorEffect = "non-scaling-stroke";
 
     const elements = [];
     

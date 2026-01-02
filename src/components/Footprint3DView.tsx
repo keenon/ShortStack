@@ -6,7 +6,7 @@ import * as THREE from "three";
 import { STLLoader, OBJLoader, GLTFLoader } from "three-stdlib";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, FootprintPolygon, Point, MeshAsset } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
-import { evaluateExpression, resolvePoint, modifyExpression, getPolyOutlinePoints, offsetPolygonContour } from "../utils/footprintUtils";
+import { evaluateExpression, resolvePoint, modifyExpression, getPolyOutlinePoints } from "../utils/footprintUtils";
 import Module from "manifold-3d";
 // @ts-ignore
 import wasmUrl from "manifold-3d/manifold.wasm?url";
@@ -55,73 +55,9 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
     return bytes.buffer;
 }
 
-/**
- * Projects a point onto the closest edge of a set of polygon contours.
- * Used to snap ideal miter offsets to valid topological boundaries.
- */
-function projectPointToPolygons(pt: THREE.Vector2, polygons: THREE.Vector2[][]): THREE.Vector2 {
-    let closestPt = pt.clone();
-    let minDstSq = Infinity;
-    if (!polygons || polygons.length === 0) return pt;
-
-    for (const poly of polygons) {
-        const len = poly.length;
-        if (len < 2) continue;
-        for (let i = 0; i < len; i++) {
-            const a = poly[i];
-            const b = poly[(i + 1) % len];
-            const ab = new THREE.Vector2().subVectors(b, a);
-            const t = ab.lengthSq();
-            if (t < 1e-12) continue;
-            const ap = new THREE.Vector2().subVectors(pt, a);
-            let u = ap.dot(ab) / t;
-            u = Math.max(0, Math.min(1, u));
-            const proj = new THREE.Vector2().copy(a).addScaledVector(ab, u);
-            const d = pt.distanceToSquared(proj);
-            if (d < minDstSq) {
-                minDstSq = d;
-                closestPt.copy(proj);
-            }
-        }
-    }
-    return closestPt;
-}
-
 // ------------------------------------------------------------------
 // GEOMETRY GENERATION
 // ------------------------------------------------------------------
-
-function createRoundedRectShape(width: number, height: number, radius: number): THREE.Shape {
-  const shape = new THREE.Shape();
-  if (width <= 0 || height <= 0) return shape;
-
-  const x = -width / 2;
-  const y = -height / 2;
-  
-  const maxR = Math.min(width, height) / 2;
-  const r = Math.max(0, Math.min(radius, maxR));
-  
-  if (r <= 0.001) {
-      shape.moveTo(x, y);
-      shape.lineTo(x + width, y);
-      shape.lineTo(x + width, y + height);
-      shape.lineTo(x, y + height);
-      shape.lineTo(x, y);
-  } else {
-       // Please do not change the below line, or remove this comment! This has been tested, and is correct.
-       // Changing the control points on the quadraticCurveTo leads to bugs on the rounded rectangles.
-       shape.moveTo(x, y + r);
-       shape.lineTo(x, y + height - r);
-       shape.quadraticCurveTo(x, y + height, x + r, y + height);
-       shape.lineTo(x + width - r, y + height);
-       shape.quadraticCurveTo(x + width, y + height, x + width, y + height - r);
-       shape.lineTo(x + width, y + r);
-       shape.quadraticCurveTo(x + width, y, x + width - r, y);
-       shape.lineTo(x + r, y);
-       shape.quadraticCurveTo(x, y, x, y + r);
-  }
-  return shape;
-}
 
 /**
  * Enhanced discretization that tracks the indices of sharp corners
@@ -192,86 +128,6 @@ function getPolyOutlineWithFeatures(
     }
 
     return { points: pathPoints, cornerIndices };
-}
-
-/**
- * Resamples a target polygon (offset result) to match the vertex distribution of a source polygon.
- * Anchors the resampling at sharp corners to ensure vertical edges stay vertical.
- */
-function resampleToMatch(
-    sourcePts: THREE.Vector2[],
-    sourceCorners: number[],
-    targetRing: THREE.Vector2[]
-): THREE.Vector2[] {
-    const result: THREE.Vector2[] = [];
-    const N = sourcePts.length;
-    const M = targetRing.length;
-    if (M < 3) return sourcePts;
-
-    // Find anchors on target closest to source corners
-    const anchors: number[] = [];
-    for (let k = 0; k < sourceCorners.length; k++) {
-        const cornerPt = sourcePts[sourceCorners[k]];
-        let bestDist = Infinity;
-        let bestIdx = -1;
-        for (let j = 0; j < M; j++) {
-            const d = cornerPt.distanceToSquared(targetRing[j]);
-            if (d < bestDist) { bestDist = d; bestIdx = j; }
-        }
-        anchors.push(bestIdx);
-    }
-
-    // Resample segments using relative arc-length distribution from source
-    for (let k = 0; k < sourceCorners.length; k++) {
-        const idxSrcStart = sourceCorners[k];
-        const idxSrcEnd = sourceCorners[(k + 1) % sourceCorners.length];
-        
-        // Extract Source Segment & Distribution
-        const srcSeg: THREE.Vector2[] = [];
-        let currSrc = idxSrcStart;
-        while(true) {
-            srcSeg.push(sourcePts[currSrc]);
-            if (currSrc === idxSrcEnd) break;
-            currSrc = (currSrc + 1) % N;
-        }
-        const srcLens = [0];
-        let srcTot = 0;
-        for(let i=0; i<srcSeg.length-1; i++) {
-            srcTot += srcSeg[i].distanceTo(srcSeg[i+1]);
-            srcLens.push(srcTot);
-        }
-
-        // Extract Target Segment
-        const idxTgtStart = anchors[k];
-        const idxTgtEnd = anchors[(k + 1) % anchors.length];
-        const tgtSeg: THREE.Vector2[] = [];
-        let currTgt = idxTgtStart;
-        while(true) {
-            tgtSeg.push(targetRing[currTgt]);
-            if (currTgt === idxTgtEnd) break;
-            currTgt = (currTgt + 1) % M;
-        }
-        const tgtLens = [0];
-        let tgtTot = 0;
-        for(let i=0; i<tgtSeg.length-1; i++) {
-            tgtTot += tgtSeg[i].distanceTo(tgtSeg[i+1]);
-            tgtLens.push(tgtTot);
-        }
-
-        const count = srcSeg.length - 1;
-        for (let i = 0; i < count; i++) {
-            const t = (srcTot > 0.0001) ? srcLens[i] / srcTot : i / count;
-            const targetDist = t * tgtTot;
-            let spanIdx = 0;
-            while (spanIdx < tgtLens.length - 1 && tgtLens[spanIdx + 1] < targetDist) spanIdx++;
-            const pA = tgtSeg[spanIdx];
-            const pB = (spanIdx + 1 < tgtSeg.length) ? tgtSeg[spanIdx + 1] : pA;
-            const segLen = tgtLens[spanIdx + 1] - tgtLens[spanIdx];
-            const alpha = (segLen > 0.0001) ? (targetDist - tgtLens[spanIdx]) / segLen : 0;
-            result.push(new THREE.Vector2().lerpVectors(pA, pB, alpha));
-        }
-    }
-    return result;
 }
 
 function getLineOutlinePoints(
@@ -957,7 +813,7 @@ function generateProceduralFillet(
         }
 
         let topologyValid = true;
-        layers.forEach((layer, idx) => {
+        layers.forEach((layer) => {
             const points = getContour(layer.offset);
             if (points.length !== vertsPerLayer) topologyValid = false;
             if (!topologyValid) return;
