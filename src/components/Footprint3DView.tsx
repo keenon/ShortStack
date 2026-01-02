@@ -691,6 +691,16 @@ function generateProceduralFillet(
         const fromTable = new Int8Array((lenA + 1) * dimCol); // 1: Up, 2: Left
         const idx = (r: number, c: number) => r * dimCol + c;
 
+        // Area Weight Constant
+        // Penalizes large triangles to prevent "shortcuts" across concave voids.
+        // A value of 1.0-10.0 keeps the solver focused on the ribbon path.
+        const AREA_WEIGHT = 4.0; 
+
+        // Helper: Calculate 2x Area of triangle (to avoid 0.5 multiplication repeatedly)
+        const getTriArea2x = (p1: THREE.Vector2, p2: THREE.Vector2, p3: THREE.Vector2) => {
+            return Math.abs(p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
+        };
+
         const solveForOffset = (offsetB: number) => {
             costTable.fill(Infinity);
             fromTable.fill(0);
@@ -699,24 +709,39 @@ function generateProceduralFillet(
             for (let i = 0; i <= lenA; i++) {
                 for (let j = 0; j <= lenB; j++) {
                     if (i === 0 && j === 0) continue;
+                    
+                    // Current vertices being considered
                     const pA = polyA[i % lenA];
                     const pB = polyB[(j + offsetB) % lenB]; 
                     const distSq = pA.distanceToSquared(pB);
 
+                    // Transition 1: Move along Poly A (i-1 -> i)
+                    // Triangle created: (A[i-1], B[j], A[i])
                     if (i > 0) {
                         const c = costTable[idx(i - 1, j)];
                         if (c !== Infinity) {
-                            const newCost = c + distSq;
+                            const pPrevA = polyA[(i - 1) % lenA];
+                            // Add Area Cost to prevent degenerate giant triangles
+                            const triArea = getTriArea2x(pPrevA, pB, pA) * 0.5;
+                            const newCost = c + distSq + (triArea * AREA_WEIGHT);
+
                             if (newCost < costTable[idx(i, j)]) {
                                 costTable[idx(i, j)] = newCost;
                                 fromTable[idx(i, j)] = 1;
                             }
                         }
                     }
+
+                    // Transition 2: Move along Poly B (j-1 -> j)
+                    // Triangle created: (A[i], B[j-1], B[j])
                     if (j > 0) {
                         const c = costTable[idx(i, j - 1)];
                         if (c !== Infinity) {
-                            const newCost = c + distSq;
+                            const pPrevB = polyB[(j - 1 + offsetB) % lenB];
+                            // Add Area Cost to prevent degenerate giant triangles
+                            const triArea = getTriArea2x(pA, pPrevB, pB) * 0.5;
+                            const newCost = c + distSq + (triArea * AREA_WEIGHT);
+                            
                             if (newCost < costTable[idx(i, j)]) {
                                 costTable[idx(i, j)] = newCost;
                                 fromTable[idx(i, j)] = 2;
@@ -769,8 +794,6 @@ function generateProceduralFillet(
             const cost = solveForOffset(offset);
             
             // Add seam cost (distance between start points)
-            // This prevents the solver from preferring a "twisted" mesh that has 
-            // slightly shorter internal diagonals but a very long start-to-start edge.
             const pA = polyA[0];
             const pB = polyB[offset];
             const seamDistSq = pA.distanceToSquared(pB);
