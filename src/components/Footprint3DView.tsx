@@ -101,11 +101,30 @@ function getPolyOutlinePoints(
     allFootprints: Footprint[],
     resolution: number
 ): THREE.Vector2[] {
-    if (points.length < 3) return [];
+    const data = getPolyOutlineWithFeatures(points, originX, originY, params, contextFp, allFootprints, resolution);
+    return data.points;
+}
+
+/**
+ * Enhanced discretization that tracks the indices of sharp corners
+ */
+function getPolyOutlineWithFeatures(
+    points: Point[],
+    originX: number,
+    originY: number,
+    params: Parameter[],
+    contextFp: Footprint,
+    allFootprints: Footprint[],
+    resolution: number
+): { points: THREE.Vector2[], cornerIndices: number[] } {
+    if (points.length < 3) return { points: [], cornerIndices: [] };
 
     const pathPoints: THREE.Vector2[] = [];
+    const cornerIndices: number[] = [];
 
     for (let i = 0; i < points.length; i++) {
+        cornerIndices.push(pathPoints.length);
+
         const currRaw = points[i];
         const nextRaw = points[(i + 1) % points.length];
 
@@ -146,9 +165,84 @@ function getPolyOutlinePoints(
         const j = (i + 1) % pathPoints.length;
         area += pathPoints[i].x * pathPoints[j].y - pathPoints[j].x * pathPoints[i].y;
     }
-    if (area < 0) pathPoints.reverse();
+    if (area < 0) {
+        pathPoints.reverse();
+        // Recalculate corner indices after reversal
+        const len = pathPoints.length;
+        const reversedCorners = cornerIndices.map(idx => (len - idx) % len).sort((a,b) => a-b);
+        return { points: pathPoints, cornerIndices: reversedCorners };
+    }
 
-    return pathPoints;
+    return { points: pathPoints, cornerIndices };
+}
+
+/**
+ * Resamples a target polygon (offset result) to match the vertex distribution of a source polygon.
+ * Anchors the resampling at sharp corners to ensure vertical edges stay vertical.
+ */
+function resampleToMatch(
+    sourcePts: THREE.Vector2[],
+    sourceCorners: number[],
+    targetRing: THREE.Vector2[]
+): THREE.Vector2[] {
+    const result: THREE.Vector2[] = [];
+    const N = sourcePts.length;
+    const M = targetRing.length;
+    if (M < 3) return sourcePts;
+
+    // Find anchors on target closest to source corners
+    const anchors: number[] = [];
+    let searchStart = 0;
+    for (let k = 0; k < sourceCorners.length; k++) {
+        const cornerPt = sourcePts[sourceCorners[k]];
+        let bestDist = Infinity;
+        let bestIdx = -1;
+        for (let j = 0; j < M; j++) {
+            const idx = (searchStart + j) % M;
+            const d = cornerPt.distanceToSquared(targetRing[idx]);
+            if (d < bestDist) { bestDist = d; bestIdx = idx; }
+        }
+        anchors.push(bestIdx);
+        searchStart = bestIdx;
+    }
+
+    // Resample between anchors
+    for (let k = 0; k < sourceCorners.length; k++) {
+        const idxSrcStart = sourceCorners[k];
+        const idxSrcEnd = sourceCorners[(k + 1) % sourceCorners.length];
+        const count = (idxSrcEnd >= idxSrcStart) ? (idxSrcEnd - idxSrcStart) : (idxSrcEnd + N - idxSrcStart);
+        if (count === 0) continue;
+
+        const idxTgtStart = anchors[k];
+        const idxTgtEnd = anchors[(k + 1) % anchors.length];
+        const segmentPts: THREE.Vector2[] = [];
+        let curr = idxTgtStart;
+        while (true) {
+            segmentPts.push(targetRing[curr]);
+            if (curr === idxTgtEnd) break;
+            curr = (curr + 1) % M;
+        }
+
+        const lens = [0];
+        let totLen = 0;
+        for (let i = 0; i < segmentPts.length - 1; i++) {
+            totLen += segmentPts[i].distanceTo(segmentPts[i + 1]);
+            lens.push(totLen);
+        }
+
+        for (let i = 0; i < count; i++) {
+            const t = i / count;
+            const targetDist = t * totLen;
+            let spanIdx = 0;
+            while (spanIdx < lens.length - 1 && lens[spanIdx + 1] < targetDist) spanIdx++;
+            const pA = segmentPts[spanIdx];
+            const pB = (spanIdx + 1 < segmentPts.length) ? segmentPts[spanIdx + 1] : pA;
+            const segLen = lens[spanIdx + 1] - lens[spanIdx];
+            const alpha = (segLen > 0.0001) ? (targetDist - lens[spanIdx]) / segLen : 0;
+            result.push(new THREE.Vector2().lerpVectors(pA, pB, alpha));
+        }
+    }
+    return result;
 }
 
 // Inward vertex offsetting algorithm for polygons with collision clamping
@@ -588,9 +682,6 @@ function generateProceduralFillet(
             }
 
             // Look ahead: which side is "behind" in normalized space?
-            // Current normalized progress:
-            // A: lenA.acc[idxA+1] / lenA.total
-            // B: lenB.acc[idxB+1] / lenB.total
             const normA = lenA.acc[idxA + 1] / lenA.total;
             const normB = lenB.acc[idxB + 1] / lenB.total;
 
@@ -610,10 +701,10 @@ function generateProceduralFillet(
 
     if (shape.type === "polygon") {
         const poly = shape as FootprintPolygon;
-        const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
-        if (basePoints.length < 3) return null;
+        const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
+        if (baseData.points.length < 3) return null;
 
-        const baseCS = new manifoldModule.CrossSection([basePoints.map(p => [p.x, p.y])], "EvenOdd");
+        const baseCS = new manifoldModule.CrossSection([baseData.points.map(p => [p.x, p.y])], "EvenOdd");
         const steps: { z: number, offset: number }[] = [];
         const wallBottomZ = -(depth - filletRadius);
         steps.push({ z: 0, offset: 0 });
@@ -627,10 +718,21 @@ function generateProceduralFillet(
         const layerData: { z: number, contours: THREE.Vector2[][], startIdx: number }[] = [];
         let totalVerts = 0;
         steps.forEach(step => {
-            const cs = step.offset > 0.001 ? baseCS.offset(-step.offset, "Round", 8) : baseCS;
-            const polys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
-            layerData.push({ z: step.z, contours: polys, startIdx: totalVerts });
-            polys.forEach((contour: THREE.Vector2[]) => {
+            let processedPolys: THREE.Vector2[][] = [];
+            if (step.offset > 0.001) {
+                const cs = baseCS.offset(-step.offset, "Miter", 2.0);
+                const rawPolys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
+                if (rawPolys.length === 1) {
+                    processedPolys = [resampleToMatch(baseData.points, baseData.cornerIndices, rawPolys[0])];
+                } else {
+                    processedPolys = rawPolys;
+                }
+            } else {
+                processedPolys = [baseData.points];
+            }
+
+            layerData.push({ z: step.z, contours: processedPolys, startIdx: totalVerts });
+            processedPolys.forEach((contour: THREE.Vector2[]) => {
                 contour.forEach(p => { rawVertices.push(p.x, step.z, -p.y); totalVerts++; });
             });
         });
@@ -654,24 +756,35 @@ function generateProceduralFillet(
         for(let l=0; l<layerData.length-1; l++) {
             const up = layerData[l];
             const low = layerData[l+1];
-            low.contours.forEach((lowPoly, iLow) => {
-                const lowCenter = new THREE.Vector2();
-                lowPoly.forEach(p => lowCenter.add(p));
-                lowCenter.divideScalar(lowPoly.length);
-                let bestUpIdx = -1, minDist = Infinity;
-                up.contours.forEach((upPoly, iUp) => {
-                    const upCenter = new THREE.Vector2();
-                    upPoly.forEach(p => upCenter.add(p));
-                    upCenter.divideScalar(upPoly.length);
-                    const d = upCenter.distanceToSquared(lowCenter);
-                    if (d < minDist) { minDist = d; bestUpIdx = iUp; }
-                });
-                if (bestUpIdx !== -1) {
-                    let sA = up.startIdx; for(let i=0; i<bestUpIdx; i++) sA += up.contours[i].length;
-                    let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
-                    triangulateZipper(up.contours[bestUpIdx], lowPoly, sA, sB);
+            if (up.contours.length === 1 && low.contours.length === 1 && up.contours[0].length === low.contours[0].length) {
+                const N = up.contours[0].length;
+                const sA = up.startIdx;
+                const sB = low.startIdx;
+                for(let i=0; i<N; i++) {
+                    const next = (i+1)%N;
+                    rawIndices.push(sA + i, sB + i, sB + next);
+                    rawIndices.push(sA + i, sB + next, sA + next);
                 }
-            });
+            } else {
+                low.contours.forEach((lowPoly, iLow) => {
+                    const lowCenter = new THREE.Vector2();
+                    lowPoly.forEach(p => lowCenter.add(p));
+                    lowCenter.divideScalar(lowPoly.length);
+                    let bestUpIdx = -1, minDist = Infinity;
+                    up.contours.forEach((upPoly, iUp) => {
+                        const upCenter = new THREE.Vector2();
+                        upPoly.forEach(p => upCenter.add(p));
+                        upCenter.divideScalar(upPoly.length);
+                        const d = upCenter.distanceToSquared(lowCenter);
+                        if (d < minDist) { minDist = d; bestUpIdx = iUp; }
+                    });
+                    if (bestUpIdx !== -1) {
+                        let sA = up.startIdx; for(let i=0; i<bestUpIdx; i++) sA += up.contours[i].length;
+                        let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
+                        triangulateZipper(up.contours[bestUpIdx], lowPoly, sA, sB);
+                    }
+                });
+            }
         }
     } else {
         const getContour = (offset: number): THREE.Vector2[] => {
