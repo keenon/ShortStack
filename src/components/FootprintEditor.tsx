@@ -680,7 +680,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         }
         
         // NEW: Delete Key logic
-        if (e.key === "Delete") {
+        if (e.key === "Delete" || e.key === "Backspace") {
             if (selectedShapeId) {
                 if (footprintRef.current.shapes.some(s => s.id === selectedShapeId)) {
                     deleteShape(selectedShapeId);
