@@ -8,6 +8,7 @@ import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateE
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh, IconPolygon } from "./Icons";
+import { useUndoHistory } from "../hooks/useUndoHistory"; // ADDED
 import './FootprintEditor.css';
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
@@ -282,7 +283,30 @@ const MeshListPanel = ({
 // MAIN COMPONENT
 // ------------------------------------------------------------------
 
-export default function FootprintEditor({ footprint, allFootprints, onUpdate, onClose, onEditChild, params, stackup, meshAssets, onRegisterMesh }: Props) {
+export default function FootprintEditor({ footprint: initialFootprint, allFootprints, onUpdate, onClose, onEditChild, params, stackup, meshAssets, onRegisterMesh }: Props) {
+  // --- HISTORY HOOK ---
+  const { 
+    state: footprint, 
+    set: updateHistory, 
+    undo, 
+    redo, 
+    canUndo, 
+    canRedo,
+    resetHistory
+  } = useUndoHistory(initialFootprint, 500);
+
+  // Sync back to parent for auto-save
+  useEffect(() => {
+      onUpdate(footprint);
+  }, [footprint, onUpdate]);
+
+  // Reset history if jumping to a different footprint
+  const activeIdRef = useRef(initialFootprint.id);
+  if (activeIdRef.current !== initialFootprint.id) {
+      activeIdRef.current = initialFootprint.id;
+      resetHistory(initialFootprint);
+  }
+
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   
@@ -544,7 +568,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
           }
           return s;
       });
-      onUpdate({ ...currentFP, shapes: updatedShapes });
+      updateHistory({ ...currentFP, shapes: updatedShapes });
   };
 
   const handleShapeMouseUp = (_e: MouseEvent) => {
@@ -618,14 +642,14 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
     // 5. Add to Footprint (IMPROVEMENT: Prepend to appear on top of list and visuals)
     if (type === "shape") {
-        onUpdate({ ...footprint, shapes: [newItem, ...footprint.shapes] });
+        updateHistory({ ...footprint, shapes: [newItem, ...footprint.shapes] });
     } else if (type === "mesh") {
-        onUpdate({ ...footprint, meshes: [newItem, ...(footprint.meshes || [])] });
+        updateHistory({ ...footprint, meshes: [newItem, ...(footprint.meshes || [])] });
     }
 
     // 6. Select the copy
     setSelectedShapeId(newItem.id);
-  }, [footprint, onUpdate]);
+  }, [footprint, updateHistory]);
 
   const handleDuplicate = useCallback(() => {
     if (selectedShapeId) {
@@ -649,23 +673,36 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         });
     }
 
-    onUpdate({ ...footprintRef.current, shapes: newShapes, boardOutlineAssignments: newAssignments });
+    updateHistory({ ...footprintRef.current, shapes: newShapes, boardOutlineAssignments: newAssignments });
     setSelectedShapeId(null);
-  }, [onUpdate]);
+  }, [updateHistory]);
 
   const deleteMesh = useCallback((meshId: string) => {
-      onUpdate({ ...footprintRef.current, meshes: (footprintRef.current.meshes || []).filter(m => m.id !== meshId) });
+      updateHistory({ ...footprintRef.current, meshes: (footprintRef.current.meshes || []).filter(m => m.id !== meshId) });
       if (selectedShapeId === meshId) setSelectedShapeId(null);
-  }, [onUpdate, selectedShapeId]);
+  }, [updateHistory, selectedShapeId]);
 
   // Keyboard Shortcuts Listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
         // Ignore if focus is in an input or select
         const target = e.target as HTMLElement;
-        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+        const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT';
 
         const isCtrl = e.ctrlKey || e.metaKey;
+
+        // UNDO / REDO logic
+        if (isCtrl && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            if (e.shiftKey) {
+                if (canRedo) redo();
+            } else {
+                if (canUndo) undo();
+            }
+            return;
+        }
+
+        if (isInput) return;
 
         if (isCtrl && e.key.toLowerCase() === 'c') {
             e.preventDefault();
@@ -694,7 +731,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleCopy, handlePaste, handleDuplicate, selectedShapeId, deleteShape, deleteMesh]);
+  }, [handleCopy, handlePaste, handleDuplicate, selectedShapeId, deleteShape, deleteMesh, undo, redo, canUndo, canRedo]);
 
   // --- ACTIONS ---
   const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon", footprintId?: string) => {
@@ -726,21 +763,22 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     }
 
     // IMPROVEMENT: Always prepend new shapes to the list so they appear on top visually
-    onUpdate({ ...footprint, shapes: [newShape, ...footprint.shapes] });
+    let nextFootprint = { ...footprint, shapes: [newShape, ...footprint.shapes] };
 
     // Automatic Layer Assignment for Board Outlines
     if (type === "boardOutline") {
         const assignments = { ...footprint.boardOutlineAssignments };
-        const outlines = [newShape, ...footprint.shapes].filter(s => s.type === "boardOutline");
+        const outlines = nextFootprint.shapes.filter(s => s.type === "boardOutline");
         // If this is the first outline, assign it to all layers
         if (outlines.length === 1) {
             stackup.forEach(l => {
                 assignments[l.id] = newShape.id;
             });
-            onUpdate({ ...footprint, shapes: [newShape, ...footprint.shapes], boardOutlineAssignments: assignments });
+            nextFootprint = { ...nextFootprint, boardOutlineAssignments: assignments };
         }
     }
 
+    updateHistory(nextFootprint);
     setSelectedShapeId(newShape.id);
   };
 
@@ -803,22 +841,22 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     const newPoints = [...points];
     newPoints.splice(index + 1, 0, newPoint);
     
-    onUpdate({ ...footprint, shapes: footprint.shapes.map(s => s.id === shapeId ? { ...s, points: newPoints } : s) });
+    updateHistory({ ...footprint, shapes: footprint.shapes.map(s => s.id === shapeId ? { ...s, points: newPoints } : s) });
     // Keep shape selected
     setSelectedShapeId(shapeId);
   };
 
   const updateShape = (shapeId: string, field: string, val: any) => {
-    onUpdate({ ...footprint, shapes: footprint.shapes.map((s) => s.id === shapeId ? { ...s, [field]: val } : s), });
+    updateHistory({ ...footprint, shapes: footprint.shapes.map((s) => s.id === shapeId ? { ...s, [field]: val } : s), });
   };
-  const updateFootprintField = (field: string, val: any) => { onUpdate({ ...footprint, [field]: val }); };
+  const updateFootprintField = (field: string, val: any) => { updateHistory({ ...footprint, [field]: val }); };
 
   const moveShape = (index: number, direction: -1 | 1) => {
     if (direction === -1 && index === 0) return;
     if (direction === 1 && index === footprint.shapes.length - 1) return;
     const newShapes = [...footprint.shapes];
     [newShapes[index], newShapes[index + direction]] = [newShapes[index + direction], newShapes[index]];
-    onUpdate({ ...footprint, shapes: newShapes });
+    updateHistory({ ...footprint, shapes: newShapes });
   };
   
   // --- MESH ACTIONS ---
@@ -855,7 +893,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                       // All done
                       if (newMeshes.length > 0) {
                            // IMPROVEMENT: Prepend to appear at top
-                           onUpdate({ ...footprint, meshes: [...newMeshes, ...(footprint.meshes || [])] });
+                           updateHistory({ ...footprint, meshes: [...newMeshes, ...(footprint.meshes || [])] });
                            setSelectedShapeId(newMeshes[newMeshes.length - 1].id);
                       }
                       setProcessingMessage(null);
@@ -934,11 +972,11 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   };
   
   const updateMesh = (meshId: string, field: string, val: any) => {
-      onUpdate({ ...footprint, meshes: (footprint.meshes || []).map(m => m.id === meshId ? { ...m, [field]: val } : m) });
+      updateHistory({ ...footprint, meshes: (footprint.meshes || []).map(m => m.id === meshId ? { ...m, [field]: val } : m) });
   };
 
 
-  const updateFootprintName = (name: string) => { onUpdate({ ...footprint, name }); };
+  const updateFootprintName = (name: string) => { updateHistory({ ...footprint, name }); };
   const toggleLayerVisibility = (id: string) => { setLayerVisibility(prev => ({ ...prev, [id]: prev[id] === undefined ? false : !prev[id] })); };
   const handleHomeClick = () => {
     if (viewMode === "2D") {
@@ -1077,6 +1115,11 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
       <div className="fp-toolbar">
         <button className="secondary" onClick={onClose}>← Back</button>
+        {/* UNDO / REDO CONTROLS */}
+        <div style={{ display: 'flex', gap: '5px', marginLeft: '10px' }}>
+             <button className="secondary" onClick={undo} disabled={!canUndo} title="Undo (Apple+Z)">↶</button>
+             <button className="secondary" onClick={redo} disabled={!canRedo} title="Redo (Shift+Apple+Z)">↷</button>
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginLeft: '10px' }}>
             <input className="toolbar-name-input" style={{ margin: 0 }} type="text" value={footprint.name} onChange={(e) => updateFootprintName(e.target.value)} />
             <label className="checkbox-label" style={{ fontSize: '0.85em', color: '#aaa', cursor: 'pointer' }}>
@@ -1432,7 +1475,7 @@ function collectExportShapes(
             } else if (shape.type === "polygon") {
                 const poly = shape as FootprintPolygon;
                 
-                // If it's a simple cut or flat carve, just send the definition
+                // If it's a simple split or flat carve, just send the definition
                 if (endmillRadius <= 0.001 || layer.type === "Cut") {
                     exportObj.shape_type = "polygon";
                     exportObj.points = poly.points.map(p => {
