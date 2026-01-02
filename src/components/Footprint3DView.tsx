@@ -1171,8 +1171,8 @@ const LayerSolid = ({
     }
 
     try {
-        const { Manifold } = manifoldModule;
-        const CSG_EPSILON = 0.01;
+        const { Manifold, CrossSection } = manifoldModule;
+        const CSG_EPSILON = 0.001;
 
         let base: any;
         if (boardShape) {
@@ -1185,6 +1185,10 @@ const LayerSolid = ({
         }
 
         const failedFillets: THREE.BufferGeometry[] = [];
+
+        // Track processed cuts to detect overlaps. 
+        // We store the 2D CrossSection (transformed to world space) to check intersections.
+        const processedCuts: { depth: number, cs: any, id: string }[] = [];
 
         [...flatShapes].reverse().forEach((item) => {
             const shape = item.shape;
@@ -1219,38 +1223,21 @@ const LayerSolid = ({
             }
             if (safeRadius < 0) safeRadius = 0;
 
-            const isPartialCut = actualDepth < thickness - 0.001;
-            const hasRadius = safeRadius > 0.001;
+            const isPartialCut = actualDepth < thickness - CSG_EPSILON;
+            const hasRadius = safeRadius > CSG_EPSILON;
             const shouldRound = isPartialCut && hasRadius;
-
-            const throughHeight = thickness + 0.2; 
-            const throughY = 0; 
-
-            let fillHeight = thickness - actualDepth;
-            if (shouldRound) fillHeight += safeRadius;
-
-            let fillY = 0;
-            const shouldFill = fillHeight > 0.001;
-            if (shouldFill) {
-                fillY = layer.carveSide === "Top" 
-                    ? (-thickness / 2 + fillHeight / 2) 
-                    : (thickness / 2 - fillHeight / 2);
-            }
 
             const localX = item.x - centerX;
             const localZ = centerZ - item.y;
             const globalRot = item.rotation; 
 
-            const createTool = (extraOffset = 0, height: number) => {
-                let tool = null;
-
+            // 1. Generate 2D CrossSection (CS)
+            // This replaces the old 'createTool' which returned 3D objects immediately.
+            const getCrossSection = () => {
+                let cs = null;
                 if (shape.type === "circle") {
                     const d = evaluateExpression((shape as any).diameter, params);
-                    if (d > 0) {
-                        const r = d/2 + extraOffset;
-                        tool = collect(Manifold.cylinder(height, r, r, 32, true));
-                        tool = collect(tool.rotate([90, 0, 0])); 
-                    }
+                    if (d > 0) cs = collect(CrossSection.circle(d/2, 32));
                 } else if (shape.type === "rect") {
                     const w = evaluateExpression((shape as FootprintRect).width, params);
                     const h = evaluateExpression((shape as FootprintRect).height, params);
@@ -1258,65 +1245,107 @@ const LayerSolid = ({
                     const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
                     
                     if (w > 0 && h > 0) {
-                        const rw = w + extraOffset * 2;
-                        const rh = h + extraOffset * 2;
-                        const rcr = cr + extraOffset;
-
-                        if (rcr > 0.001) {
-                            const s = createRoundedRectShape(rw, rh, rcr);
-                            const cs = collect(shapeToManifold(manifoldModule, s));
-                            const csRot = collect(cs.rotate(globalRot));
-                            const ext = collect(csRot.extrude(height));
-                            const centered = collect(ext.translate([0, 0, -height/2]));
-                            tool = collect(centered.rotate([-90, 0, 0]));
-                        } else {
-                            tool = collect(Manifold.cube([rw, height, rh], true));
-                            tool = collect(tool.rotate([0, globalRot, 0]));
-                        }
+                        cs = collect(CrossSection.square([w, h], true));
+                        if (cr > 0.001) cs = collect(cs.offset(-cr, "Round", 8)).offset(cr, "Round", 8);
                     }
                 } else if (shape.type === "line") {
                     const t = evaluateExpression((shape as FootprintLine).thickness, params);
-                    const validT = (t > 0 ? t : 0.01) + extraOffset * 2;
+                    const validT = t > 0 ? t : 0.01;
                     const s = createLineShape(shape as FootprintLine, params, item.contextFp, allFootprints, validT);
-                    if (s) {
-                        const cs = collect(shapeToManifold(manifoldModule, s));
-                        const csRot = collect(cs.rotate(globalRot));
-                        const ext = collect(csRot.extrude(height));
-                        const centered = collect(ext.translate([0, 0, -height/2]));
-                        tool = collect(centered.rotate([-90, 0, 0]));
-                    }
+                    if (s) cs = collect(shapeToManifold(manifoldModule, s));
                 } else if (shape.type === "polygon") {
                     const poly = shape as FootprintPolygon;
                     const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, 32);
                     if (pts.length > 2) {
-                        const baseCS = new manifoldModule.CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd");
-                        const toolCS = extraOffset > 0.001 ? baseCS.offset(extraOffset, "Round", 8) : baseCS;
-                        const ext = collect(toolCS.extrude(height));
-                        const centered = collect(ext.translate([0, 0, -height/2]));
-                        const rotatedY = collect(centered.rotate([-90, 0, 0]));
-                        tool = collect(rotatedY.rotate([0, globalRot, 0]));
+                        cs = new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd");
                     }
                 }
-
-                return tool;
+                return cs;
             };
 
-            const toolCut = createTool(0, throughHeight);
-            if (toolCut) {
-                const moved = collect(toolCut.translate([localX, throughY, localZ]));
-                const diff = collect(Manifold.difference(base, moved));
-                base = diff;
+            let currentCS = getCrossSection();
+            
+            if (currentCS) {
+                // Apply Global Transform to the 2D CrossSection
+                // 1. Rotate (2D rotation around Z is same as 3D rotation around Y for the footprint)
+                currentCS = collect(currentCS.rotate(globalRot));
+                
+                // 2. Translate
+                // IMPORTANT: Manifold 2D Y maps to 3D -Z after the extrusion rotate([-90,0,0]).
+                // To position at `localZ`, we must translate 2D Y to `-localZ`.
+                currentCS = collect(currentCS.translate([localX, -localZ]));
             }
 
-            if (shouldFill) {
-                const toolFill = createTool(CSG_EPSILON, fillHeight);
-                if (toolFill) {
-                    const moved = collect(toolFill.translate([localX, fillY, localZ]));
-                    const added = collect(Manifold.union(base, moved));
-                    base = added;
+            // 2. Check for Overlaps with Deeper Cuts
+            let isRestorative = false;
+            
+            if (currentCS) {
+                for (const prev of processedCuts) {
+                    // If a previous shape is deeper than us...
+                    if (prev.depth > actualDepth + CSG_EPSILON) {
+                        // ...and we overlap in 2D
+                        const intersection = collect(currentCS.intersect(prev.cs));
+                        if (!intersection.isEmpty()) {
+                            isRestorative = true;
+                            break;
+                        }
+                    }
                 }
+                // Store for future checks
+                processedCuts.push({ depth: actualDepth, cs: currentCS, id: shape.id });
             }
 
+            // 3. Perform 3D Boolean Operations
+            const throughHeight = thickness + 0.2; 
+            
+            if (isRestorative) {
+                // === 3-STEP PROCESS (Robust for overlaps) ===
+                // Cut through -> Fill back -> Subtract fillet
+                
+                const toolCutThrough = collect(collect(currentCS!.extrude(throughHeight)).translate([0, 0, -throughHeight/2]));
+                const toolAligned = collect(toolCutThrough.rotate([-90, 0, 0])); 
+                // No need to translate [localX, 0, localZ] here because the CS was already translated!
+                // We just need to align height (Y).
+                
+                const diff = collect(Manifold.difference(base, toolAligned));
+                base = diff;
+
+                // Add Back
+                let fillHeight = thickness - actualDepth;
+                if (shouldRound) fillHeight += safeRadius;
+
+                if (fillHeight > CSG_EPSILON) {
+                    const toolFill = collect(collect(currentCS!.extrude(fillHeight)).translate([0, 0, -fillHeight/2]));
+                    const fillAligned = collect(toolFill.rotate([-90, 0, 0]));
+                    
+                    const fillY = layer.carveSide === "Top" 
+                        ? (-thickness / 2 + fillHeight / 2) 
+                        : (thickness / 2 - fillHeight / 2);
+                        
+                    const moved = collect(fillAligned.translate([0, fillY, 0]));
+                    base = collect(Manifold.union(base, moved));
+                }
+            } else {
+                // === 1-STEP PROCESS (Optimized) ===
+                // Only subtract what is needed.
+                
+                if (!shouldRound && currentCS && actualDepth > CSG_EPSILON) {
+                    // Standard Cut (No Fillet)
+                    const toolCut = collect(collect(currentCS.extrude(actualDepth)).translate([0, 0, -actualDepth/2]));
+                    const toolAligned = collect(toolCut.rotate([-90, 0, 0]));
+
+                    const cutY = layer.carveSide === "Top"
+                        ? (thickness / 2 - actualDepth / 2)
+                        : (-thickness / 2 + actualDepth / 2);
+
+                    const moved = collect(toolAligned.translate([0, cutY, 0]));
+                    base = collect(Manifold.difference(base, moved));
+                }
+                // If shouldRound is true, we skip the hard cut entirely here!
+                // We will only subtract the fillet mesh below.
+            }
+
+            // 4. Fillet Subtraction (Common to both paths if enabled)
             if (shouldRound) {
                 const result = generateProceduralFillet(
                     manifoldModule, 
@@ -1342,8 +1371,7 @@ const LayerSolid = ({
                         final = collect(flipped.translate([localX, -thickness/2, localZ]));
                     }
                     
-                    const diff = collect(Manifold.difference(base, final));
-                    base = diff;
+                    base = collect(Manifold.difference(base, final));
 
                 } else if (result && result.vertProperties && result.triVerts) {
                     const geom = new THREE.BufferGeometry();
