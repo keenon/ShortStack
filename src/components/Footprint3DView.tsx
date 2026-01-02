@@ -952,7 +952,7 @@ function generateProceduralFillet(
                     { x: halfW - cr, y: -halfH + cr, startAng: 1.5*Math.PI}
                 ];
                 quadrants.forEach(q => {
-                    for(let i=0; i<segCorner; i++) {
+                    for(let i=0; i<=segCorner; i++) {
                         const ang = q.startAng + (i/segCorner) * (Math.PI/2);
                         const vx = q.x + Math.cos(ang) * cr;
                         const vy = q.y + Math.sin(ang) * cr;
