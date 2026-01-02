@@ -19,6 +19,7 @@ export const RecursiveShapeRenderer = ({
   isParentSelected,
   onMouseDown,
   onHandleDown,
+  onDoubleClick, // NEW
   handleRadius,
   rootFootprint, // NEW: Context for point resolution
   layerVisibility,
@@ -37,6 +38,7 @@ export const RecursiveShapeRenderer = ({
   isParentSelected: boolean;
   onMouseDown: (e: React.MouseEvent, id: string, pointIndex?: number) => void;
   onHandleDown: (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => void;
+  onDoubleClick?: (e: React.MouseEvent, id: string) => void; // NEW
   handleRadius: number;
   rootFootprint: Footprint; // NEW
   layerVisibility: Record<string, boolean>;
@@ -159,6 +161,7 @@ export const RecursiveShapeRenderer = ({
                 // Select THIS reference shape, not the children inside
                 onMouseDown(e, shape.id);
             }}
+            onDoubleClick={(e) => onDoubleClick && onDoubleClick(e, shape.id)}
             style={containerStyle}
           >
               {/* Optional: Selection Indicator for the Group */}

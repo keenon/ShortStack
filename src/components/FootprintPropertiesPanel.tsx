@@ -21,6 +21,7 @@ const FootprintPropertiesPanel = ({
   hoveredMidpointIndex,
   setHoveredMidpointIndex,
   onDuplicate, // NEW
+  onEditChild, // NEW
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -37,6 +38,7 @@ const FootprintPropertiesPanel = ({
   hoveredMidpointIndex: number | null;
   setHoveredMidpointIndex: (index: number | null) => void;
   onDuplicate: () => void; // NEW
+  onEditChild: (id: string) => void; // NEW
 }) => {
   
   // Get available wire guides for Snapping
@@ -124,7 +126,7 @@ const FootprintPropertiesPanel = ({
                         <label className="checkbox-label" style={p.snapTo ? { opacity: 0.7 } : {}}>
                             <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasOut : !!p.handleOut} onChange={(e) => {
                                     if (e.target.checked) updateFn({ ...p, handleOut: { x: "5", y: "0" } });
-                                    else { const { handleOut, ...rest } = p; updateFn(rest as Point); }
+                                    else { const { handleIn, ...rest } = p; updateFn(rest as Point); }
                                 }} /> Out Handle
                         </label>
                     </div>
@@ -591,9 +593,16 @@ const FootprintPropertiesPanel = ({
             {header}
             <div className="prop-group">
                 <label>Reference</label>
-                <div style={{ padding: '8px', background: '#333', borderRadius: '4px', color: '#fff', fontSize: '0.9em', border: '1px solid #444' }}>
+                <div style={{ padding: '8px', background: '#333', borderRadius: '4px', color: '#fff', fontSize: '0.9em', border: '1px solid #444', marginBottom: '10px' }}>
                    {target?.name || <span style={{color:'red'}}>Unknown (Deleted?)</span>}
                 </div>
+                <button 
+                  style={{ width: '100%' }} 
+                  onClick={() => target && onEditChild(target.id)}
+                  disabled={!target}
+                >
+                  Edit Source Footprint
+                </button>
             </div>
             <div className="prop-group">
                 <label>Name (Alias)</label>

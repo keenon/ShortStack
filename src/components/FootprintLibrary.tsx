@@ -15,7 +15,8 @@ interface Props {
 }
 
 export default function FootprintLibrary({ footprints, setFootprints, params, stackup, meshAssets, onRegisterMesh }: Props) {
-  const [editingId, setEditingId] = useState<string | null>(null);
+  // CHANGED: Use a stack for navigation to support "jumping into" footprints
+  const [editStack, setEditStack] = useState<string[]>([]);
 
   // --- TOOLTIP STATE ---
   // Store initial position in state to prevent "jumping" on first render
@@ -31,14 +32,14 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
       shapes: [],
     };
     setFootprints([...footprints, newFp]);
-    setEditingId(newFp.id); // Auto-open
+    setEditStack([newFp.id]); // Auto-open
   };
 
   const deleteFootprint = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (window.confirm("Are you sure you want to delete this footprint?")) {
       setFootprints((prev) => prev.filter((fp) => fp.id !== id));
-      if (editingId === id) setEditingId(null);
+      if (editStack.includes(id)) setEditStack([]);
     }
   };
 
@@ -86,7 +87,8 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
   };
 
   // --- DERIVED STATE ---
-  const activeFootprint = footprints.find((fp) => fp.id === editingId);
+  const activeId = editStack.length > 0 ? editStack[editStack.length - 1] : null;
+  const activeFootprint = footprints.find((fp) => fp.id === activeId);
 
   // --- RENDER: EDITOR VIEW ---
   if (activeFootprint) {
@@ -95,7 +97,10 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
         footprint={activeFootprint}
         allFootprints={footprints} 
         onUpdate={handleFootprintUpdate}
-        onClose={() => setEditingId(null)}
+        // Take user back one step in the stack
+        onClose={() => setEditStack(prev => prev.slice(0, -1))}
+        // Jump deeper into the stack
+        onEditChild={(id) => setEditStack(prev => [...prev, id])}
         params={params}
         stackup={stackup}
         meshAssets={meshAssets}
@@ -121,7 +126,7 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
           {footprints.map((fp, index) => (
             <tr 
               key={fp.id} 
-              onClick={() => setEditingId(fp.id)}
+              onClick={() => setEditStack([fp.id])}
               className="footprint-row"
             >
               <td style={{ textAlign: "center", verticalAlign: "middle" }}>

@@ -18,6 +18,7 @@ interface Props {
   allFootprints: Footprint[]; // NEW: Need full list for recursion lookups
   onUpdate: (updatedFootprint: Footprint) => void;
   onClose: () => void;
+  onEditChild: (id: string) => void; // NEW: Callback to drill down
   params: Parameter[];
   stackup: StackupLayer[];
   meshAssets: MeshAsset[];
@@ -113,10 +114,8 @@ const ShapeListPanel = ({
   onDelete,
   onRename,
   onMove,
-  updateFootprint,
   stackup,
   isShapeVisible,
-  addShape
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -125,21 +124,9 @@ const ShapeListPanel = ({
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onMove: (index: number, direction: -1 | 1) => void;
-  updateFootprint: (field: string, val: any) => void;
   stackup: StackupLayer[];
   isShapeVisible: (shape: FootprintShape) => boolean;
-  addShape: (type: any) => void;
 }) => {
-  
-  const handleBoardToggle = (checked: boolean) => {
-      updateFootprint("isBoard", checked);
-      if (checked) {
-          const hasOutline = footprint.shapes.some(s => s.type === "boardOutline");
-          if (!hasOutline) {
-              addShape("boardOutline");
-          }
-      }
-  };
 
   const getIcon = (type: string) => {
       switch(type) {
@@ -158,13 +145,6 @@ const ShapeListPanel = ({
     <div className="fp-left-subpanel">
       <h3 style={{ marginTop: 0 }}>Objects</h3>
       
-      <div style={{ marginBottom: "10px", paddingBottom: "10px", borderBottom: "1px solid #333" }}>
-          <label className="checkbox-label" style={{ fontWeight: "bold", color: "#fff" }}>
-              <input type="checkbox" checked={!!footprint.isBoard} onChange={(e) => handleBoardToggle(e.target.checked)} />
-              Standalone Board
-          </label>
-      </div>
-
       <div className="shape-list-container">
         {footprint.shapes.map((shape, index) => {
           // If not a board, hide outline shapes in the list
@@ -301,7 +281,7 @@ const MeshListPanel = ({
 // MAIN COMPONENT
 // ------------------------------------------------------------------
 
-export default function FootprintEditor({ footprint, allFootprints, onUpdate, onClose, params, stackup, meshAssets, onRegisterMesh }: Props) {
+export default function FootprintEditor({ footprint, allFootprints, onUpdate, onClose, onEditChild, params, stackup, meshAssets, onRegisterMesh }: Props) {
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   
@@ -652,6 +632,30 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
         handlePaste();
     }
   }, [selectedShapeId, handleCopy, handlePaste]);
+  
+  const deleteShape = useCallback((shapeId: string) => {
+    const shapeToDelete = footprintRef.current.shapes.find(s => s.id === shapeId);
+    let newAssignments = { ...footprintRef.current.boardOutlineAssignments };
+    const newShapes = footprintRef.current.shapes.filter(s => s.id !== shapeId);
+
+    // REASSIGNMENT LOGIC for Board Outlines
+    if (shapeToDelete?.type === "boardOutline") {
+        const remainingOutlines = newShapes.filter(s => s.type === "boardOutline");
+        Object.entries(newAssignments).forEach(([layerId, assignedId]) => {
+            if (assignedId === shapeId) {
+                newAssignments[layerId] = remainingOutlines.length > 0 ? remainingOutlines[0].id : "";
+            }
+        });
+    }
+
+    onUpdate({ ...footprintRef.current, shapes: newShapes, boardOutlineAssignments: newAssignments });
+    setSelectedShapeId(null);
+  }, [onUpdate]);
+
+  const deleteMesh = useCallback((meshId: string) => {
+      onUpdate({ ...footprintRef.current, meshes: (footprintRef.current.meshes || []).filter(m => m.id !== meshId) });
+      if (selectedShapeId === meshId) setSelectedShapeId(null);
+  }, [onUpdate, selectedShapeId]);
 
   // Keyboard Shortcuts Listener
   useEffect(() => {
@@ -674,11 +678,22 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
             e.preventDefault();
             handleDuplicate();
         }
+        
+        // NEW: Delete Key logic
+        if (e.key === "Delete") {
+            if (selectedShapeId) {
+                if (footprintRef.current.shapes.some(s => s.id === selectedShapeId)) {
+                    deleteShape(selectedShapeId);
+                } else if (footprintRef.current.meshes?.some(m => m.id === selectedShapeId)) {
+                    deleteMesh(selectedShapeId);
+                }
+            }
+        }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleCopy, handlePaste, handleDuplicate]);
+  }, [handleCopy, handlePaste, handleDuplicate, selectedShapeId, deleteShape, deleteMesh]);
 
   // --- ACTIONS ---
   const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon", footprintId?: string) => {
@@ -796,25 +811,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     onUpdate({ ...footprint, shapes: footprint.shapes.map((s) => s.id === shapeId ? { ...s, [field]: val } : s), });
   };
   const updateFootprintField = (field: string, val: any) => { onUpdate({ ...footprint, [field]: val }); };
-  
-  const deleteShape = (shapeId: string) => {
-    const shapeToDelete = footprint.shapes.find(s => s.id === shapeId);
-    let newAssignments = { ...footprint.boardOutlineAssignments };
-    const newShapes = footprint.shapes.filter(s => s.id !== shapeId);
-
-    // REASSIGNMENT LOGIC for Board Outlines
-    if (shapeToDelete?.type === "boardOutline") {
-        const remainingOutlines = newShapes.filter(s => s.type === "boardOutline");
-        Object.entries(newAssignments).forEach(([layerId, assignedId]) => {
-            if (assignedId === shapeId) {
-                newAssignments[layerId] = remainingOutlines.length > 0 ? remainingOutlines[0].id : "";
-            }
-        });
-    }
-
-    onUpdate({ ...footprint, shapes: newShapes, boardOutlineAssignments: newAssignments });
-    setSelectedShapeId(null);
-  };
 
   const moveShape = (index: number, direction: -1 | 1) => {
     if (direction === -1 && index === 0) return;
@@ -939,10 +935,6 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
   const updateMesh = (meshId: string, field: string, val: any) => {
       onUpdate({ ...footprint, meshes: (footprint.meshes || []).map(m => m.id === meshId ? { ...m, [field]: val } : m) });
   };
-  const deleteMesh = (meshId: string) => {
-      onUpdate({ ...footprint, meshes: (footprint.meshes || []).filter(m => m.id !== meshId) });
-      if (selectedShapeId === meshId) setSelectedShapeId(null);
-  };
 
 
   const updateFootprintName = (name: string) => { onUpdate({ ...footprint, name }); };
@@ -1053,6 +1045,25 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
   const handleRadius = viewBox.width / 100;
 
+  // Jump into footprint handler for double-clicks
+  const handleShapeDoubleClick = (e: React.MouseEvent, id: string) => {
+      e.stopPropagation(); e.preventDefault();
+      const shape = footprint.shapes.find(s => s.id === id);
+      if (shape && shape.type === "footprint") {
+          onEditChild((shape as FootprintReference).footprintId);
+      }
+  };
+
+  const handleBoardToggle = (checked: boolean) => {
+      updateFootprintField("isBoard", checked);
+      if (checked) {
+          const hasOutline = footprint.shapes.some(s => s.type === "boardOutline");
+          if (!hasOutline) {
+              addShape("boardOutline");
+          }
+      }
+  };
+
   return (
     <div className="footprint-editor-container">
       {/* PROCESSING OVERLAY */}
@@ -1065,7 +1076,13 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
 
       <div className="fp-toolbar">
         <button className="secondary" onClick={onClose}>← Back</button>
-        <input className="toolbar-name-input" type="text" value={footprint.name} onChange={(e) => updateFootprintName(e.target.value)} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginLeft: '10px' }}>
+            <input className="toolbar-name-input" style={{ margin: 0 }} type="text" value={footprint.name} onChange={(e) => updateFootprintName(e.target.value)} />
+            <label className="checkbox-label" style={{ fontSize: '0.85em', color: '#aaa', cursor: 'pointer' }}>
+                <input type="checkbox" checked={!!footprint.isBoard} onChange={(e) => handleBoardToggle(e.target.checked)} />
+                Standalone Board
+            </label>
+        </div>
         <div className="spacer" />
         <button onClick={() => addShape("circle")}><IconCircle /> Circle</button>
         <button onClick={() => addShape("rect")}><IconRect /> Rect</button>
@@ -1115,10 +1132,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 onDelete={deleteShape}
                 onRename={(id, name) => updateShape(id, "name", name)}
                 onMove={moveShape}
-                updateFootprint={updateFootprintField}
                 stackup={stackup}
                 isShapeVisible={isShapeVisible}
-                addShape={addShape}
             />
             <MeshListPanel
                 meshes={footprint.meshes || []}
@@ -1176,6 +1191,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                                 isParentSelected={false}
                                 onMouseDown={handleShapeMouseDown}
                                 onHandleDown={handleHandleMouseDown}
+                                onDoubleClick={handleShapeDoubleClick}
                                 handleRadius={handleRadius}
                                 rootFootprint={footprint}
                                 layerVisibility={layerVisibility}
@@ -1203,6 +1219,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                                     isParentSelected={false}
                                     onMouseDown={handleShapeMouseDown}
                                     onHandleDown={handleHandleMouseDown}
+                                    onDoubleClick={handleShapeDoubleClick}
                                     handleRadius={handleRadius}
                                     rootFootprint={footprint}
                                     layerVisibility={layerVisibility}
@@ -1258,6 +1275,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                 hoveredMidpointIndex={hoveredMidpointIndex}
                 setHoveredMidpointIndex={setHoveredMidpointIndex}
                 onDuplicate={handleDuplicate} // NEW
+                onEditChild={onEditChild}
               />
               {activeShape && (
                 <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
