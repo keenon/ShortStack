@@ -192,53 +192,64 @@ function resampleToMatch(
 
     // Find anchors on target closest to source corners
     const anchors: number[] = [];
-    let searchStart = 0;
     for (let k = 0; k < sourceCorners.length; k++) {
         const cornerPt = sourcePts[sourceCorners[k]];
         let bestDist = Infinity;
         let bestIdx = -1;
         for (let j = 0; j < M; j++) {
-            const idx = (searchStart + j) % M;
-            const d = cornerPt.distanceToSquared(targetRing[idx]);
-            if (d < bestDist) { bestDist = d; bestIdx = idx; }
+            const d = cornerPt.distanceToSquared(targetRing[j]);
+            if (d < bestDist) { bestDist = d; bestIdx = j; }
         }
         anchors.push(bestIdx);
-        searchStart = bestIdx;
     }
 
-    // Resample between anchors
+    // Resample segments using relative arc-length distribution from source
     for (let k = 0; k < sourceCorners.length; k++) {
         const idxSrcStart = sourceCorners[k];
         const idxSrcEnd = sourceCorners[(k + 1) % sourceCorners.length];
-        const count = (idxSrcEnd >= idxSrcStart) ? (idxSrcEnd - idxSrcStart) : (idxSrcEnd + N - idxSrcStart);
-        if (count === 0) continue;
+        
+        // Extract Source Segment & Distribution
+        const srcSeg: THREE.Vector2[] = [];
+        let currSrc = idxSrcStart;
+        while(true) {
+            srcSeg.push(sourcePts[currSrc]);
+            if (currSrc === idxSrcEnd) break;
+            currSrc = (currSrc + 1) % N;
+        }
+        const srcLens = [0];
+        let srcTot = 0;
+        for(let i=0; i<srcSeg.length-1; i++) {
+            srcTot += srcSeg[i].distanceTo(srcSeg[i+1]);
+            srcLens.push(srcTot);
+        }
 
+        // Extract Target Segment
         const idxTgtStart = anchors[k];
         const idxTgtEnd = anchors[(k + 1) % anchors.length];
-        const segmentPts: THREE.Vector2[] = [];
-        let curr = idxTgtStart;
-        while (true) {
-            segmentPts.push(targetRing[curr]);
-            if (curr === idxTgtEnd) break;
-            curr = (curr + 1) % M;
+        const tgtSeg: THREE.Vector2[] = [];
+        let currTgt = idxTgtStart;
+        while(true) {
+            tgtSeg.push(targetRing[currTgt]);
+            if (currTgt === idxTgtEnd) break;
+            currTgt = (currTgt + 1) % M;
+        }
+        const tgtLens = [0];
+        let tgtTot = 0;
+        for(let i=0; i<tgtSeg.length-1; i++) {
+            tgtTot += tgtSeg[i].distanceTo(tgtSeg[i+1]);
+            tgtLens.push(tgtTot);
         }
 
-        const lens = [0];
-        let totLen = 0;
-        for (let i = 0; i < segmentPts.length - 1; i++) {
-            totLen += segmentPts[i].distanceTo(segmentPts[i + 1]);
-            lens.push(totLen);
-        }
-
+        const count = srcSeg.length - 1;
         for (let i = 0; i < count; i++) {
-            const t = i / count;
-            const targetDist = t * totLen;
+            const t = (srcTot > 0.0001) ? srcLens[i] / srcTot : i / count;
+            const targetDist = t * tgtTot;
             let spanIdx = 0;
-            while (spanIdx < lens.length - 1 && lens[spanIdx + 1] < targetDist) spanIdx++;
-            const pA = segmentPts[spanIdx];
-            const pB = (spanIdx + 1 < segmentPts.length) ? segmentPts[spanIdx + 1] : pA;
-            const segLen = lens[spanIdx + 1] - lens[spanIdx];
-            const alpha = (segLen > 0.0001) ? (targetDist - lens[spanIdx]) / segLen : 0;
+            while (spanIdx < tgtLens.length - 1 && tgtLens[spanIdx + 1] < targetDist) spanIdx++;
+            const pA = tgtSeg[spanIdx];
+            const pB = (spanIdx + 1 < tgtSeg.length) ? tgtSeg[spanIdx + 1] : pA;
+            const segLen = tgtLens[spanIdx + 1] - tgtLens[spanIdx];
+            const alpha = (segLen > 0.0001) ? (targetDist - tgtLens[spanIdx]) / segLen : 0;
             result.push(new THREE.Vector2().lerpVectors(pA, pB, alpha));
         }
     }
@@ -627,8 +638,10 @@ function generateProceduralFillet(
     const rawVertices: number[] = [];
     const rawIndices: number[] = [];
 
-    // Robust Zipper Lofting Helper (Relative Arc Length)
+    // Robust Greedy Zipper Lofting (Shortest Diagonal Choice)
     const triangulateZipper = (polyA: THREE.Vector2[], polyB: THREE.Vector2[], idxStartA: number, idxStartB: number) => {
+        if (polyA.length < 3 || polyB.length < 3) return;
+
         // 1. Align Start Points (Closest point on B to A[0])
         let bestDist = Infinity;
         let offsetB = 0;
@@ -637,62 +650,36 @@ function generateProceduralFillet(
             if(d < bestDist) { bestDist = d; offsetB = i; }
         }
 
-        // 2. Compute Arc Lengths
-        const getLens = (pts: THREE.Vector2[]) => {
-            const lens = [0];
-            let tot = 0;
-            for(let i=0; i<pts.length; i++) {
-                const next = pts[(i+1)%pts.length];
-                tot += pts[i].distanceTo(next);
-                lens.push(tot);
-            }
-            return { total: tot > 0 ? tot : 1, acc: lens };
-        };
-
-        const lenA = getLens(polyA);
-        
-        // Re-order B implicitly during access for convenience, but compute real lengths
-        const rotB: THREE.Vector2[] = [];
-        for(let i=0; i<polyB.length; i++) rotB.push(polyB[(i + offsetB) % polyB.length]);
-        const lenB = getLens(rotB);
-
-        // 3. Zipper using Relative Parameter
         let idxA = 0;
         let idxB = 0;
+        const lenA = polyA.length;
+        const lenB = polyB.length;
         
-        while(idxA < polyA.length || idxB < polyB.length) {
-            
-            // Current vertex indices
-            const vA1 = idxStartA + (idxA % polyA.length);
-            const vA2 = idxStartA + ((idxA + 1) % polyA.length);
-            
-            const vB1 = idxStartB + ((idxB + offsetB) % polyB.length);
-            const vB2 = idxStartB + ((idxB + offsetB + 1) % polyB.length);
+        while(idxA < lenA || idxB < lenB) {
+            const vA1 = idxStartA + (idxA % lenA);
+            const vA2 = idxStartA + ((idxA + 1) % lenA);
+            const vB1 = idxStartB + ((idxB + offsetB) % lenB);
+            const vB2 = idxStartB + ((idxB + offsetB + 1) % lenB);
 
-            // Force finish if one side done
-            if (idxA >= polyA.length) {
+            if (idxA >= lenA) {
                 rawIndices.push(vA1, vB1, vB2);
                 idxB++;
                 continue;
             }
-            if (idxB >= polyB.length) {
+            if (idxB >= lenB) {
                 rawIndices.push(vA1, vB1, vA2);
                 idxA++;
                 continue;
             }
 
-            // Look ahead: which side is "behind" in normalized space?
-            const normA = lenA.acc[idxA + 1] / lenA.total;
-            const normB = lenB.acc[idxB + 1] / lenB.total;
+            // GREEDY CHOICE: Calculate potential diagonal lengths
+            const distA = polyB[(idxB + offsetB) % lenB].distanceToSquared(polyA[(idxA + 1) % lenA]);
+            const distB = polyA[idxA % lenA].distanceToSquared(polyB[(idxB + offsetB + 1) % lenB]);
 
-            if (normA < normB) {
-                // A makes less progress, so advance A to catch up
-                // Connect A1->A2 with B1
+            if (distA < distB) {
                 rawIndices.push(vA1, vB1, vA2);
                 idxA++;
             } else {
-                // B makes less progress, advance B
-                // Connect B1->B2 with A1
                 rawIndices.push(vA1, vB1, vB2);
                 idxB++;
             }
@@ -756,35 +743,25 @@ function generateProceduralFillet(
         for(let l=0; l<layerData.length-1; l++) {
             const up = layerData[l];
             const low = layerData[l+1];
-            if (up.contours.length === 1 && low.contours.length === 1 && up.contours[0].length === low.contours[0].length) {
-                const N = up.contours[0].length;
-                const sA = up.startIdx;
-                const sB = low.startIdx;
-                for(let i=0; i<N; i++) {
-                    const next = (i+1)%N;
-                    rawIndices.push(sA + i, sB + i, sB + next);
-                    rawIndices.push(sA + i, sB + next, sA + next);
-                }
-            } else {
-                low.contours.forEach((lowPoly, iLow) => {
-                    const lowCenter = new THREE.Vector2();
-                    lowPoly.forEach(p => lowCenter.add(p));
-                    lowCenter.divideScalar(lowPoly.length);
-                    let bestUpIdx = -1, minDist = Infinity;
-                    up.contours.forEach((upPoly, iUp) => {
-                        const upCenter = new THREE.Vector2();
-                        upPoly.forEach(p => upCenter.add(p));
-                        upCenter.divideScalar(upPoly.length);
-                        const d = upCenter.distanceToSquared(lowCenter);
-                        if (d < minDist) { minDist = d; bestUpIdx = iUp; }
-                    });
-                    if (bestUpIdx !== -1) {
-                        let sA = up.startIdx; for(let i=0; i<bestUpIdx; i++) sA += up.contours[i].length;
-                        let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
-                        triangulateZipper(up.contours[bestUpIdx], lowPoly, sA, sB);
-                    }
+            
+            low.contours.forEach((lowPoly, iLow) => {
+                const lowCenter = new THREE.Vector2();
+                lowPoly.forEach(p => lowCenter.add(p));
+                lowCenter.divideScalar(lowPoly.length);
+                let bestUpIdx = -1, minDist = Infinity;
+                up.contours.forEach((upPoly, iUp) => {
+                    const upCenter = new THREE.Vector2();
+                    upPoly.forEach(p => upCenter.add(p));
+                    upCenter.divideScalar(upPoly.length);
+                    const d = upCenter.distanceToSquared(lowCenter);
+                    if (d < minDist) { minDist = d; bestUpIdx = iUp; }
                 });
-            }
+                if (bestUpIdx !== -1) {
+                    let sA = up.startIdx; for(let i=0; i<bestUpIdx; i++) sA += up.contours[i].length;
+                    let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
+                    triangulateZipper(up.contours[bestUpIdx], lowPoly, sA, sB);
+                }
+            });
         }
     } else {
         const getContour = (offset: number): THREE.Vector2[] => {
