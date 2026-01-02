@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh, IconPolygon } from "./Icons";
@@ -1313,12 +1313,16 @@ function collectExportShapes(
              
              // Calculate Depth
              let depth = 0;
+             let endmillRadius = 0;
              if (layer.type === "Cut") {
                  depth = layerThickness;
              } else {
                  const assign = shape.assignedLayers[layer.id];
                  const val = evaluateExpression(typeof assign === 'object' ? assign.depth : assign, params);
                  depth = Math.max(0, val);
+                 if (typeof assign === 'object') {
+                     endmillRadius = evaluateExpression(assign.endmillRadius, params);
+                 }
              }
              if (depth <= 0.0001) return;
 
@@ -1329,18 +1333,14 @@ function collectExportShapes(
                  depth: depth
              };
 
-             if (layer.type === "Carved/Printed") {
-                 const assign = shape.assignedLayers[layer.id];
-                 const radExpr = (typeof assign === 'object') ? assign.endmillRadius : "0";
-                 const radVal = evaluateExpression(radExpr, params);
-                 if (radVal > 0) {
-                     exportObj.endmill_radius = radVal;
-                 }
+             if (layer.type === "Carved/Printed" && endmillRadius > 0) {
+                 exportObj.endmill_radius = endmillRadius;
              }
 
              if (shape.type === "circle") {
                  exportObj.shape_type = "circle";
                  exportObj.diameter = evaluateExpression((shape as FootprintCircle).diameter, params);
+                 result.push(exportObj);
              } else if (shape.type === "rect") {
                  exportObj.shape_type = "rect";
                  exportObj.width = evaluateExpression((shape as FootprintRect).width, params);
@@ -1348,6 +1348,7 @@ function collectExportShapes(
                  const localAngle = evaluateExpression((shape as FootprintRect).angle, params);
                  exportObj.angle = transform.angle + localAngle;
                  exportObj.corner_radius = evaluateExpression((shape as FootprintRect).cornerRadius, params);
+                 result.push(exportObj);
              } else if (shape.type === "line") {
                 exportObj.shape_type = "line";
                 exportObj.thickness = evaluateExpression((shape as FootprintLine).thickness, params);
@@ -1380,9 +1381,87 @@ function collectExportShapes(
                         handle_out: rotateVec(resolved.handleOut)
                     };
                 });
-            }
+                result.push(exportObj);
+            } else if (shape.type === "polygon") {
+                const poly = shape as FootprintPolygon;
+                
+                // If it's a simple cut or flat carve, just send the definition
+                if (endmillRadius <= 0.001 || layer.type === "Cut") {
+                    exportObj.shape_type = "polygon";
+                    exportObj.points = poly.points.map(p => {
+                        const resolved = resolvePoint(p, contextFootprint, allFootprints, params);
+                        const rad = (transform.angle * Math.PI) / 180;
+                        const cos = Math.cos(rad);
+                        const sin = Math.sin(rad);
+                        const rx = resolved.x * cos - resolved.y * sin;
+                        const ry = resolved.x * sin + resolved.y * cos;
+                        const rotateVec = (v?: {x: number, y: number}) => v ? {
+                            x: v.x * cos - v.y * sin,
+                            y: v.x * sin + v.y * cos
+                        } : undefined;
+                        return {
+                            x: transform.x + rx,
+                            y: transform.y + ry,
+                            handle_in: rotateVec(resolved.handleIn),
+                            handle_out: rotateVec(resolved.handleOut)
+                        };
+                    });
+                    result.push(exportObj);
+                } else {
+                    // Complex Carve: Pre-calculate slices in JS
+                    const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFootprint, allFootprints, 32);
+                    
+                    // Slicing parameters
+                    const safeR = Math.min(endmillRadius, depth);
+                    const steps = 8;
+                    const baseDepth = depth - safeR;
 
-             result.push(exportObj);
+                    const layers: { z: number, offset: number }[] = [];
+                    // 1. Base (Deepest flat part)
+                    if (baseDepth > 0.001) layers.push({ z: baseDepth, offset: 0 });
+                    
+                    // 2. Gradient Steps
+                    for(let i=1; i<=steps; i++) {
+                        const theta = (i / steps) * (Math.PI / 2);
+                        const z = baseDepth + Math.sin(theta) * safeR;
+                        const off = (1 - Math.cos(theta)) * safeR;
+                        layers.push({ z, offset: off });
+                    }
+
+                    // 3. Generate and Push Slices
+                    const globalRad = (transform.angle * Math.PI) / 180;
+                    const gCos = Math.cos(globalRad);
+                    const gSin = Math.sin(globalRad);
+
+                    layers.forEach(layer => {
+                        const offsetPts = offsetPolygonContour(basePoints, layer.offset);
+                        if (offsetPts.length < 3) return;
+
+                        // Transform offset points to Global export coordinates
+                        const outputPoints = offsetPts.map(p => {
+                            // Re-apply rotation to these points (basePoints are relative to shape origin)
+                            const rx = p.x * gCos - p.y * gSin; 
+                            const ry = p.x * gSin + p.y * gCos;
+                            
+                            return {
+                                x: transform.x + rx,
+                                y: transform.y + ry,
+                                handle_in: undefined,
+                                handle_out: undefined
+                            };
+                        });
+
+                        result.push({
+                            shape_type: "polygon",
+                            x: gx, 
+                            y: gy,
+                            depth: layer.z,
+                            endmill_radius: 0, // Mark as pre-processed
+                            points: outputPoints
+                        });
+                    });
+                }
+            }
         }
     });
 

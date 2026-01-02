@@ -876,7 +876,18 @@ fn shape_to_polygon(shape: &ExportShape) -> Option<Polygon<f64>> {
             } else {
                 None
             }
-        }
+        },
+        "polygon" => {
+            if let Some(pts) = &shape.points {
+                 if pts.len() < 3 { return None; }
+                 // Use discretize_path_closed to handle potential handles, 
+                 // though dense polygons from JS usually have none.
+                 let ls = discretize_path_closed(pts);
+                 Some(Polygon::new(ls, vec![]))
+            } else {
+                None
+            }
+        },
         _ => None,
     }
 }

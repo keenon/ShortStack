@@ -6,7 +6,7 @@ import * as THREE from "three";
 import { STLLoader, OBJLoader, GLTFLoader } from "three-stdlib";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, FootprintPolygon, Point, MeshAsset } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
-import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
+import { evaluateExpression, resolvePoint, modifyExpression, getPolyOutlinePoints, offsetPolygonContour } from "../utils/footprintUtils";
 import Module from "manifold-3d";
 // @ts-ignore
 import wasmUrl from "manifold-3d/manifold.wasm?url";
@@ -121,20 +121,6 @@ function createRoundedRectShape(width: number, height: number, radius: number): 
        shape.quadraticCurveTo(x, y, x, y + r);
   }
   return shape;
-}
-
-// Discretize a generic polygon-like shape into a consistent vertex list
-function getPolyOutlinePoints(
-    points: Point[],
-    originX: number,
-    originY: number,
-    params: Parameter[],
-    contextFp: Footprint,
-    allFootprints: Footprint[],
-    resolution: number
-): THREE.Vector2[] {
-    const data = getPolyOutlineWithFeatures(points, originX, originY, params, contextFp, allFootprints, resolution);
-    return data.points;
 }
 
 /**
@@ -285,85 +271,6 @@ function resampleToMatch(
             result.push(new THREE.Vector2().lerpVectors(pA, pB, alpha));
         }
     }
-    return result;
-}
-
-// Inward vertex offsetting algorithm for polygons with collision clamping
-function offsetPolygonContour(points: THREE.Vector2[], offset: number): THREE.Vector2[] {
-    if (offset <= 0) return points;
-    const len = points.length;
-    const epsilon = 0.05; // Margin to avoid zero-area faces and Z-fighting
-
-    // 1. Compute Miter directions and initial unconstrained candidates
-    const info = points.map((p, i) => {
-        const prev = points[(i - 1 + len) % len];
-        const next = points[(i + 1) % len];
-        
-        // Edge directions
-        const v1 = new THREE.Vector2().subVectors(p, prev).normalize();
-        const v2 = new THREE.Vector2().subVectors(next, p).normalize();
-        
-        // Normals (inward for CCW)
-        const n1 = new THREE.Vector2(-v1.y, v1.x);
-        const n2 = new THREE.Vector2(-v2.y, v2.x);
-        
-        // Miter vector
-        const miter = new THREE.Vector2().addVectors(n1, n2).normalize();
-        const dot = miter.dot(n1);
-        const safeDot = Math.max(dot, 0.1); 
-        const scale = 1.0 / safeDot;
-        
-        const candidate = new THREE.Vector2().copy(p).addScaledVector(miter, offset * scale);
-        
-        return { pOrig: p, miter, candidate };
-    });
-
-    const result: THREE.Vector2[] = [];
-
-    // 2. Apply Constraints: Project to valid half-space of neighbor miters
-    // This allows vertices to "slide" along the barrier instead of stopping hard.
-    for (let i = 0; i < len; i++) {
-        let pos = info[i].candidate.clone();
-        
-        // Check against Previous Neighbor's Miter Line
-        const prev = info[(i - 1 + len) % len];
-        {
-            // Normal perpendicular to neighbor's miter line
-            const barrierN = new THREE.Vector2(-prev.miter.y, prev.miter.x);
-            
-            // Determine "valid" side based on where our original point was relative to neighbor
-            const refVec = new THREE.Vector2().subVectors(info[i].pOrig, prev.pOrig);
-            if (refVec.dot(barrierN) < 0) barrierN.negate();
-
-            // Distance from candidate to barrier line
-            const vec = new THREE.Vector2().subVectors(pos, prev.pOrig);
-            const dist = vec.dot(barrierN);
-
-            // If we crossed the line (dist < 0) or are too close (dist < epsilon), slide back
-            if (dist < epsilon) {
-                pos.addScaledVector(barrierN, epsilon - dist);
-            }
-        }
-
-        // Check against Next Neighbor's Miter Line
-        const next = info[(i + 1) % len];
-        {
-            const barrierN = new THREE.Vector2(-next.miter.y, next.miter.x);
-            
-            const refVec = new THREE.Vector2().subVectors(info[i].pOrig, next.pOrig);
-            if (refVec.dot(barrierN) < 0) barrierN.negate();
-
-            const vec = new THREE.Vector2().subVectors(pos, next.pOrig);
-            const dist = vec.dot(barrierN);
-
-            if (dist < epsilon) {
-                pos.addScaledVector(barrierN, epsilon - dist);
-            }
-        }
-
-        result.push(pos);
-    }
-
     return result;
 }
 
