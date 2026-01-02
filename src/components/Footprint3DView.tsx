@@ -693,6 +693,7 @@ function generateProceduralFillet(
 
         const solveForOffset = (offsetB: number) => {
             costTable.fill(Infinity);
+            fromTable.fill(0);
             costTable[0] = 0; 
 
             for (let i = 0; i <= lenA; i++) {
@@ -766,8 +767,17 @@ function generateProceduralFillet(
         for (let k = 0; k < searchCount; k++) {
             const offset = safeMod(searchStart + k, lenB);
             const cost = solveForOffset(offset);
-            if (cost < minTotalCost) {
-                minTotalCost = cost;
+            
+            // Add seam cost (distance between start points)
+            // This prevents the solver from preferring a "twisted" mesh that has 
+            // slightly shorter internal diagonals but a very long start-to-start edge.
+            const pA = polyA[0];
+            const pB = polyB[offset];
+            const seamDistSq = pA.distanceToSquared(pB);
+            const totalCost = cost + seamDistSq;
+
+            if (totalCost < minTotalCost) {
+                minTotalCost = totalCost;
                 bestOffset = offset;
             }
         }
@@ -818,6 +828,16 @@ function generateProceduralFillet(
                         if(poly[i].distanceToSquared(clean[clean.length-1]) > 1e-9) clean.push(poly[i]);
                     }
                     if(clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) clean.pop();
+                    
+                    // Ensure consistent winding order (CCW/Positive Area)
+                    // Manifold offsets might invert winding for certain operations.
+                    let area = 0;
+                    for (let i = 0; i < clean.length; i++) {
+                        const j = (i + 1) % clean.length;
+                        area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
+                    }
+                    if (area < 0) clean.reverse();
+
                     return clean;
                 }).filter((p: any) => p.length >= 3);
             } else {
@@ -866,6 +886,9 @@ function generateProceduralFillet(
                     let sA = up.startIdx; for(let i=0; i<bestUpIdx; i++) sA += up.contours[i].length;
                     let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
                     triangulateRobust(up.contours[bestUpIdx], lowPoly, sA, sB);
+                }
+                else {
+                    console.warn("Fillet generation warning: could not find matching upper contour for lofting.");
                 }
             });
         }
