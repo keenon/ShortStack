@@ -1,6 +1,6 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon } from "../types";
 import { evaluateExpression, interpolateColor, resolvePoint } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
@@ -169,7 +169,9 @@ export const RecursiveShapeRenderer = ({
               
               {/* Render Children */}
               {/* Reverse to maintain Top-First visual order (SVG draws painter's algo, last is top) */}
-              {[...targetFp.shapes].reverse().map(child => (
+              {[...targetFp.shapes].reverse()
+                .filter(child => child.type !== "boardOutline") // Ensure child board outlines are ignored
+                .map(child => (
                   <RecursiveShapeRenderer
                     key={`${shape.id}-${child.id}`}
                     shape={child}

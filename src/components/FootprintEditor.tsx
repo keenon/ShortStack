@@ -157,8 +157,9 @@ const ShapeListPanel = ({
               const refId = (shape as FootprintReference).footprintId;
               const target = allFootprints.find(f => f.id === refId);
               if (!target) hasError = true;
-              else if (!isFootprintOptionValid(footprint.id, target, allFootprints) && target.id !== refId) {
-                  if (target.isBoard) hasError = true;
+              // CHANGE: Only validate direct loop, allow isBoard
+              else if (!isFootprintOptionValid(footprint.id, target, allFootprints)) {
+                  hasError = true;
               }
           }
 
@@ -1080,7 +1081,7 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
             <input className="toolbar-name-input" style={{ margin: 0 }} type="text" value={footprint.name} onChange={(e) => updateFootprintName(e.target.value)} />
             <label className="checkbox-label" style={{ fontSize: '0.85em', color: '#aaa', cursor: 'pointer' }}>
                 <input type="checkbox" checked={!!footprint.isBoard} onChange={(e) => handleBoardToggle(e.target.checked)} />
-                Standalone Board
+                Standalone Board (enables fabrication file exports)
             </label>
         </div>
         <div className="spacer" />

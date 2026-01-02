@@ -155,6 +155,9 @@ export function getRecursiveLayers(
     
     // Find layers in current footprint
     fp.shapes.forEach(s => {
+        // IGNORE CHILD BOARD OUTLINES
+        if (s.type === "boardOutline") return;
+
         if (s.type === "footprint") {
             const childRef = s as FootprintReference;
             const childLayers = getRecursiveLayers(childRef.footprintId, allFootprints, stackup, visited);
@@ -174,7 +177,7 @@ export function isFootprintOptionValid(
     allFootprints: Footprint[]
 ): boolean {
     if (candidateFootprint.id === currentFootprintId) return false; // Direct recursion
-    if (candidateFootprint.isBoard) return false; // Cannot add standalone boards
+    // ALLOW BOARDS AS CHILDREN (Removed isBoard check)
 
     // Check for circular dependency: candidate -> ... -> current
     const visited = new Set<string>();
