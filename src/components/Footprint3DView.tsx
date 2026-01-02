@@ -944,18 +944,47 @@ function generateProceduralFillet(
                 const limit = Math.min(halfW, halfH);
                 if (cr > limit) cr = limit;
                 
-                const segCorner = 6; 
+                // Match Three.js Shape resolution (defaults to 32 segments per curve)
+                const segCorner = 32; 
+                
                 const quadrants = [
                     { x: halfW - cr, y: halfH - cr, startAng: 0 },         
                     { x: -halfW + cr, y: halfH - cr, startAng: Math.PI/2 },
                     { x: -halfW + cr, y: -halfH + cr, startAng: Math.PI }, 
                     { x: halfW - cr, y: -halfH + cr, startAng: 1.5*Math.PI}
                 ];
+
                 quadrants.forEach(q => {
+                    const startAng = q.startAng;
+                    const endAng = startAng + Math.PI/2;
+                    
+                    // 1. Calculate Bezier Control Points
+                    // P0: Start of arc (on the edge)
+                    const p0X = q.x + cr * Math.cos(startAng);
+                    const p0Y = q.y + cr * Math.sin(startAng);
+                    
+                    // P2: End of arc (on the next edge)
+                    const p2X = q.x + cr * Math.cos(endAng);
+                    const p2Y = q.y + cr * Math.sin(endAng);
+
+                    // P1: Control Point (The sharp corner of the bounding box)
+                    // We derive this by adding the corner offset components
+                    const cpX = q.x + cr * (Math.cos(startAng) + Math.cos(endAng));
+                    const cpY = q.y + cr * (Math.sin(startAng) + Math.sin(endAng));
+
+                    // 2. Generate Points along the Quadratic Curve
                     for(let i=0; i<=segCorner; i++) {
-                        const ang = q.startAng + (i/segCorner) * (Math.PI/2);
-                        const vx = q.x + Math.cos(ang) * cr;
-                        const vy = q.y + Math.sin(ang) * cr;
+                        const t = i / segCorner;
+                        const invT = 1 - t;
+                        
+                        // Quadratic Bezier Basis: (1-t)^2, 2(1-t)t, t^2
+                        const c0 = invT * invT;
+                        const c1 = 2 * invT * t;
+                        const c2 = t * t;
+                        
+                        const vx = c0 * p0X + c1 * cpX + c2 * p2X;
+                        const vy = c0 * p0Y + c1 * cpY + c2 * p2Y;
+                        
                         rawPoints.push(new THREE.Vector2(vx, vy));
                     }
                 });
