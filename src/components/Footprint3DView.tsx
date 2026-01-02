@@ -55,6 +55,38 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
     return bytes.buffer;
 }
 
+/**
+ * Projects a point onto the closest edge of a set of polygon contours.
+ * Used to snap ideal miter offsets to valid topological boundaries.
+ */
+function projectPointToPolygons(pt: THREE.Vector2, polygons: THREE.Vector2[][]): THREE.Vector2 {
+    let closestPt = pt.clone();
+    let minDstSq = Infinity;
+    if (!polygons || polygons.length === 0) return pt;
+
+    for (const poly of polygons) {
+        const len = poly.length;
+        if (len < 2) continue;
+        for (let i = 0; i < len; i++) {
+            const a = poly[i];
+            const b = poly[(i + 1) % len];
+            const ab = new THREE.Vector2().subVectors(b, a);
+            const t = ab.lengthSq();
+            if (t < 1e-12) continue;
+            const ap = new THREE.Vector2().subVectors(pt, a);
+            let u = ap.dot(ab) / t;
+            u = Math.max(0, Math.min(1, u));
+            const proj = new THREE.Vector2().copy(a).addScaledVector(ab, u);
+            const d = pt.distanceToSquared(proj);
+            if (d < minDstSq) {
+                minDstSq = d;
+                closestPt.copy(proj);
+            }
+        }
+    }
+    return closestPt;
+}
+
 // ------------------------------------------------------------------
 // GEOMETRY GENERATION
 // ------------------------------------------------------------------
@@ -710,6 +742,7 @@ function generateProceduralFillet(
         steps.forEach(step => {
             let processedPolys: THREE.Vector2[][] = [];
             if (step.offset > 0.001) {
+                // 1. Get Clean Topology from Manifold (Handles collision/self-intersection)
                 const cs = baseCS.offset(-step.offset, "Miter", 2.0);
                 const rawPolys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
                 if (rawPolys.length === 1) {
@@ -927,15 +960,18 @@ function generateProceduralFillet(
         finalIndices.push(a, b, c);
     }
 
+    const vertProperties = new Float32Array(uniqueVerts);
+    const triVerts = new Uint32Array(finalIndices);
+
     try {
         const mesh = new manifoldModule.Mesh();
         mesh.numProp = 3;
-        mesh.vertProperties = new Float32Array(uniqueVerts);
-        mesh.triVerts = new Uint32Array(finalIndices);
-        return { manifold: new manifoldModule.Manifold(mesh), vertProperties: mesh.vertProperties, triVerts: mesh.triVerts };
+        mesh.vertProperties = vertProperties;
+        mesh.triVerts = triVerts;
+        return { manifold: new manifoldModule.Manifold(mesh), vertProperties, triVerts };
     } catch (e) { 
         console.error("Failed to create fillet manifold", e);
-        return null; 
+        return { manifold: null, vertProperties, triVerts };
     }
 }
 
