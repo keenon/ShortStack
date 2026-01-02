@@ -27,6 +27,7 @@ export const RecursiveShapeRenderer = ({
   hoveredMidpointIndex, // NEW
   setHoveredMidpointIndex, // NEW
   onAddMidpoint, // NEW
+  onlyHandles = false, // IMPROVEMENT: New prop to render only interactive handles
 }: {
   shape: FootprintShape;
   allFootprints: Footprint[];
@@ -44,6 +45,7 @@ export const RecursiveShapeRenderer = ({
   hoveredMidpointIndex?: number | null;
   setHoveredMidpointIndex?: (index: number | null) => void;
   onAddMidpoint?: (shapeId: string, index: number) => void;
+  onlyHandles?: boolean;
 }) => {
   // --- BOARD OUTLINE RENDERER ---
   if (shape.type === "boardOutline") {
@@ -62,6 +64,7 @@ export const RecursiveShapeRenderer = ({
               hoveredMidpointIndex={hoveredMidpointIndex}
               setHoveredMidpointIndex={setHoveredMidpointIndex}
               onAddMidpoint={onAddMidpoint}
+              onlyHandles={onlyHandles}
           />
       );
   }
@@ -82,6 +85,7 @@ export const RecursiveShapeRenderer = ({
     const circleRadius = handleRadius * 2.0;
 
     // Main marker (Crosshair)
+    // If onlyHandles is true, we still render this as it is the "handle" for the guide
     elements.push(
       <g key="marker" style={{ cursor: "pointer" }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
         <line x1={x - markerSize} y1={-y} x2={x + markerSize} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />
@@ -117,6 +121,9 @@ export const RecursiveShapeRenderer = ({
 
   // If this is a reference to another footprint, we render that footprint's shapes inside a group
   if (shape.type === "footprint") {
+      // If we are only rendering handles for the top layer, references don't have sub-handles in this mode
+      if (onlyHandles) return null;
+
       const ref = shape as FootprintReference;
       const targetFp = allFootprints.find(f => f.id === ref.footprintId);
 
@@ -187,6 +194,9 @@ export const RecursiveShapeRenderer = ({
   }
 
   // --- PRIMITIVE SHAPES ---
+
+  // If onlyHandles is true and we aren't a Line or Polygon, there is nothing to draw in this pass
+  if (onlyHandles && shape.type !== "line" && shape.type !== "polygon") return null;
   
   // Default styles (unassigned)
   let fill = isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)";
@@ -359,6 +369,10 @@ export const RecursiveShapeRenderer = ({
           );
       }) : null;
 
+      if (onlyHandles) {
+          return <g>{handles}{midButtons}</g>;
+      }
+
       return (
           <g>
               <path d={d} {...commonProps} />
@@ -489,6 +503,10 @@ export const RecursiveShapeRenderer = ({
           );
       }) : null;
 
+      if (onlyHandles) {
+          return <g>{handles}{midButtons}</g>;
+      }
+
       return (
           <g>
             <path 
@@ -526,6 +544,7 @@ export const BoardOutlineRenderer = ({
   hoveredMidpointIndex, // NEW
   setHoveredMidpointIndex, // NEW
   onAddMidpoint, // NEW
+  onlyHandles = false,
 }: {
   shape: FootprintBoardOutline;
   isSelected: boolean;
@@ -540,6 +559,7 @@ export const BoardOutlineRenderer = ({
   hoveredMidpointIndex?: number | null;
   setHoveredMidpointIndex?: (index: number | null) => void;
   onAddMidpoint?: (shapeId: string, index: number) => void;
+  onlyHandles?: boolean;
 }) => {
     const points = shape.points;
     const stroke = isSelected ? "#646cff" : "#555";
@@ -651,6 +671,10 @@ export const BoardOutlineRenderer = ({
             </g>
         );
     }) : null;
+
+    if (onlyHandles) {
+        return <g>{handles}{midButtons}</g>;
+    }
 
     return (
         <g>

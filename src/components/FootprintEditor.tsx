@@ -635,11 +635,11 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
     }
     newItem.name = newName;
 
-    // 5. Add to Footprint
+    // 5. Add to Footprint (IMPROVEMENT: Prepend to appear on top of list and visuals)
     if (type === "shape") {
-        onUpdate({ ...footprint, shapes: [...footprint.shapes, newItem] });
+        onUpdate({ ...footprint, shapes: [newItem, ...footprint.shapes] });
     } else if (type === "mesh") {
-        onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), newItem] });
+        onUpdate({ ...footprint, meshes: [newItem, ...(footprint.meshes || [])] });
     }
 
     // 6. Select the copy
@@ -709,22 +709,19 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
       newShape = { ...base, type: "line", thickness: "1", x: "0", y: "0", points: [{ id: crypto.randomUUID(), x: "0", y: "0" }, { id: crypto.randomUUID(), x: "10", y: "10" }] };
     }
 
-    if (type === "wireGuide") {
-        onUpdate({ ...footprint, shapes: [newShape, ...footprint.shapes] });
-    } else {
-        onUpdate({ ...footprint, shapes: [...footprint.shapes, newShape] });
-    }
+    // IMPROVEMENT: Always prepend new shapes to the list so they appear on top visually
+    onUpdate({ ...footprint, shapes: [newShape, ...footprint.shapes] });
 
     // Automatic Layer Assignment for Board Outlines
     if (type === "boardOutline") {
         const assignments = { ...footprint.boardOutlineAssignments };
-        const outlines = [...footprint.shapes, newShape].filter(s => s.type === "boardOutline");
+        const outlines = [newShape, ...footprint.shapes].filter(s => s.type === "boardOutline");
         // If this is the first outline, assign it to all layers
         if (outlines.length === 1) {
             stackup.forEach(l => {
                 assignments[l.id] = newShape.id;
             });
-            onUpdate({ ...footprint, shapes: [...footprint.shapes, newShape], boardOutlineAssignments: assignments });
+            onUpdate({ ...footprint, shapes: [newShape, ...footprint.shapes], boardOutlineAssignments: assignments });
         }
     }
 
@@ -860,7 +857,8 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                   if (index >= files.length) {
                       // All done
                       if (newMeshes.length > 0) {
-                           onUpdate({ ...footprint, meshes: [...(footprint.meshes || []), ...newMeshes] });
+                           // IMPROVEMENT: Prepend to appear at top
+                           onUpdate({ ...footprint, meshes: [...newMeshes, ...(footprint.meshes || [])] });
                            setSelectedShapeId(newMeshes[newMeshes.length - 1].id);
                       }
                       setProcessingMessage(null);
@@ -1189,6 +1187,36 @@ export default function FootprintEditor({ footprint, allFootprints, onUpdate, on
                             />
                         );
                     })}
+
+                    {/* IMPROVEMENT: Second pass to render selected handles on top of everything else */}
+                    {selectedShapeId && (() => {
+                        const selectedShape = footprint.shapes.find(s => s.id === selectedShapeId);
+                        if (selectedShape && isShapeVisible(selectedShape)) {
+                            return (
+                                <RecursiveShapeRenderer
+                                    key={selectedShape.id + "_overlay"}
+                                    shape={selectedShape}
+                                    allFootprints={allFootprints}
+                                    params={params}
+                                    stackup={stackup}
+                                    isSelected={true}
+                                    isParentSelected={false}
+                                    onMouseDown={handleShapeMouseDown}
+                                    onHandleDown={handleHandleMouseDown}
+                                    handleRadius={handleRadius}
+                                    rootFootprint={footprint}
+                                    layerVisibility={layerVisibility}
+                                    hoveredPointIndex={hoveredPointIndex}
+                                    setHoveredPointIndex={setHoveredPointIndex}
+                                    hoveredMidpointIndex={hoveredMidpointIndex}
+                                    setHoveredMidpointIndex={setHoveredMidpointIndex}
+                                    onAddMidpoint={handleAddMidpoint}
+                                    onlyHandles={true}
+                                />
+                            );
+                        }
+                        return null;
+                    })()}
                 </svg>
                 <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan | Drag Handles</div>
             </div>
