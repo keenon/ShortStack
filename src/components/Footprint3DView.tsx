@@ -689,7 +689,10 @@ function generateProceduralFillet(
     if (shape.type === "polygon") {
         const poly = shape as FootprintPolygon;
         const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
-        if (baseData.points.length < 3) return null;
+        if (baseData.points.length < 3) {
+            console.warn("Fillet generation failed: insufficient polygon points.");
+            return null;
+        }
 
         const baseCS = new manifoldModule.CrossSection([baseData.points.map(p => [p.x, p.y])], "EvenOdd");
         const steps: { z: number, offset: number }[] = [];
@@ -875,7 +878,10 @@ function generateProceduralFillet(
             points.forEach(p => rawVertices.push(p.x, layer.z, -p.y));
         });
 
-        if (!topologyValid) return null;
+        if (!topologyValid) {
+            console.warn("Fillet generation failed: inconsistent topology between layers.");
+            return null;
+        }
 
         const getIdx = (layerIdx: number, ptIdx: number) => layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
         const pushTri = (i1: number, i2: number, i3: number) => rawIndices.push(i1, i2, i3);
@@ -927,7 +933,10 @@ function generateProceduralFillet(
         mesh.vertProperties = new Float32Array(uniqueVerts);
         mesh.triVerts = new Uint32Array(finalIndices);
         return { manifold: new manifoldModule.Manifold(mesh), vertProperties: mesh.vertProperties, triVerts: mesh.triVerts };
-    } catch (e) { return null; }
+    } catch (e) { 
+        console.error("Failed to create fillet manifold", e);
+        return null; 
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1070,7 +1079,7 @@ const LayerSolid = ({
             garbage.push(obj);
         }
         return obj;
-    };
+    }
 
     try {
         const { Manifold } = manifoldModule;
