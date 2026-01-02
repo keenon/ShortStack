@@ -777,6 +777,17 @@ function generateProceduralFillet(
     if (shape.type === "polygon") {
         const poly = shape as FootprintPolygon;
         const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
+
+        let area = 0;
+        for (let i = 0; i < baseData.points.length; i++) {
+            const j = (i + 1) % baseData.points.length;
+            area += baseData.points[i].x * baseData.points[j].y - baseData.points[j].x * baseData.points[i].y;
+        }
+        // If our input is CW (negative area), reverse it to prevent loft twisting.
+        if (area < 0) {
+            baseData.points.reverse();
+        }
+
         if (baseData.points.length < 3) {
             console.warn("Fillet generation failed: insufficient polygon points.");
             return null;
@@ -935,10 +946,16 @@ function generateProceduralFillet(
         const baseProfile = getContour(0); 
         const vertsPerLayer = baseProfile.length;
         
-        if (vertsPerLayer < 3) return null;
+        if (vertsPerLayer < 3) {
+            console.warn("Fillet generation failed: insufficient shape complexity, less than 3 vertices.");
+            return null;
+        }
 
         const safeR = Math.min(filletRadius, minDimension / 2 - 0.01, depth);
-        if (safeR <= 0.001) return null;
+        if (safeR <= 0.001) {
+            console.warn("Fillet generation failed: fillet radius too large for shape dimensions.");
+            return null;
+        }
 
         const layers: { z: number, offset: number }[] = [];
         layers.push({ z: 0, offset: 0 });
