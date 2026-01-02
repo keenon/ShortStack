@@ -694,12 +694,14 @@ function generateProceduralFillet(
         const solveForOffset = (offsetB: number) => {
             costTable.fill(Infinity);
             costTable[0] = 0; 
+
             for (let i = 0; i <= lenA; i++) {
                 for (let j = 0; j <= lenB; j++) {
                     if (i === 0 && j === 0) continue;
                     const pA = polyA[i % lenA];
                     const pB = polyB[(j + offsetB) % lenB]; 
                     const distSq = pA.distanceToSquared(pB);
+
                     if (i > 0) {
                         const c = costTable[idx(i - 1, j)];
                         if (c !== Infinity) {
@@ -799,14 +801,14 @@ function generateProceduralFillet(
                 const cs = baseCS.offset(-step.offset, "Miter", 2.0);
                 const rawPolys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
                 // Clean up duplicate points which confuse triangulation
-                processedPolys = rawPolys.map(poly => {
+                processedPolys = rawPolys.map((poly: any) => {
                     const clean = [poly[0]];
                     for(let i=1; i<poly.length; i++) {
                         if(poly[i].distanceToSquared(clean[clean.length-1]) > 1e-9) clean.push(poly[i]);
                     }
                     if(clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) clean.pop();
                     return clean;
-                }).filter(p => p.length >= 3);
+                }).filter((p: any) => p.length >= 3);
             } else {
                 processedPolys = [baseData.points];
             }
@@ -817,7 +819,7 @@ function generateProceduralFillet(
             });
         });
 
-        // Triangulate Caps
+        // Triangulate Top and Bottom Caps
         const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
             let offset = startIdx;
             contours.forEach(c => {
@@ -832,7 +834,7 @@ function generateProceduralFillet(
         triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
         triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
 
-        // Loft
+        // Loft between layers
         for(let l=0; l<layerData.length-1; l++) {
             const up = layerData[l];
             const low = layerData[l+1];
@@ -911,12 +913,7 @@ function generateProceduralFillet(
             if (rawPoints.length > 0) {
                 const clean: THREE.Vector2[] = [rawPoints[0]];
                 for(let i=1; i<rawPoints.length; i++) {
-                    if (rawPoints[i].distanceToSquared(clean[clean.length-1]) > 1e-9) {
-                        clean.push(rawPoints[i]);
-                    }
-                }
-                if (clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) {
-                    clean.pop();
+                    clean.push(rawPoints[i]);
                 }
                 
                 let area = 0;
