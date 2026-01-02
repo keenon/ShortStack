@@ -656,6 +656,11 @@ function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
     return new wasm.CrossSection(contours, "EvenOdd");
 }
 
+// Helper for safe modulo in JS (handles negative numbers)
+function safeMod(n: number, m: number) {
+  return ((n % m) + m) % m;
+}
+
 function generateProceduralFillet(
     manifoldModule: any,
     shape: FootprintShape, 
@@ -670,52 +675,101 @@ function generateProceduralFillet(
     const rawVertices: number[] = [];
     const rawIndices: number[] = [];
 
-    // Robust Greedy Zipper Lofting (Shortest Diagonal Choice)
-    const triangulateZipper = (polyA: THREE.Vector2[], polyB: THREE.Vector2[], idxStartA: number, idxStartB: number) => {
-        if (polyA.length < 3 || polyB.length < 3) return;
-
-        // 1. Align Start Points (Closest point on B to A[0])
-        let bestDist = Infinity;
-        let offsetB = 0;
-        for(let i=0; i<polyB.length; i++) {
-            const d = polyA[0].distanceToSquared(polyB[i]);
-            if(d < bestDist) { bestDist = d; offsetB = i; }
-        }
-
-        let idxA = 0;
-        let idxB = 0;
+    // -----------------------------------------------------------------------
+    // NEW: Cyclic Optimal Triangulation
+    // Runs the DP Tiling algorithm multiple times to find the best "Seam"
+    // to prevent twisting on low-poly shapes (like triangles/rectangles).
+    // -----------------------------------------------------------------------
+    const triangulateRobust = (polyA: THREE.Vector2[], polyB: THREE.Vector2[], idxStartA: number, idxStartB: number) => {
         const lenA = polyA.length;
         const lenB = polyB.length;
-        
-        while(idxA < lenA || idxB < lenB) {
-            const vA1 = idxStartA + (idxA % lenA);
-            const vA2 = idxStartA + ((idxA + 1) % lenA);
-            const vB1 = idxStartB + ((idxB + offsetB) % lenB);
-            const vB2 = idxStartB + ((idxB + offsetB + 1) % lenB);
+        if (lenA < 3 || lenB < 3) return;
 
-            if (idxA >= lenA) {
-                rawIndices.push(vA1, vB1, vB2);
-                idxB++;
-                continue;
+        // DP Table Reused to avoid allocation spam
+        const dimCol = lenB + 1;
+        const costTable = new Float32Array((lenA + 1) * dimCol);
+        const fromTable = new Int8Array((lenA + 1) * dimCol); // 1: Up, 2: Left
+        const idx = (r: number, c: number) => r * dimCol + c;
+
+        const solveForOffset = (offsetB: number) => {
+            costTable.fill(Infinity);
+            costTable[0] = 0; 
+            for (let i = 0; i <= lenA; i++) {
+                for (let j = 0; j <= lenB; j++) {
+                    if (i === 0 && j === 0) continue;
+                    const pA = polyA[i % lenA];
+                    const pB = polyB[(j + offsetB) % lenB]; 
+                    const distSq = pA.distanceToSquared(pB);
+                    if (i > 0) {
+                        const c = costTable[idx(i - 1, j)];
+                        if (c !== Infinity) {
+                            const newCost = c + distSq;
+                            if (newCost < costTable[idx(i, j)]) {
+                                costTable[idx(i, j)] = newCost;
+                                fromTable[idx(i, j)] = 1;
+                            }
+                        }
+                    }
+                    if (j > 0) {
+                        const c = costTable[idx(i, j - 1)];
+                        if (c !== Infinity) {
+                            const newCost = c + distSq;
+                            if (newCost < costTable[idx(i, j)]) {
+                                costTable[idx(i, j)] = newCost;
+                                fromTable[idx(i, j)] = 2;
+                            }
+                        }
+                    }
+                }
             }
-            if (idxB >= lenB) {
-                rawIndices.push(vA1, vB1, vA2);
-                idxA++;
-                continue;
+            return costTable[idx(lenA, lenB)];
+        };
+
+        const generateIndices = (offsetB: number) => {
+            solveForOffset(offsetB); 
+            let curI = lenA;
+            let curJ = lenB;
+            while (curI > 0 || curJ > 0) {
+                const dir = fromTable[idx(curI, curJ)];
+                const vA_curr = idxStartA + (curI % lenA);
+                const vB_curr = idxStartB + ((curJ + offsetB) % lenB);
+                if (dir === 1) {
+                    const vA_prev = idxStartA + safeMod(curI - 1, lenA);
+                    rawIndices.push(vA_prev, vB_curr, vA_curr);
+                    curI--;
+                } else {
+                    const vB_prev = idxStartB + safeMod(curJ - 1 + offsetB, lenB);
+                    rawIndices.push(vA_curr, vB_prev, vB_curr);
+                    curJ--;
+                }
             }
+        };
 
-            // GREEDY CHOICE: Calculate potential diagonal lengths
-            const distA = polyB[(idxB + offsetB) % lenB].distanceToSquared(polyA[(idxA + 1) % lenA]);
-            const distB = polyA[idxA % lenA].distanceToSquared(polyB[(idxB + offsetB + 1) % lenB]);
+        let bestOffset = 0;
+        let minTotalCost = Infinity;
+        let geoBestOffset = 0;
+        let minGeoDist = Infinity;
+        for(let i=0; i<lenB; i++) {
+            const d = polyA[0].distanceToSquared(polyB[i]);
+            if(d < minGeoDist) { minGeoDist = d; geoBestOffset = i; }
+        }
 
-            if (distA < distB) {
-                rawIndices.push(vA1, vB1, vA2);
-                idxA++;
-            } else {
-                rawIndices.push(vA1, vB1, vB2);
-                idxB++;
+        let searchStart = 0;
+        let searchCount = lenB;
+        if (lenB > 60) {
+            searchStart = geoBestOffset - 10;
+            searchCount = 20;
+        }
+
+        for (let k = 0; k < searchCount; k++) {
+            const offset = safeMod(searchStart + k, lenB);
+            const cost = solveForOffset(offset);
+            if (cost < minTotalCost) {
+                minTotalCost = cost;
+                bestOffset = offset;
             }
         }
+        generateIndices(bestOffset);
     };
 
     if (shape.type === "polygon") {
@@ -742,14 +796,17 @@ function generateProceduralFillet(
         steps.forEach(step => {
             let processedPolys: THREE.Vector2[][] = [];
             if (step.offset > 0.001) {
-                // 1. Get Clean Topology from Manifold (Handles collision/self-intersection)
                 const cs = baseCS.offset(-step.offset, "Miter", 2.0);
                 const rawPolys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
-                if (rawPolys.length === 1) {
-                    processedPolys = [resampleToMatch(baseData.points, baseData.cornerIndices, rawPolys[0])];
-                } else {
-                    processedPolys = rawPolys;
-                }
+                // Clean up duplicate points which confuse triangulation
+                processedPolys = rawPolys.map(poly => {
+                    const clean = [poly[0]];
+                    for(let i=1; i<poly.length; i++) {
+                        if(poly[i].distanceToSquared(clean[clean.length-1]) > 1e-9) clean.push(poly[i]);
+                    }
+                    if(clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) clean.pop();
+                    return clean;
+                }).filter(p => p.length >= 3);
             } else {
                 processedPolys = [baseData.points];
             }
@@ -760,7 +817,7 @@ function generateProceduralFillet(
             });
         });
 
-        // Triangulate Top and Bottom Caps
+        // Triangulate Caps
         const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
             let offset = startIdx;
             contours.forEach(c => {
@@ -775,7 +832,7 @@ function generateProceduralFillet(
         triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
         triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
 
-        // Loft between layers
+        // Loft
         for(let l=0; l<layerData.length-1; l++) {
             const up = layerData[l];
             const low = layerData[l+1];
@@ -795,7 +852,7 @@ function generateProceduralFillet(
                 if (bestUpIdx !== -1) {
                     let sA = up.startIdx; for(let i=0; i<bestUpIdx; i++) sA += up.contours[i].length;
                     let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
-                    triangulateZipper(up.contours[bestUpIdx], lowPoly, sA, sB);
+                    triangulateRobust(up.contours[bestUpIdx], lowPoly, sA, sB);
                 }
             });
         }
