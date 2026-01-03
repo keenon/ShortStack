@@ -57,51 +57,62 @@ const LayerVisibilityPanel = ({
   onExport: (id: string, type: "SVG" | "DXF" | "STL") => void;
   isBoard: boolean;
 }) => {
+  const [collapsed, setCollapsed] = useState(false);
+
   return (
-    <div className="fp-left-subpanel">
-      <h3 style={{ marginTop: 0 }}>Layers</h3>
-      <div className="layer-list-scroll">
-        <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
-            <div className="layer-vis-info">
-                <div className="layer-color-square unassigned" title="Unassigned" />
-                <span className="layer-vis-name">Unassigned</span>
-            </div>
-            <button className={`vis-toggle-btn ${visibility["unassigned"] !== false ? "visible" : "hidden"}`} onClick={() => onToggle("unassigned")}>
-                {visibility["unassigned"] !== false ? "Hide" : "Show"}
-            </button>
-        </div>
-        {stackup.map((layer) => (
-             <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`} style={{flexWrap: 'wrap'}}>
-                <div className="layer-vis-info" style={{width: '100%', marginBottom: '5px'}}>
-                    <div className="layer-color-square" style={{ backgroundColor: layer.color }} />
-                    <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
-                </div>
-                
-                <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-end' }}>
-                    <button className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`} onClick={() => onToggle(layer.id)} style={{ marginRight: 'auto' }}>
-                        {visibility[layer.id] !== false ? "Hide" : "Show"}
-                    </button>
-                    
-                    {isBoard && (
-                        <>
-                            {layer.type === "Cut" ? (
-                                <>
-                                    <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "SVG")}>SVG</button>
-                                    <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "DXF")}>DXF</button>
-                                </>
-                            ) : (
-                                <>
-                                    <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "STL")}>STL</button>
-                                    <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "SVG")}>SVG</button>
-                                </>
-                            )}
-                        </>
-                    )}
-                </div>
-             </div>
-        ))}
-        {stackup.length === 0 && <div className="empty-state-small">No stackup layers.</div>}
+    <div className="fp-left-subpanel" style={{ flex: collapsed ? '0 0 auto' : 1, minHeight: 'auto', transition: 'flex 0.2s' }}>
+      <div 
+        onClick={() => setCollapsed(!collapsed)} 
+        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: collapsed ? 0 : '10px' }}
+      >
+          <h3 style={{ margin: 0, userSelect: 'none' }}>Layers</h3>
+          <span style={{ fontSize: '0.8em', color: '#888' }}>{collapsed ? "▶" : "▼"}</span>
       </div>
+      
+      {!collapsed && (
+        <div className="layer-list-scroll">
+            <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
+                <div className="layer-vis-info">
+                    <div className="layer-color-square unassigned" title="Unassigned" />
+                    <span className="layer-vis-name">Unassigned</span>
+                </div>
+                <button className={`vis-toggle-btn ${visibility["unassigned"] !== false ? "visible" : "hidden"}`} onClick={() => onToggle("unassigned")}>
+                    {visibility["unassigned"] !== false ? "Hide" : "Show"}
+                </button>
+            </div>
+            {stackup.map((layer) => (
+                <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`} style={{flexWrap: 'wrap'}}>
+                    <div className="layer-vis-info" style={{width: '100%', marginBottom: '5px'}}>
+                        <div className="layer-color-square" style={{ backgroundColor: layer.color }} />
+                        <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
+                    </div>
+                    
+                    <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-end' }}>
+                        <button className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`} onClick={() => onToggle(layer.id)} style={{ marginRight: 'auto' }}>
+                            {visibility[layer.id] !== false ? "Hide" : "Show"}
+                        </button>
+                        
+                        {isBoard && (
+                            <>
+                                {layer.type === "Cut" ? (
+                                    <>
+                                        <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "SVG")}>SVG</button>
+                                        <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "DXF")}>DXF</button>
+                                    </>
+                                ) : (
+                                    <>
+                                        <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "STL")}>STL</button>
+                                        <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "SVG")}>SVG</button>
+                                    </>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </div>
+            ))}
+            {stackup.length === 0 && <div className="empty-state-small">No stackup layers.</div>}
+        </div>
+      )}
     </div>
   );
 };
@@ -128,6 +139,7 @@ const ShapeListPanel = ({
   stackup: StackupLayer[];
   isShapeVisible: (shape: FootprintShape) => boolean;
 }) => {
+  const [collapsed, setCollapsed] = useState(false);
 
   const getIcon = (type: string) => {
       switch(type) {
@@ -143,70 +155,78 @@ const ShapeListPanel = ({
   };
 
   return (
-    <div className="fp-left-subpanel">
-      <h3 style={{ marginTop: 0 }}>Objects</h3>
-      
-      <div className="shape-list-container">
-        {footprint.shapes.map((shape, index) => {
-          // If not a board, hide outline shapes in the list
-          if (!footprint.isBoard && shape.type === "boardOutline") return null;
-
-          const visible = isShapeVisible(shape);
-          
-          let hasError = false;
-          if (shape.type === "footprint") {
-              const refId = (shape as FootprintReference).footprintId;
-              const target = allFootprints.find(f => f.id === refId);
-              if (!target) hasError = true;
-              // CHANGE: Only validate direct loop, allow isBoard
-              else if (!isFootprintOptionValid(footprint.id, target, allFootprints)) {
-                  hasError = true;
-              }
-          }
-
-          // Determine which layers are used (recursively for footprints)
-          let usedLayers: StackupLayer[] = [];
-          if (shape.type === "footprint") {
-              usedLayers = getRecursiveLayers((shape as FootprintReference).footprintId, allFootprints, stackup);
-          } else if (shape.type === "boardOutline") {
-              // Show layers explicitly assigned to this outline
-              const assignments = footprint.boardOutlineAssignments || {};
-              usedLayers = stackup.filter(l => assignments[l.id] === shape.id);
-          } else {
-              usedLayers = stackup.filter(l => shape.assignedLayers && shape.assignedLayers[l.id] !== undefined);
-          }
-          
-          const isGuide = shape.type === "wireGuide";
-
-          return (
-          <div key={shape.id}
-            className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""} ${!visible ? "is-hidden" : ""} ${hasError ? "error-item" : ""}`}
-            onClick={() => onSelect(shape.id)}
-            style={hasError ? { border: '1px solid red' } : {}}
-          >
-            {getIcon(shape.type)}
-            
-            <div className="shape-layer-indicators">
-              {usedLayers.map(layer => (
-                 <div key={layer.id} className="layer-indicator-dot" style={{ backgroundColor: layer.color }} title={layer.name} />
-              ))}
-              {isGuide && (
-                 <div className="layer-indicator-dot" style={{ backgroundColor: '#0f0', borderRadius: '50%' }} title="Wire Guide" />
-              )}
-            </div>
-
-            <input type="text" value={shape.name} onChange={(e) => onRename(shape.id, e.target.value)} className="shape-name-edit" />
-            {hasError && <span style={{color:'red', marginRight:'5px'}} title="Invalid Reference">⚠</span>}
-
-            <div className="shape-actions" style={{ display: 'flex', gap: '2px' }}>
-                <button className="icon-btn btn-up" onClick={(e) => { e.stopPropagation(); onMove(index, -1); }} disabled={index === 0} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Move Up">↑</button>
-                <button className="icon-btn btn-down" onClick={(e) => { e.stopPropagation(); onMove(index, 1); }} disabled={index === footprint.shapes.length - 1} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Move Down">↓</button>
-                <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(shape.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
-            </div>
-          </div>
-        )})}
-        {footprint.shapes.length === 0 && <div className="empty-state-small">No shapes added.</div>}
+    <div className="fp-left-subpanel" style={{ flex: collapsed ? '0 0 auto' : 1, minHeight: 'auto', transition: 'flex 0.2s' }}>
+      <div 
+        onClick={() => setCollapsed(!collapsed)} 
+        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: collapsed ? 0 : '10px' }}
+      >
+          <h3 style={{ margin: 0, userSelect: 'none' }}>Objects</h3>
+          <span style={{ fontSize: '0.8em', color: '#888' }}>{collapsed ? "▶" : "▼"}</span>
       </div>
+      
+      {!collapsed && (
+        <div className="shape-list-container">
+            {footprint.shapes.map((shape, index) => {
+            // If not a board, hide outline shapes in the list
+            if (!footprint.isBoard && shape.type === "boardOutline") return null;
+
+            const visible = isShapeVisible(shape);
+            
+            let hasError = false;
+            if (shape.type === "footprint") {
+                const refId = (shape as FootprintReference).footprintId;
+                const target = allFootprints.find(f => f.id === refId);
+                if (!target) hasError = true;
+                // CHANGE: Only validate direct loop, allow isBoard
+                else if (!isFootprintOptionValid(footprint.id, target, allFootprints)) {
+                    hasError = true;
+                }
+            }
+
+            // Determine which layers are used (recursively for footprints)
+            let usedLayers: StackupLayer[] = [];
+            if (shape.type === "footprint") {
+                usedLayers = getRecursiveLayers((shape as FootprintReference).footprintId, allFootprints, stackup);
+            } else if (shape.type === "boardOutline") {
+                // Show layers explicitly assigned to this outline
+                const assignments = footprint.boardOutlineAssignments || {};
+                usedLayers = stackup.filter(l => assignments[l.id] === shape.id);
+            } else {
+                usedLayers = stackup.filter(l => shape.assignedLayers && shape.assignedLayers[l.id] !== undefined);
+            }
+            
+            const isGuide = shape.type === "wireGuide";
+
+            return (
+            <div key={shape.id}
+                className={`shape-item ${shape.id === selectedShapeId ? "selected" : ""} ${!visible ? "is-hidden" : ""} ${hasError ? "error-item" : ""}`}
+                onClick={() => onSelect(shape.id)}
+                style={hasError ? { border: '1px solid red' } : {}}
+            >
+                {getIcon(shape.type)}
+                
+                <div className="shape-layer-indicators">
+                {usedLayers.map(layer => (
+                    <div key={layer.id} className="layer-indicator-dot" style={{ backgroundColor: layer.color }} title={layer.name} />
+                ))}
+                {isGuide && (
+                    <div className="layer-indicator-dot" style={{ backgroundColor: '#0f0', borderRadius: '50%' }} title="Wire Guide" />
+                )}
+                </div>
+
+                <input type="text" value={shape.name} onChange={(e) => onRename(shape.id, e.target.value)} className="shape-name-edit" />
+                {hasError && <span style={{color:'red', marginRight:'5px'}} title="Invalid Reference">⚠</span>}
+
+                <div className="shape-actions" style={{ display: 'flex', gap: '2px' }}>
+                    <button className="icon-btn btn-up" onClick={(e) => { e.stopPropagation(); onMove(index, -1); }} disabled={index === 0} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Move Up">↑</button>
+                    <button className="icon-btn btn-down" onClick={(e) => { e.stopPropagation(); onMove(index, 1); }} disabled={index === footprint.shapes.length - 1} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Move Down">↓</button>
+                    <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(shape.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
+                </div>
+            </div>
+            )})}
+            {footprint.shapes.length === 0 && <div className="empty-state-small">No shapes added.</div>}
+        </div>
+      )}
     </div>
   );
 };
@@ -229,52 +249,63 @@ const MeshListPanel = ({
     onRename: (id: string, name: string) => void;
     updateMesh: (id: string, field: string, val: any) => void;
 }) => {
-  (onRename); // Unused for now
+    const [collapsed, setCollapsed] = useState(false);
+    (onRename); // Unused for now
+
     return (
-        <div className="fp-left-subpanel">
-            <h3 style={{ marginTop: 0 }}>Meshes</h3>
-            <div className="shape-list-container">
-                {meshes.map(mesh => {
-                    const asset = meshAssets.find(a => a.id === mesh.meshId);
-                    return (
-                        <div key={mesh.id}
-                            className={`shape-item ${mesh.id === selectedId ? "selected" : ""}`}
-                            style={{ flexDirection: 'column', alignItems: 'flex-start' }}
-                            onClick={() => onSelect(mesh.id)}
-                        >
-                            <div style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
-                                <IconMesh className="shape-icon" />
-                                <div style={{ marginRight: '8px', fontSize: '0.8em', color: '#888', textTransform: 'uppercase' }}>
-                                    {asset?.format || "???"}
-                                </div>
-                                <input 
-                                    type="text" 
-                                    value={mesh.name} 
-                                    onChange={(e) => updateMesh(mesh.id, "name", e.target.value)} 
-                                    className="shape-name-edit" 
-                                    onClick={(e) => e.stopPropagation()}
-                                />
-                                <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(mesh.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
-                            </div>
-                            
-                            <div style={{ display: 'flex', width: '100%', marginTop: '5px' }}>
-                                 <button
-                                    className={`vis-toggle-btn ${mesh.renderingType !== "hidden" ? "visible" : ""}`}
-                                    style={{ fontSize: '0.8em', padding: '2px 8px', width: '100%' }}
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        const newType = mesh.renderingType === "hidden" ? "solid" : "hidden";
-                                        updateMesh(mesh.id, "renderingType", newType);
-                                    }}
-                                 >
-                                    {mesh.renderingType === "hidden" ? "Show" : "Hide"}
-                                 </button>
-                            </div>
-                        </div>
-                    );
-                })}
-                {meshes.length === 0 && <div className="empty-state-small">Drag & Drop STL/OBJ/STEP files onto 3D view.</div>}
+        <div className="fp-left-subpanel" style={{ flex: collapsed ? '0 0 auto' : 1, minHeight: 'auto', transition: 'flex 0.2s' }}>
+            <div 
+                onClick={() => setCollapsed(!collapsed)} 
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', marginBottom: collapsed ? 0 : '10px' }}
+            >
+                <h3 style={{ margin: 0, userSelect: 'none' }}>Meshes</h3>
+                <span style={{ fontSize: '0.8em', color: '#888' }}>{collapsed ? "▶" : "▼"}</span>
             </div>
+
+            {!collapsed && (
+                <div className="shape-list-container">
+                    {meshes.map(mesh => {
+                        const asset = meshAssets.find(a => a.id === mesh.meshId);
+                        return (
+                            <div key={mesh.id}
+                                className={`shape-item ${mesh.id === selectedId ? "selected" : ""}`}
+                                style={{ flexDirection: 'column', alignItems: 'flex-start' }}
+                                onClick={() => onSelect(mesh.id)}
+                            >
+                                <div style={{ display: 'flex', width: '100%', alignItems: 'center' }}>
+                                    <IconMesh className="shape-icon" />
+                                    <div style={{ marginRight: '8px', fontSize: '0.8em', color: '#888', textTransform: 'uppercase' }}>
+                                        {asset?.format || "???"}
+                                    </div>
+                                    <input 
+                                        type="text" 
+                                        value={mesh.name} 
+                                        onChange={(e) => updateMesh(mesh.id, "name", e.target.value)} 
+                                        className="shape-name-edit" 
+                                        onClick={(e) => e.stopPropagation()}
+                                    />
+                                    <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDelete(mesh.id); }} style={{ width: '24px', height: '24px', fontSize: '0.9em' }} title="Delete">✕</button>
+                                </div>
+                                
+                                <div style={{ display: 'flex', width: '100%', marginTop: '5px' }}>
+                                    <button
+                                        className={`vis-toggle-btn ${mesh.renderingType !== "hidden" ? "visible" : ""}`}
+                                        style={{ fontSize: '0.8em', padding: '2px 8px', width: '100%' }}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            const newType = mesh.renderingType === "hidden" ? "solid" : "hidden";
+                                            updateMesh(mesh.id, "renderingType", newType);
+                                        }}
+                                    >
+                                        {mesh.renderingType === "hidden" ? "Show" : "Hide"}
+                                    </button>
+                                </div>
+                            </div>
+                        );
+                    })}
+                    {meshes.length === 0 && <div className="empty-state-small">Drag & Drop STL/OBJ/STEP files onto 3D view.</div>}
+                </div>
+            )}
         </div>
     );
 };
