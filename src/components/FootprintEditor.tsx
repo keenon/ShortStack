@@ -8,7 +8,7 @@ import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateE
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh, IconPolygon } from "./Icons";
-import { useUndoHistory } from "../hooks/useUndoHistory"; // ADDED
+import { useUndoHistory } from "../hooks/useUndoHistory"; // IMPORT HOOK
 import './FootprintEditor.css';
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
@@ -285,6 +285,8 @@ const MeshListPanel = ({
 
 export default function FootprintEditor({ footprint: initialFootprint, allFootprints, onUpdate, onClose, onEditChild, params, stackup, meshAssets, onRegisterMesh }: Props) {
   // --- HISTORY HOOK ---
+  // We rename the hook's state to 'footprint' so the rest of the component uses it naturally.
+  // The 'set' function from the hook handles the undo stack logic.
   const { 
     state: footprint, 
     set: updateHistory, 
@@ -295,10 +297,16 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
     resetHistory
   } = useUndoHistory(initialFootprint, 500);
 
+  // FIX: Use a ref to access the latest onUpdate callback without triggering the effect loop
+  const onUpdateRef = useRef(onUpdate);
+  useEffect(() => {
+    onUpdateRef.current = onUpdate;
+  }, [onUpdate]);
+
   // Sync back to parent for auto-save
   useEffect(() => {
-      onUpdate(footprint);
-  }, [footprint, onUpdate]);
+      onUpdateRef.current(footprint);
+  }, [footprint]);
 
   // Reset history if jumping to a different footprint
   const activeIdRef = useRef(initialFootprint.id);
@@ -1117,8 +1125,8 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
         <button className="secondary" onClick={onClose}>← Back</button>
         {/* UNDO / REDO CONTROLS */}
         <div style={{ display: 'flex', gap: '5px', marginLeft: '10px' }}>
-             <button className="secondary" onClick={undo} disabled={!canUndo} title="Undo (Apple+Z)">↶</button>
-             <button className="secondary" onClick={redo} disabled={!canRedo} title="Redo (Shift+Apple+Z)">↷</button>
+             <button className="secondary" onClick={undo} disabled={!canUndo} title="Undo (Cmd+Z)">↶</button>
+             <button className="secondary" onClick={redo} disabled={!canRedo} title="Redo (Shift+Cmd+Z)">↷</button>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginLeft: '10px' }}>
             <input className="toolbar-name-input" style={{ margin: 0 }} type="text" value={footprint.name} onChange={(e) => updateFootprintName(e.target.value)} />
@@ -1475,7 +1483,7 @@ function collectExportShapes(
             } else if (shape.type === "polygon") {
                 const poly = shape as FootprintPolygon;
                 
-                // If it's a simple split or flat carve, just send the definition
+                // If it's a simple cut or flat carve, just send the definition
                 if (endmillRadius <= 0.001 || layer.type === "Cut") {
                     exportObj.shape_type = "polygon";
                     exportObj.points = poly.points.map(p => {
