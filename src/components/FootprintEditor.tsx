@@ -1154,11 +1154,8 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
 
       <div className="fp-toolbar">
         <button className="secondary" onClick={onClose}>← Back</button>
-        {/* UNDO / REDO CONTROLS */}
-        <div style={{ display: 'flex', gap: '5px', marginLeft: '10px' }}>
-             <button className="secondary" onClick={undo} disabled={!canUndo} title="Undo (Cmd+Z)">↶</button>
-             <button className="secondary" onClick={redo} disabled={!canRedo} title="Redo (Shift+Cmd+Z)">↷</button>
-        </div>
+        {/* UNDO / REDO CONTROLS REMOVED FROM GUI, BUT HOOK AND KEYBOARD SHORTCUTS REMAIN */}
+        
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginLeft: '10px' }}>
             <input className="toolbar-name-input" style={{ margin: 0 }} type="text" value={footprint.name} onChange={(e) => updateFootprintName(e.target.value)} />
             <label className="checkbox-label" style={{ fontSize: '0.85em', color: '#aaa', cursor: 'pointer' }}>
