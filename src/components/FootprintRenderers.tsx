@@ -1,12 +1,99 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, Point } from "../types";
 import { evaluateExpression, interpolateColor, resolvePoint } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
 function bezier1D(p0: number, p1: number, p2: number, p3: number, t: number): number {
     const mt = 1 - t;
     return (mt * mt * mt * p0) + (3 * mt * mt * t * p1) + (3 * mt * t * t * p2) + (t * t * t * p3);
+}
+
+// NEW: Helper to convert Hex to RGBA
+function hexToRgba(hex: string, alpha: number): string {
+    let c = hex.trim();
+    if (c.startsWith('#')) c = c.substring(1);
+    if (c.length === 3) c = c.split('').map(char => char + char).join('');
+    const num = parseInt(c, 16);
+    const r = (num >> 16) & 255;
+    const g = (num >> 8) & 255;
+    const b = num & 255;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// NEW: Generate outline path for thick lines to allow transparent fill
+function generateLineOutlinePath(pts: {x: number, y: number, hIn?: {x:number, y:number}, hOut?: {x:number, y:number}}[], thickness: number): string {
+    if (pts.length < 2) return "";
+
+    const halfThick = thickness / 2;
+    const pathPoints: {x: number, y: number}[] = [];
+
+    // 1. Discretize Centerline
+    for (let i = 0; i < pts.length - 1; i++) {
+        const curr = pts[i];
+        const next = pts[i+1];
+        const p1x = curr.x;
+        const p1y = -curr.y;
+        const p2x = next.x;
+        const p2y = -next.y;
+
+        if (curr.hOut || next.hIn) {
+            const cp1x = curr.x + (curr.hOut?.x || 0);
+            const cp1y = -(curr.y + (curr.hOut?.y || 0));
+            const cp2x = next.x + (next.hIn?.x || 0);
+            const cp2y = -(next.y + (next.hIn?.y || 0));
+
+            const divisions = 16;
+            for(let j=0; j<divisions; j++) {
+                const t = j/divisions;
+                pathPoints.push({
+                    x: bezier1D(p1x, cp1x, cp2x, p2x, t),
+                    y: bezier1D(p1y, cp1y, cp2y, p2y, t)
+                });
+            }
+        } else {
+            pathPoints.push({ x: p1x, y: p1y });
+        }
+        if (i === pts.length - 2) pathPoints.push({ x: p2x, y: p2y });
+    }
+
+    if (pathPoints.length < 2) return "";
+
+    // 2. Calculate Offsets
+    const leftPts: {x: number, y: number}[] = [];
+    const rightPts: {x: number, y: number}[] = [];
+
+    for (let i = 0; i < pathPoints.length; i++) {
+        const p = pathPoints[i];
+        let dx, dy;
+        if (i === 0) {
+            dx = pathPoints[i+1].x - p.x;
+            dy = pathPoints[i+1].y - p.y;
+        } else if (i === pathPoints.length - 1) {
+            dx = p.x - pathPoints[i-1].x;
+            dy = p.y - pathPoints[i-1].y;
+        } else {
+            const dx1 = p.x - pathPoints[i-1].x;
+            const dy1 = p.y - pathPoints[i-1].y;
+            const dx2 = pathPoints[i+1].x - p.x;
+            const dy2 = pathPoints[i+1].y - p.y;
+            dx = dx1 + dx2; dy = dy1 + dy2;
+        }
+        const len = Math.sqrt(dx*dx + dy*dy);
+        const nx = -dy / len;
+        const ny = dx / len;
+        leftPts.push({ x: p.x + nx * halfThick, y: p.y + ny * halfThick });
+        rightPts.push({ x: p.x - nx * halfThick, y: p.y - ny * halfThick });
+    }
+
+    // 3. Construct Path String
+    let d = `M ${leftPts[0].x} ${leftPts[0].y}`;
+    for(let i=1; i<leftPts.length; i++) d += ` L ${leftPts[i].x} ${leftPts[i].y}`;
+    // Sweep-flag 0 to ensure outward convex caps
+    d += ` A ${halfThick} ${halfThick} 0 0 0 ${rightPts[rightPts.length-1].x} ${rightPts[rightPts.length-1].y}`;
+    for(let i=rightPts.length-2; i>=0; i--) d += ` L ${rightPts[i].x} ${rightPts[i].y}`;
+    d += ` A ${halfThick} ${halfThick} 0 0 0 ${leftPts[0].x} ${leftPts[0].y}`;
+    return d + " Z";
 }
 
 // RECURSIVE SHAPE RENDERER
@@ -204,7 +291,7 @@ export const RecursiveShapeRenderer = ({
   if (onlyHandles && shape.type !== "line" && shape.type !== "polygon") return null;
   
   // Default styles (unassigned)
-  let fill = isSelected ? "rgba(100, 108, 255, 0.5)" : "rgba(255, 255, 255, 0.1)";
+  let fill = isSelected ? "rgba(100, 108, 255, 0.1)" : "rgba(255, 255, 255, 0.05)";
   let stroke = isSelected ? "#646cff" : "#888";
   let strokeWidth = isSelected ? 2 : 1;
   const vectorEffect = "non-scaling-stroke";
@@ -215,20 +302,10 @@ export const RecursiveShapeRenderer = ({
 
   if (highestLayer) {
       stroke = highestLayer.color;
-      strokeWidth = isSelected ? 3 : 2;
+      strokeWidth = isSelected ? 2 : 1;
 
-      if (highestLayer.type === "Cut") {
-          fill = "black";
-      } else {
-          const rawAssignment = assigned[highestLayer.id];
-          const depthExpression = (typeof rawAssignment === 'string') ? rawAssignment : rawAssignment.depth;
-          
-          const depthVal = evaluateExpression(depthExpression, params);
-          const thickVal = evaluateExpression(highestLayer.thicknessExpression, params);
-          const ratio = (thickVal > 0.0001) ? (depthVal / thickVal) : 0;
-          
-          fill = interpolateColor(highestLayer.color, ratio);
-      }
+      // UPDATED: Standardized transparent fill using hexToRgba
+      fill = hexToRgba(highestLayer.color, 0.2);
   }
 
   // If inside a selected parent footprint, highlight slightly
@@ -388,57 +465,41 @@ export const RecursiveShapeRenderer = ({
   }
 
   if (shape.type === "line") {
-      const thickness = evaluateExpression(shape.thickness, params);
+      const thickness = evaluateExpression((shape as FootprintLine).thickness, params);
       
         const pts = shape.points.map(p => {
             const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
             return {
                 x: resolved.x,
                 y: resolved.y,
-                hIn: resolved.handleIn,   // These are now global-frame relative vectors
-                hOut: resolved.handleOut, // These are now global-frame relative vectors
+                hIn: resolved.handleIn,
+                hOut: resolved.handleOut,
                 isSnapped: !!p.snapTo
             };
         });
 
-        let d = "";
-        const midPoints = []; // Store calculated midpoints for + buttons
+        // 1. Generate Centerline for calculation
+        const midPoints = [];
         
         if (pts.length > 0) {
-            d = `M ${pts[0].x} ${-pts[0].y}`;
             for (let i = 0; i < pts.length - 1; i++) {
                 const curr = pts[i];
                 const next = pts[i+1];
-                
-                // Use the handles directly because they were rotated by resolvePoint
-                const cp1x = curr.x + (curr.hOut?.x || 0);
-                const cp1y = -(curr.y + (curr.hOut?.y || 0)); // SVG Y is inverted
-                const cp2x = next.x + (next.hIn?.x || 0);
-                const cp2y = -(next.y + (next.hIn?.y || 0));
-
-                // Calculate visual midpoint for "+" button
-                // If handles exist, use t=0.5 on cubic bezier. 
-                // CRITICAL: Calculate in Cartesian coordinates first, then invert Y for rendering.
                 if (curr.hOut || next.hIn) {
                     const midX = bezier1D(curr.x, curr.x + (curr.hOut?.x || 0), next.x + (next.hIn?.x || 0), next.x, 0.5);
                     const midY = bezier1D(curr.y, curr.y + (curr.hOut?.y || 0), next.y + (next.hIn?.y || 0), next.y, 0.5);
-                    // Render at (midX, -midY)
                     midPoints.push({ index: i, x: midX, y: -midY });
                 } else {
-                    // Simple average
                     midPoints.push({ index: i, x: (curr.x + next.x) / 2, y: -(curr.y + next.y) / 2 });
                 }
-                
-                d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${next.x} ${-next.y}`;
             }
         }
 
-      // Render Handles only if strictly selected (not just parent selected)
+        // 2. Generate Outline Path for Visuals
+        const outlineD = generateLineOutlinePath(pts, thickness);
+
       const handles = isSelected ? pts.map((pt, idx) => {
           const elements = [];
-          
-          // Anchor Point: Green if snapped to a guide
-          // NEW: Check hover state
           const isHovered = hoveredPointIndex === idx;
           const anchorFill = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
           const anchorRadius = isHovered ? handleRadius * 1.3 : handleRadius;
@@ -465,7 +526,7 @@ export const RecursiveShapeRenderer = ({
               elements.push(
                   <line key={`line-in-${idx}`} x1={pt.x} y1={-pt.y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" />,
                   <circle key={`handle-in-${idx}`} cx={hx} cy={hy} 
-                      r={handleRadius * 0.8} // Slightly smaller handle for controls
+                      r={handleRadius * 0.8} 
                       fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
                       onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'in'); }} />
               );
@@ -484,7 +545,6 @@ export const RecursiveShapeRenderer = ({
           return elements;
       }) : null;
 
-      // NEW: Render Midpoint Buttons
       const midButtons = isSelected ? midPoints.map(m => {
           const isHovered = hoveredMidpointIndex === m.index;
           const bgFill = isHovered ? "#ffaa00" : "#333";
@@ -497,7 +557,7 @@ export const RecursiveShapeRenderer = ({
                 key={`mid-${m.index}`} 
                 style={{ cursor: "pointer" }}
                 onClick={(e) => { e.stopPropagation(); onAddMidpoint && onAddMidpoint(shape.id, m.index); }}
-                onMouseDown={(e) => e.stopPropagation()} // FIX: Prevent deselecting line
+                onMouseDown={(e) => e.stopPropagation()} 
                 onMouseEnter={() => setHoveredMidpointIndex && setHoveredMidpointIndex(m.index)}
                 onMouseLeave={() => setHoveredMidpointIndex && setHoveredMidpointIndex(null)}
             >
@@ -514,15 +574,11 @@ export const RecursiveShapeRenderer = ({
 
       return (
           <g>
+            {/* UPDATED: Render the line as a shape outline rather than a thick stroke to allow transparent fill */}
             <path 
-                // key={shape.id} // REMOVED: SVG Paths inside g don't need unique keys if the g has one
-                d={d} 
+                d={outlineD} 
                 {...commonProps} 
-                fill="none" 
-                strokeWidth={thickness} 
-                strokeLinecap="round" 
-                strokeLinejoin="round" 
-                vectorEffect={undefined} 
+                vectorEffect="non-scaling-stroke"
                 style={{ ...commonProps.style, opacity: isSelected ? 1 : 0.8 }}
             />
             {handles}
@@ -544,11 +600,11 @@ export const BoardOutlineRenderer = ({
   handleRadius,
   rootFootprint,
   allFootprints,
-  hoveredPointIndex, // NEW
-  setHoveredPointIndex, // NEW
-  hoveredMidpointIndex, // NEW
-  setHoveredMidpointIndex, // NEW
-  onAddMidpoint, // NEW
+  hoveredPointIndex,
+  setHoveredPointIndex,
+  hoveredMidpointIndex,
+  setHoveredMidpointIndex,
+  onAddMidpoint,
   onlyHandles = false,
 }: {
   shape: FootprintBoardOutline;
@@ -568,7 +624,8 @@ export const BoardOutlineRenderer = ({
 }) => {
     const points = shape.points;
     const stroke = isSelected ? "#646cff" : "#555";
-    const strokeWidth = isSelected ? 3 : 2;
+    // UPDATED: Thinner outlines (1px/2px)
+    const strokeWidth = isSelected ? 2 : 1; 
     const strokeDasharray = isSelected ? "0" : "5,5";
 
     const originX = evaluateExpression(shape.x, params);
@@ -598,9 +655,7 @@ export const BoardOutlineRenderer = ({
             const cp2x = next.x + (next.hIn?.x || 0);
             const cp2y = -(next.y + (next.hIn?.y || 0));
             
-            // Midpoint calc
             if (curr.hOut || next.hIn) {
-                // Calculate in Cartesian, invert Y for render
                 const midX = bezier1D(curr.x, curr.x + (curr.hOut?.x || 0), next.x + (next.hIn?.x || 0), next.x, 0.5);
                 const midY = bezier1D(curr.y, curr.y + (curr.hOut?.y || 0), next.y + (next.hIn?.y || 0), next.y, 0.5);
                 midPoints.push({ index: i, x: midX, y: -midY });
@@ -634,7 +689,7 @@ export const BoardOutlineRenderer = ({
             elements.push(
                 <line key={`bo-line-in-${idx}`} x1={pt.x} y1={-pt.y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" />,
                 <circle key={`bo-handle-in-${idx}`} cx={hx} cy={hy} 
-                    r={handleRadius * 0.8} // Smaller control handles
+                    r={handleRadius * 0.8}
                     fill="#646cff" vectorEffect="non-scaling-stroke" style={{cursor: 'crosshair'}}
                     onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'in'); }} />
             );
@@ -653,7 +708,6 @@ export const BoardOutlineRenderer = ({
         return elements;
     }) : null;
 
-    // NEW: Midpoint Buttons
     const midButtons = isSelected ? midPoints.map(m => {
         const isHovered = hoveredMidpointIndex === m.index;
         const bgFill = isHovered ? "#ffaa00" : "#333";
@@ -666,7 +720,7 @@ export const BoardOutlineRenderer = ({
             key={`mid-${m.index}`} 
             style={{ cursor: "pointer" }}
             onClick={(e) => { e.stopPropagation(); onAddMidpoint && onAddMidpoint(shape.id, m.index); }}
-            onMouseDown={(e) => e.stopPropagation()} // FIX: Prevent deselecting board outline
+            onMouseDown={(e) => e.stopPropagation()}
             onMouseEnter={() => setHoveredMidpointIndex && setHoveredMidpointIndex(m.index)}
             onMouseLeave={() => setHoveredMidpointIndex && setHoveredMidpointIndex(null)}
             >
