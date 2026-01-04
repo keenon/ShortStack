@@ -1077,11 +1077,104 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
   const handleGroup = () => {
     if (selectedShapeIds.length < 2) return;
     
-    // 1. Calculate Centroid of Selection for Union Center
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    const selectedShapes = footprint.shapes.filter(s => selectedShapeIds.includes(s.id));
+    // 1. Gather all unique primitive shapes (flattening any selected unions)
+    const flattenedPrimitives: FootprintShape[] = [];
     
-    selectedShapes.forEach(s => {
+    selectedShapeIds.forEach(id => {
+        const shape = footprint.shapes.find(s => s.id === id);
+        if (!shape) return;
+
+        if (shape.type === "union") {
+            // "Ungroup" logic to find child positions in current footprint space
+            const u = shape as FootprintUnion;
+            const ux = evaluateExpression(u.x, params);
+            const uy = evaluateExpression(u.y, params);
+            const uAngle = evaluateExpression(u.angle, params);
+            const rad = uAngle * (Math.PI / 180);
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+
+            u.shapes.forEach(s => {
+                const lx = evaluateExpression((s as any).x || "0", params);
+                const ly = evaluateExpression((s as any).y || "0", params);
+                
+                // Calculate absolute position in the context of the footprint
+                const gx = ux + (lx * cos - ly * sin);
+                const gy = uy + (lx * sin + ly * cos);
+
+                const newS: any = { 
+                    ...JSON.parse(JSON.stringify(s)), 
+                    id: crypto.randomUUID(),
+                    x: gx.toFixed(4).toString(), 
+                    y: gy.toFixed(4).toString() 
+                };
+
+                if (s.type === "rect" || s.type === "footprint" || s.type === "union") {
+                    const sa = evaluateExpression((s as any).angle, params);
+                    newS.angle = (sa + uAngle).toFixed(4).toString();
+                }
+
+                if (s.type === "line" || s.type === "polygon" || s.type === "boardOutline") {
+                    // For points, we bake the union's translation/rotation into the points directly
+                    const pts = (s as any).points.map((p: any) => {
+                        const lpx = evaluateExpression(p.x, params);
+                        const lpy = evaluateExpression(p.y, params);
+                        
+                        // Point logic:
+                        // 1. Local Point (lpx) is relative to Shape Origin (lx).
+                        // 2. We need Global Point Position.
+                        // 3. Shape Origin (lx) rotates around Union Origin (0,0) -> (rlx, rly)
+                        // 4. Point (lpx) rotates around Shape Origin? No, usually points rotate with shape.
+                        //    So Point vector relative to Union Origin is (lx + lpx).
+                        
+                        const absLx = lx + lpx;
+                        const absLy = ly + lpy;
+                        
+                        // Rotate entire vector around Union Center
+                        const rpx = absLx * cos - absLy * sin;
+                        const rpy = absLx * sin + absLy * cos;
+                        
+                        // Translate to Global
+                        const gpx = ux + rpx;
+                        const gpy = uy + rpy;
+
+                        const rotHandle = (h?: {x:string, y:string}) => {
+                            if (!h) return undefined;
+                            const hx = evaluateExpression(h.x, params);
+                            const hy = evaluateExpression(h.y, params);
+                            return {
+                                x: (hx * cos - hy * sin).toFixed(4).toString(),
+                                y: (hx * sin + hy * cos).toFixed(4).toString()
+                            };
+                        };
+
+                        return {
+                            ...p,
+                            id: crypto.randomUUID(),
+                            x: gpx.toFixed(4).toString(),
+                            y: gpy.toFixed(4).toString(),
+                            handleIn: rotHandle(p.handleIn),
+                            handleOut: rotHandle(p.handleOut)
+                        };
+                    });
+                    newS.points = pts;
+                    
+                    // FIXED: Reset Origin to 0,0 for all point-based shapes
+                    // Since 'pts' are now Global coordinates, adding 'x/y' (which are also global gx/gy) 
+                    // would double-apply the translation.
+                    newS.x = "0"; 
+                    newS.y = "0"; 
+                }
+                flattenedPrimitives.push(newS);
+            });
+        } else {
+            flattenedPrimitives.push(JSON.parse(JSON.stringify(shape)));
+        }
+    });
+    
+    // 2. Calculate Centroid of the pool
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    flattenedPrimitives.forEach(s => {
         const aabb = getShapeAABB(s, params, footprint, allFootprints);
         if (aabb) {
             minX = Math.min(minX, aabb.x1, aabb.x2); maxX = Math.max(maxX, aabb.x1, aabb.x2);
@@ -1094,53 +1187,44 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
     const cx = (minX + maxX) / 2;
     const cy = -((minY + maxY) / 2); // Convert Visual Y back to Math Y
     
-    // 2. Create Union Shape
+    // 3. Create the new single-level Union Shape
     const unionId = crypto.randomUUID();
     const newUnion: FootprintUnion = {
         id: unionId,
         type: "union",
         name: "Union Group",
-        x: parseFloat(cx.toFixed(4)).toString(),
-        y: parseFloat(cy.toFixed(4)).toString(),
+        x: cx.toFixed(4).toString(),
+        y: cy.toFixed(4).toString(),
         angle: "0",
         assignedLayers: {},
         shapes: []
     };
 
-    // 3. Move shapes into union (adjusting coords relative to union center)
-    const movedShapes = selectedShapes.map(s => {
+    // 4. Transform primitives relative to new union center
+    newUnion.shapes = flattenedPrimitives.map(s => {
         const dx = -cx;
         const dy = -cy;
         
-        if (s.type === "line") {
-            // For Lines (where x/y are ignored by renderer), translate points
+        if (s.type === "line" || s.type === "polygon" || s.type === "boardOutline") {
+            // These shapes have x=0, y=0 (from the flattening step above or natively)
+            // So we just translate their points relative to the new Union Center.
             const pts = (s as any).points.map((p: any) => ({
                 ...p,
                 x: modifyExpression(p.x, dx),
                 y: modifyExpression(p.y, dy)
             }));
             return { ...s, points: pts };
-        } else if (s.type === "polygon" || s.type === "boardOutline") {
-            // For Polygons/Outlines (where renderer adds shape.x + point.x),
-            // we shift the shape.x/y ONLY. We do NOT shift points, 
-            // otherwise we apply the transform twice!
-            return {
-                ...s,
-                x: modifyExpression((s as any).x, dx),
-                y: modifyExpression((s as any).y, dy)
-            };
         }
         
-        // For Primitives
+        // Rects, Circles, Refs, etc use Origin
         return {
             ...s,
             x: modifyExpression((s as any).x, dx),
             y: modifyExpression((s as any).y, dy)
         };
     });
-    newUnion.shapes = movedShapes;
 
-    // 4. Update Footprint (Replace selected shapes with Union)
+    // 5. Update Footprint (Replace selection with new union)
     const remainingShapes = footprint.shapes.filter(s => !selectedShapeIds.includes(s.id));
     updateHistory({
         footprint: { ...footprint, shapes: [newUnion, ...remainingShapes] },
@@ -1173,6 +1257,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
         // Base restoration object
         let newS: any = { 
             ...s, 
+            id: crypto.randomUUID(), // New ID
             x: parseFloat(gx.toFixed(4)).toString(), 
             y: parseFloat(gy.toFixed(4)).toString() 
         };
@@ -1182,23 +1267,36 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
             newS.angle = parseFloat((sa + uAngle).toFixed(4)).toString();
         }
 
-        if (s.type === "line") {
-            // Lines rely on point coordinates. Bake rotation/translation into points.
+        if (s.type === "line" || s.type === "polygon" || s.type === "boardOutline") {
+            // Lines/Polys rely on point coordinates. Bake rotation/translation into points.
+            // Note: s.x/s.y might be non-zero inside the Union (though we zero them in Group, manually created unions might vary).
+            // We use 'lx, ly' as the Local Origin.
+            
             const pts = (s as any).points.map((p: any) => {
                 const lpx = evaluateExpression(p.x, params);
                 const lpy = evaluateExpression(p.y, params);
                 
-                // Point location is relative to shape origin (which is usually 0 for lines)
-                // We add the shape's local origin (lx, ly) just in case
-                const absLx = lx + lpx;
-                const absLy = ly + lpy;
-
-                // Rotate around Union Origin
-                const rpx = absLx * cos - absLy * sin;
-                const rpy = absLx * sin + absLy * cos;
+                // Point location is relative to shape origin (lx, ly)
+                // We rotate the vector (lx+lpx, ly+lpy)
+                // Wait, if s.type is Polygon, lpx is relative to lx.
+                // If we calculated 'gx' as the new origin, we only need to rotate 'lpx'.
+                // BUT, rotating lpx alone assumes origin rotation matches point rotation.
+                // Correct logic:
+                // GlobalPoint = UnionTx * (ShapeTx * Point)
+                // ShapeTx * Point = (lx + lpx, ly + lpy)
+                // UnionTx(v) = ux + Rotate(v)
                 
-                const gpx = ux + rpx;
-                const gpy = uy + rpy;
+                // If we want newS.x = gx, and newS.points = p':
+                // Visual = gx + p'
+                // ux + Rotate(lx) + p' = ux + Rotate(lx + lpx)
+                // p' = Rotate(lx + lpx) - Rotate(lx)
+                // p' = Rotate(lpx)
+                
+                // So yes, simply rotating the point vector is sufficient IF we preserve gx as origin.
+                
+                // Rotate point around local (0,0) by uAngle
+                const rpx = lpx * cos - lpy * sin;
+                const rpy = lpx * sin + lpy * cos;
 
                 // ROTATE HANDLES
                 const rotHandle = (h?: {x:string, y:string}) => {
@@ -1216,51 +1314,33 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
                 return {
                     ...p,
-                    x: parseFloat(gpx.toFixed(4)).toString(),
-                    y: parseFloat(gpy.toFixed(4)).toString(),
+                    id: crypto.randomUUID(),
+                    x: parseFloat(rpx.toFixed(4)).toString(),
+                    y: parseFloat(rpy.toFixed(4)).toString(),
                     handleIn: rotHandle(p.handleIn),
                     handleOut: rotHandle(p.handleOut)
                 };
             });
             newS.points = pts;
-            newS.x = "0"; 
-            newS.y = "0";
-        } else if (s.type === "polygon" || s.type === "boardOutline") {
-            // Polygons use Shape Origin + Point. 
-            // We have already set newS.x/y to the transformed Global Origin (gx, gy).
-            // If there was a rotation (uAngle), we must rotate the points around the shape's new origin.
-            if (Math.abs(uAngle) > 0.001) {
-                const pts = (s as any).points.map((p: any) => {
-                    const px = evaluateExpression(p.x, params);
-                    const py = evaluateExpression(p.y, params);
-                    
-                    // Rotate point around local (0,0) by uAngle
-                    const rpx = px * cos - py * sin;
-                    const rpy = px * sin + py * cos;
-
-                    // ROTATE HANDLES
-                    const rotHandle = (h?: {x:string, y:string}) => {
-                        if (!h) return undefined;
-                        const hx = evaluateExpression(h.x, params);
-                        const hy = evaluateExpression(h.y, params);
-                        // Standard vector rotation
-                        const rhx = hx * cos - hy * sin;
-                        const rhy = hx * sin + hy * cos;
-                        return {
-                            x: parseFloat(rhx.toFixed(4)).toString(),
-                            y: parseFloat(rhy.toFixed(4)).toString()
-                        };
-                    };
-                    
-                    return {
-                        ...p,
-                        x: parseFloat(rpx.toFixed(4)).toString(),
-                        y: parseFloat(rpy.toFixed(4)).toString(),
-                        handleIn: rotHandle(p.handleIn),
-                        handleOut: rotHandle(p.handleOut)
-                    };
-                });
-                newS.points = pts;
+            
+            // For Lines, we typically enforce 0,0 origin to keep points absolute
+            if (s.type === "line") {
+                // If it was a line, 'lx'/'ly' were likely 0. 
+                // But if they weren't, we should bake the origin shift into the points too?
+                // Actually, logic above sets newS.x = gx.
+                // If we want line to be 0,0:
+                // newS.x = 0;
+                // newS.points = gx + p'
+                
+                // Let's standardise lines to 0,0 absolute.
+                const ptsAbsolute = pts.map((p: any) => ({
+                    ...p,
+                    x: (evaluateExpression(p.x, params) + gx).toFixed(4),
+                    y: (evaluateExpression(p.y, params) + gy).toFixed(4)
+                }));
+                newS.points = ptsAbsolute;
+                newS.x = "0";
+                newS.y = "0";
             }
         }
 
