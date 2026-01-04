@@ -7,7 +7,7 @@ import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline, MeshAsset, FootprintWireGuide } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline, MeshAsset } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
