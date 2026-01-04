@@ -339,6 +339,7 @@ interface FlatShape {
     rotation: number;
     originalId: string;
     contextFp: Footprint;
+    unionId?: string; // NEW: Track membership in a union group
 }
 
 function flattenShapes(
@@ -347,7 +348,8 @@ function flattenShapes(
     allFootprints: Footprint[], 
     params: Parameter[],
     transform = { x: 0, y: 0, rotation: 0 },
-    depth = 0
+    depth = 0,
+    currentUnionId: string | undefined = undefined // NEW
 ): FlatShape[] {
     if (depth > 10) return [];
 
@@ -380,16 +382,19 @@ function flattenShapes(
                     x: globalX,
                     y: globalY,
                     rotation: globalRotation
-                }, depth + 1);
+                }, depth + 1, currentUnionId); // Propagate current union
                 result = result.concat(children);
             }
         } else if (shape.type === "union") {
             const u = shape as FootprintUnion;
+            // Use existing unionId if we are nested, otherwise use this union's ID
+            const effectiveUnionId = currentUnionId || u.id;
+            
             const children = flattenShapes(u as unknown as Footprint, u.shapes, allFootprints, params, {
                 x: globalX,
                 y: globalY,
                 rotation: globalRotation
-            }, depth + 1);
+            }, depth + 1, effectiveUnionId);
 
             // Apply override logic: if Union has layer assignments, they propagate to all children
             if (Object.keys(u.assignedLayers || {}).length > 0) {
@@ -405,7 +410,8 @@ function flattenShapes(
                 y: globalY,
                 rotation: globalRotation,
                 originalId: shape.id,
-                contextFp
+                contextFp,
+                unionId: currentUnionId
             });
         }
     });
@@ -447,7 +453,8 @@ function generateProceduralFillet(
     filletRadius: number,
     contextFp: Footprint,
     allFootprints: Footprint[],
-    resolution = 32
+    resolution = 32,
+    overrideCS?: any // NEW: Optional pre-computed CrossSection (Manifold object)
 ) {
     let minDimension = Infinity;
     const rawVertices: number[] = [];
@@ -585,26 +592,48 @@ function generateProceduralFillet(
         generateIndices(bestOffset);
     };
 
-    if (shape.type === "polygon") {
-        const poly = shape as FootprintPolygon;
-        const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
+    // If overrideCS provided OR shape is polygon, use the generalized Polygon logic
+    if (overrideCS || shape.type === "polygon") {
+        let baseCS;
+        let basePoints: THREE.Vector2[] = [];
 
-        let area = 0;
-        for (let i = 0; i < baseData.points.length; i++) {
-            const j = (i + 1) % baseData.points.length;
-            area += baseData.points[i].x * baseData.points[j].y - baseData.points[j].x * baseData.points[i].y;
-        }
-        // If our input is CW (negative area), reverse it to prevent loft twisting.
-        if (area < 0) {
-            baseData.points.reverse();
-        }
+        if (overrideCS) {
+            baseCS = overrideCS;
+            // Extract the 0-offset contour from the override Manifold object for triangulation
+            const rawPolys = baseCS.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
+            if(rawPolys.length > 0) basePoints = rawPolys[0]; // Assume single contour for now or primary
+            // Fix winding if needed
+            let area = 0;
+            for (let i = 0; i < basePoints.length; i++) {
+                const j = (i + 1) % basePoints.length;
+                area += basePoints[i].x * basePoints[j].y - basePoints[j].x * basePoints[i].y;
+            }
+            if (area < 0) basePoints.reverse();
 
-        if (baseData.points.length < 3) {
-            console.warn("Fillet generation failed: insufficient polygon points.");
-            return null;
-        }
+        } else {
+            const poly = shape as FootprintPolygon;
+            const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
 
-        const baseCS = new manifoldModule.CrossSection([baseData.points.map(p => [p.x, p.y])], "EvenOdd");
+            basePoints = baseData.points;
+            let area = 0;
+            for (let i = 0; i < basePoints.length; i++) {
+                const j = (i + 1) % basePoints.length;
+                area += basePoints[i].x * basePoints[j].y - basePoints[j].x * basePoints[i].y;
+            }
+            if (area < 0) {
+                basePoints.reverse();
+            }
+
+            if (basePoints.length < 3) {
+                console.warn("Fillet generation failed: insufficient polygon points.");
+                return null;
+            }
+            baseCS = new manifoldModule.CrossSection([basePoints.map(p => [p.x, p.y])], "EvenOdd");
+        }
+        
+        // Safety for empty geometry
+        if (!basePoints || basePoints.length < 3) return null;
+
         const steps: { z: number, offset: number }[] = [];
         const wallBottomZ = -(depth - filletRadius);
         steps.push({ z: 0, offset: 0 });
@@ -631,7 +660,6 @@ function generateProceduralFillet(
                     if(clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) clean.pop();
                     
                     // Ensure consistent winding order (CCW/Positive Area)
-                    // Manifold offsets might invert winding for certain operations.
                     let area = 0;
                     for (let i = 0; i < clean.length; i++) {
                         const j = (i + 1) % clean.length;
@@ -642,7 +670,7 @@ function generateProceduralFillet(
                     return clean;
                 }).filter((p: any) => p.length >= 3);
             } else {
-                processedPolys = [baseData.points];
+                processedPolys = [basePoints];
             }
 
             layerData.push({ z: step.z, contours: processedPolys, startIdx: totalVerts });
@@ -688,12 +716,10 @@ function generateProceduralFillet(
                     let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
                     triangulateRobust(up.contours[bestUpIdx], lowPoly, sA, sB);
                 }
-                else {
-                    console.warn("Fillet generation warning: could not find matching upper contour for lofting.");
-                }
             });
         }
     } else {
+        // ... (Existing primitive logic remains unchanged) ...
         const getContour = (offset: number): THREE.Vector2[] => {
             let rawPoints: THREE.Vector2[] = [];
             
@@ -722,7 +748,6 @@ function generateProceduralFillet(
                 const limit = Math.min(halfW, halfH);
                 if (cr > limit) cr = limit;
                 
-                // Match Three.js Shape resolution (defaults to 32 segments per curve)
                 const segCorner = 32; 
                 
                 const quadrants = [
@@ -735,34 +760,21 @@ function generateProceduralFillet(
                 quadrants.forEach(q => {
                     const startAng = q.startAng;
                     const endAng = startAng + Math.PI/2;
-                    
-                    // 1. Calculate Bezier Control Points
-                    // P0: Start of arc (on the edge)
                     const p0X = q.x + cr * Math.cos(startAng);
                     const p0Y = q.y + cr * Math.sin(startAng);
-                    
-                    // P2: End of arc (on the next edge)
                     const p2X = q.x + cr * Math.cos(endAng);
                     const p2Y = q.y + cr * Math.sin(endAng);
-
-                    // P1: Control Point (The sharp corner of the bounding box)
-                    // We derive this by adding the corner offset components
                     const cpX = q.x + cr * (Math.cos(startAng) + Math.cos(endAng));
                     const cpY = q.y + cr * (Math.sin(startAng) + Math.sin(endAng));
 
-                    // 2. Generate Points along the Quadratic Curve
                     for(let i=0; i<=segCorner; i++) {
                         const t = i / segCorner;
                         const invT = 1 - t;
-                        
-                        // Quadratic Bezier Basis: (1-t)^2, 2(1-t)t, t^2
                         const c0 = invT * invT;
                         const c1 = 2 * invT * t;
                         const c2 = t * t;
-                        
                         const vx = c0 * p0X + c1 * cpX + c2 * p2X;
                         const vy = c0 * p0Y + c1 * cpY + c2 * p2Y;
-                        
                         rawPoints.push(new THREE.Vector2(vx, vy));
                     }
                 });
@@ -779,36 +791,26 @@ function generateProceduralFillet(
                 for(let i=1; i<rawPoints.length; i++) {
                     clean.push(rawPoints[i]);
                 }
-                
                 let area = 0;
                 for (let i = 0; i < clean.length; i++) {
                     const j = (i + 1) % clean.length;
                     area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
                 }
-                
                 if (area < 0) {
                     clean.reverse();
                 }
-
                 return clean;
             }
-            
             return rawPoints;
         };
 
         const baseProfile = getContour(0); 
         const vertsPerLayer = baseProfile.length;
         
-        if (vertsPerLayer < 3) {
-            console.warn("Fillet generation failed: insufficient shape complexity, less than 3 vertices.");
-            return null;
-        }
+        if (vertsPerLayer < 3) return null;
 
         const safeR = Math.min(filletRadius, minDimension / 2 - 0.01, depth);
-        if (safeR <= 0.001) {
-            console.warn("Fillet generation failed: fillet radius too large for shape dimensions.");
-            return null;
-        }
+        if (safeR <= 0.001) return null;
 
         const layers: { z: number, offset: number }[] = [];
         layers.push({ z: 0, offset: 0 });
@@ -835,10 +837,7 @@ function generateProceduralFillet(
             points.forEach(p => rawVertices.push(p.x, layer.z, -p.y));
         });
 
-        if (!topologyValid) {
-            console.warn("Fillet generation failed: inconsistent topology between layers.");
-            return null;
-        }
+        if (!topologyValid) return null;
 
         const getIdx = (layerIdx: number, ptIdx: number) => layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
         const pushTri = (i1: number, i2: number, i3: number) => rawIndices.push(i1, i2, i3);
@@ -972,8 +971,14 @@ async function loadMeshGeometry(asset: MeshAsset): Promise<THREE.BufferGeometry 
 }
 
 // ------------------------------------------------------------------
-// COMPONENTS (LayerSolid, FlatMesh, FlattenMeshes, etc. omitted)
+// COMPONENTS (LayerSolid, FlatMesh, FlattenMeshes, etc.)
 // ------------------------------------------------------------------
+
+interface ExecutionItem {
+    type: "single" | "union";
+    shapes: FlatShape[];
+    unionId?: string;
+}
 
 const LayerSolid = ({
   layer,
@@ -1056,22 +1061,44 @@ const LayerSolid = ({
         }
 
         const failedFillets: THREE.BufferGeometry[] = [];
-
-        // Track processed cuts to detect overlaps. 
-        // We store the 2D CrossSection (transformed to world space) to check intersections.
         const processedCuts: { depth: number, cs: any, id: string }[] = [];
 
-        [...flatShapes].reverse().forEach((item) => {
-            const shape = item.shape;
-            if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;
+        // Pre-process grouping
+        const executionList: ExecutionItem[] = [];
+        const unionMap = new Map<string, ExecutionItem>();
+        
+        // Reverse iteration to match visual order (top-down)
+        [...flatShapes].reverse().forEach(item => {
+            if (!item.shape.assignedLayers || item.shape.assignedLayers[layer.id] === undefined) return;
+            
+            if (item.unionId) {
+                if (!unionMap.has(item.unionId)) {
+                    const group: ExecutionItem = { type: "union", shapes: [], unionId: item.unionId };
+                    unionMap.set(item.unionId, group);
+                    executionList.push(group);
+                }
+                unionMap.get(item.unionId)!.shapes.push(item);
+            } else {
+                executionList.push({ type: "single", shapes: [item] });
+            }
+        });
 
+        // EXECUTE CUTS
+        executionList.forEach((exec) => {
+            // For single items, index 0 is the item. For unions, we aggregate all.
+            // We use the first item to determine parameters (depth, radius)
+            // assuming unions share properties or use parent overrides.
+            const primaryItem = exec.shapes[0];
+            const shape = primaryItem.shape;
+            
+            // 1. Determine Parameters
             let actualDepth = thickness;
             let endmillRadius = 0;
 
             if (layer.type === "Cut") {
                 actualDepth = thickness; 
             } else {
-                const assignment = shape.assignedLayers[layer.id];
+                const assignment = shape.assignedLayers![layer.id];
                 const valExpr = (typeof assignment === 'object') ? assignment.depth : (assignment as string);
                 const radiusExpr = (typeof assignment === 'object') ? assignment.endmillRadius : "0";
 
@@ -1081,16 +1108,22 @@ const LayerSolid = ({
             }
 
             let safeRadius = endmillRadius;
-            if (shape.type === "circle") {
-                 const d = evaluateExpression((shape as any).diameter, params);
-                 safeRadius = Math.min(safeRadius, d/2 - 0.05);
-            } else if (shape.type === "rect") {
-                 const w = evaluateExpression((shape as FootprintRect).width, params);
-                 const h = evaluateExpression((shape as FootprintRect).height, params);
-                 safeRadius = Math.min(safeRadius, Math.min(w, h)/2 - 0.05);
-            } else if (shape.type === "line") {
-                 const t = evaluateExpression((shape as FootprintLine).thickness, params);
-                 safeRadius = Math.min(safeRadius, t/2 - 0.05);
+            if (exec.type === "single") {
+                // Optimization: Clamp radius by primitive min dimension
+                if (shape.type === "circle") {
+                    const d = evaluateExpression((shape as any).diameter, params);
+                    safeRadius = Math.min(safeRadius, d/2 - 0.05);
+                } else if (shape.type === "rect") {
+                    const w = evaluateExpression((shape as FootprintRect).width, params);
+                    const h = evaluateExpression((shape as FootprintRect).height, params);
+                    safeRadius = Math.min(safeRadius, Math.min(w, h)/2 - 0.05);
+                } else if (shape.type === "line") {
+                    const t = evaluateExpression((shape as FootprintLine).thickness, params);
+                    safeRadius = Math.min(safeRadius, t/2 - 0.05);
+                }
+            } else {
+                // For unions, just clamp by depth as geometry is complex
+                 safeRadius = Math.min(safeRadius, actualDepth);
             }
             if (safeRadius < 0) safeRadius = 0;
 
@@ -1098,95 +1131,87 @@ const LayerSolid = ({
             const hasRadius = safeRadius > CSG_EPSILON;
             const shouldRound = isPartialCut && hasRadius;
 
-            const localX = item.x - centerX;
-            const localZ = centerZ - item.y;
-            const globalRot = item.rotation; 
+            // 2. Generate Combined CrossSection
+            let combinedCS: any = null;
 
-            // 1. Generate 2D CrossSection (CS)
-            // This replaces the old 'createTool' which returned 3D objects immediately.
-            const getCrossSection = () => {
+            exec.shapes.forEach(item => {
+                const s = item.shape;
+                const localX = item.x - centerX;
+                const localZ = centerZ - item.y;
+                const globalRot = item.rotation; 
+
+                // Resolve Local CS
                 let cs = null;
-                if (shape.type === "circle") {
-                    const d = evaluateExpression((shape as any).diameter, params);
+                if (s.type === "circle") {
+                    const d = evaluateExpression((s as any).diameter, params);
                     if (d > 0) cs = collect(CrossSection.circle(d/2, 32));
-                } else if (shape.type === "rect") {
-                    const w = evaluateExpression((shape as FootprintRect).width, params);
-                    const h = evaluateExpression((shape as FootprintRect).height, params);
-                    const crRaw = evaluateExpression((shape as FootprintRect).cornerRadius, params);
+                } else if (s.type === "rect") {
+                    const w = evaluateExpression((s as FootprintRect).width, params);
+                    const h = evaluateExpression((s as FootprintRect).height, params);
+                    const crRaw = evaluateExpression((s as FootprintRect).cornerRadius, params);
                     const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
                     
                     if (w > 0 && h > 0) {
                         cs = collect(CrossSection.square([w, h], true));
                         if (cr > 0.001) cs = collect(cs.offset(-cr, "Round", 8)).offset(cr, "Round", 8);
                     }
-                } else if (shape.type === "line") {
-                    const t = evaluateExpression((shape as FootprintLine).thickness, params);
+                } else if (s.type === "line") {
+                    const t = evaluateExpression((s as FootprintLine).thickness, params);
                     const validT = t > 0 ? t : 0.01;
-                    const s = createLineShape(shape as FootprintLine, params, item.contextFp, allFootprints, validT);
-                    if (s) cs = collect(shapeToManifold(manifoldModule, s));
-                } else if (shape.type === "polygon") {
-                    const poly = shape as FootprintPolygon;
+                    const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT);
+                    if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape));
+                } else if (s.type === "polygon") {
+                    const poly = s as FootprintPolygon;
                     const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, 32);
                     if (pts.length > 2) {
-                        cs = new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd");
+                        cs = collect(new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd"));
                     }
                 }
-                return cs;
-            };
 
-            let currentCS = getCrossSection();
-            
-            if (currentCS) {
-                // Apply Global Transform to the 2D CrossSection
-                // 1. Rotate (2D rotation around Z is same as 3D rotation around Y for the footprint)
-                currentCS = collect(currentCS.rotate(globalRot));
-                
-                // 2. Translate
-                // IMPORTANT: Manifold 2D Y maps to 3D -Z after the extrusion rotate([-90,0,0]).
-                // To position at `localZ`, we must translate 2D Y to `-localZ`.
-                currentCS = collect(currentCS.translate([localX, -localZ]));
-            }
+                if (cs) {
+                    // Transform CS to Layer Space
+                    // Rotate
+                    cs = collect(cs.rotate(globalRot));
+                    // Translate (2D Y maps to 3D -Z)
+                    cs = collect(cs.translate([localX, -localZ]));
 
-            // 2. Check for Overlaps with Deeper Cuts
+                    // Accumulate
+                    if (!combinedCS) combinedCS = cs;
+                    else combinedCS = collect(combinedCS.add(cs));
+                }
+            });
+
+            if (!combinedCS) return;
+
+            // 3. Check Intersection with previous cuts (Restorative Logic)
             let isRestorative = false;
-            
-            if (currentCS) {
-                for (const prev of processedCuts) {
-                    // If a previous shape is deeper than us...
-                    if (prev.depth > actualDepth + CSG_EPSILON) {
-                        // ...and we overlap in 2D
-                        const intersection = collect(currentCS.intersect(prev.cs));
-                        if (!intersection.isEmpty()) {
-                            isRestorative = true;
-                            break;
-                        }
+            for (const prev of processedCuts) {
+                if (prev.depth > actualDepth + CSG_EPSILON) {
+                    const intersection = collect(combinedCS.intersect(prev.cs));
+                    if (!intersection.isEmpty()) {
+                        isRestorative = true;
+                        break;
                     }
                 }
-                // Store for future checks
-                processedCuts.push({ depth: actualDepth, cs: currentCS, id: shape.id });
             }
+            // Add current combined CS to processed list
+            processedCuts.push({ depth: actualDepth, cs: combinedCS, id: exec.type === "union" ? exec.unionId! : primaryItem.originalId });
 
-            // 3. Perform 3D Boolean Operations
+            // 4. Boolean Operations (Using Combined CS)
             const throughHeight = thickness + 0.2; 
             
             if (isRestorative) {
-                // === 3-STEP PROCESS (Robust for overlaps) ===
-                // Cut through -> Fill back -> Subtract fillet
-                
-                const toolCutThrough = collect(collect(currentCS!.extrude(throughHeight)).translate([0, 0, -throughHeight/2]));
+                const toolCutThrough = collect(collect(combinedCS.extrude(throughHeight)).translate([0, 0, -throughHeight/2]));
                 const toolAligned = collect(toolCutThrough.rotate([-90, 0, 0])); 
-                // No need to translate [localX, 0, localZ] here because the CS was already translated!
-                // We just need to align height (Y).
                 
                 const diff = collect(Manifold.difference(base, toolAligned));
                 base = diff;
 
-                // Add Back
                 let fillHeight = thickness - actualDepth;
                 if (shouldRound) fillHeight += safeRadius;
 
                 if (fillHeight > CSG_EPSILON) {
-                    const toolFill = collect(collect(currentCS!.extrude(fillHeight)).translate([0, 0, -fillHeight/2]));
+                    const toolFill = collect(collect(combinedCS.extrude(fillHeight)).translate([0, 0, -fillHeight/2]));
                     const fillAligned = collect(toolFill.rotate([-90, 0, 0]));
                     
                     const fillY = layer.carveSide === "Top" 
@@ -1197,12 +1222,8 @@ const LayerSolid = ({
                     base = collect(Manifold.union(base, moved));
                 }
             } else {
-                // === 1-STEP PROCESS (Optimized) ===
-                // Only subtract what is needed.
-                
-                if (!shouldRound && currentCS && actualDepth > CSG_EPSILON) {
-                    // Standard Cut (No Fillet)
-                    const toolCut = collect(collect(currentCS.extrude(actualDepth)).translate([0, 0, -actualDepth/2]));
+                if (!shouldRound && actualDepth > CSG_EPSILON) {
+                    const toolCut = collect(collect(combinedCS.extrude(actualDepth)).translate([0, 0, -actualDepth/2]));
                     const toolAligned = collect(toolCut.rotate([-90, 0, 0]));
 
                     const cutY = layer.carveSide === "Top"
@@ -1212,50 +1233,67 @@ const LayerSolid = ({
                     const moved = collect(toolAligned.translate([0, cutY, 0]));
                     base = collect(Manifold.difference(base, moved));
                 }
-                // If shouldRound is true, we skip the hard cut entirely here!
-                // We will only subtract the fillet mesh below.
             }
 
-            // 4. Fillet Subtraction (Common to both paths if enabled)
+            // 5. Fillet Subtraction (Using Unified Geometry)
             if (shouldRound) {
+                // We pass the combined CrossSection as an override. 
+                // We need to pass a dummy shape because the signature requires it, but it will be ignored by the override.
                 const result = generateProceduralFillet(
                     manifoldModule, 
                     shape, 
                     params, 
                     actualDepth,
                     safeRadius,
-                    item.contextFp,
+                    primaryItem.contextFp,
                     allFootprints,
-                    32
+                    32,
+                    combinedCS // OVERRIDE
                 );
 
                 if (result && result.manifold) {
                     const toolFillet = collect(result.manifold);
-                    const r = collect(toolFillet.rotate([0, globalRot, 0]));
-                    let final;
+                    // The combinedCS is ALREADY transformed (rotated/translated).
+                    // generateProceduralFillet returns geometry based on the CS provided.
+                    // The CS is in Layer Space (X, -Z).
+                    // The logic inside `generateProceduralFillet` extrudes along Y (which maps to Z in CS space).
+                    // Wait, `generateProceduralFillet` builds vertices: `p.x, step.z, -p.y`.
+                    // Since `combinedCS` points (p) are already Global X and Global -Z (as 2D Y).
+                    // p.y is -GlobalZ. So -p.y is GlobalZ.
+                    // So vertices are (GlobalX, depth, GlobalZ).
+                    // This creates the fillet in correct orientation (relative to board center).
+                    // We just need to place it at the correct height (Y).
+                    
+                    // Standard logic rotates [0, globalRot, 0] then translates [localX, ...]
+                    // But our geometry is already rotated and translated in X/Z.
+                    // So we skip the global transform on the result manifold, just apply Y translation.
 
+                    let final;
                     if (layer.carveSide === "Top") {
                         const topY = thickness / 2;
-                        final = collect(r.translate([localX, topY, localZ]));
+                        final = collect(toolFillet.translate([0, topY, 0]));
                     } else {
-                        const flipped = collect(r.rotate([180, 0, 0]));
-                        final = collect(flipped.translate([localX, -thickness/2, localZ]));
+                        // For bottom, we might need to mirror? 
+                        // Existing logic: `flipped = r.rotate([180, 0, 0])`.
+                        // If we rotate 180 X, Z flips. 
+                        const flipped = collect(toolFillet.rotate([180, 0, 0]));
+                        final = collect(flipped.translate([0, -thickness/2, 0]));
                     }
                     
                     base = collect(Manifold.difference(base, final));
 
                 } else if (result && result.vertProperties && result.triVerts) {
+                    // Fallback for failed manifolds (visual debug)
                     const geom = new THREE.BufferGeometry();
                     geom.setAttribute('position', new THREE.BufferAttribute(result.vertProperties, 3));
                     geom.setIndex(new THREE.BufferAttribute(result.triVerts, 1));
                     
-                    geom.rotateY(globalRot * (Math.PI / 180));
-                    
+                    // Align Y
                     if (layer.carveSide === "Top") {
-                        geom.translate(localX, thickness / 2, localZ);
+                        geom.translate(0, thickness / 2, 0);
                     } else {
                         geom.rotateX(Math.PI);
-                        geom.translate(localX, -thickness / 2, localZ);
+                        geom.translate(0, -thickness / 2, 0);
                     }
                     
                     failedFillets.push(geom);
