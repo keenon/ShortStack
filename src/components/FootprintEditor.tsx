@@ -4,11 +4,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, doRectsIntersect, isShapeInSelection } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh, IconPolygon } from "./Icons";
-import { useUndoHistory } from "../hooks/useUndoHistory"; // IMPORT HOOK
+import { useUndoHistory } from "../hooks/useUndoHistory"; 
 import './FootprintEditor.css';
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
@@ -346,9 +346,15 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
       resetHistory(initialFootprint);
   }
 
-  const [selectedShapeIds, setSelectedShapeIds] = useState<string[]>([]); // UPDATED: Multi-select
+  const [selectedShapeIds, setSelectedShapeIds] = useState<string[]>([]); 
   const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   
+  // NEW: Selection Box State
+  const [selectionBox, setSelectionBox] = useState<{ start: {x: number, y: number}, current: {x: number, y: number} } | null>(null);
+  const isSelectionDragging = useRef(false);
+  const selectionStartRef = useRef<{x: number, y: number} | null>(null);
+  const selectionCurrentRef = useRef<{x: number, y: number} | null>(null);
+
   // NEW: State for point interaction
   const [hoveredPointIndex, setHoveredPointIndex] = useState<number | null>(null);
   const [scrollToPointIndex, setScrollToPointIndex] = useState<number | null>(null);
@@ -378,7 +384,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const viewBoxRef = useRef(viewBox);
   const footprint3DRef = useRef<Footprint3DViewHandle>(null);
 
-  const isDragging = useRef(false);
+  const isDragging = useRef(false); // Used for PANNING
   const hasMoved = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const dragStartViewBox = useRef({ x: 0, y: 0 });
@@ -483,38 +489,140 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
     return () => { element.removeEventListener('wheel', onWheel); };
   }, [viewMode]);
 
+  // HELPER: Screen to World Coordinates
+  const getMouseWorldPos = (clientX: number, clientY: number) => {
+      if (!wrapperRef.current) return { x: 0, y: 0 };
+      const rect = wrapperRef.current.getBoundingClientRect();
+      const scaleX = viewBoxRef.current.width / rect.width;
+      const scaleY = viewBoxRef.current.height / rect.height;
+      const x = viewBoxRef.current.x + (clientX - rect.left) * scaleX;
+      const y = viewBoxRef.current.y + (clientY - rect.top) * scaleY;
+      return { x, y };
+  };
+
   const handleMouseDown = (e: React.MouseEvent) => {
     if (viewMode !== "2D") return;
-    if (e.button !== 0) return;
-    isDragging.current = true;
-    hasMoved.current = false;
-    dragStart.current = { x: e.clientX, y: e.clientY };
-    dragStartViewBox.current = { x: viewBox.x, y: viewBox.y };
-    window.addEventListener('mousemove', handleGlobalMouseMove);
-    window.addEventListener('mouseup', handleGlobalMouseUp);
+    
+    // CHANGED: Right Click (2) or Middle Click (1) for PAN
+    if (e.button === 1 || e.button === 2) {
+        e.preventDefault();
+        isDragging.current = true;
+        hasMoved.current = false;
+        dragStart.current = { x: e.clientX, y: e.clientY };
+        dragStartViewBox.current = { x: viewBox.x, y: viewBox.y };
+        window.addEventListener('mousemove', handleGlobalMouseMove);
+        window.addEventListener('mouseup', handleGlobalMouseUp);
+        return;
+    }
+
+    // NEW: Left Click (0) for SELECTION BOX
+    if (e.button === 0) {
+        // If Shift/Ctrl is NOT held, clear selection when clicking background
+        const isMulti = e.shiftKey || e.metaKey || e.ctrlKey;
+        if (!isMulti) {
+            setSelectedShapeIds([]);
+        }
+
+        isSelectionDragging.current = true;
+        const startPos = getMouseWorldPos(e.clientX, e.clientY);
+        
+        // Use refs for robust event handling, bypassing state closures
+        selectionStartRef.current = startPos;
+        selectionCurrentRef.current = startPos;
+        setSelectionBox({ start: startPos, current: startPos });
+
+        window.addEventListener('mousemove', handleGlobalMouseMove);
+        window.addEventListener('mouseup', handleGlobalMouseUp);
+    }
   };
 
   const handleGlobalMouseMove = (e: MouseEvent) => {
-    if (!isDragging.current || !wrapperRef.current) return;
-    const dx = e.clientX - dragStart.current.x;
-    const dy = e.clientY - dragStart.current.y;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved.current = true;
-    const rect = wrapperRef.current.getBoundingClientRect();
-    const scaleX = viewBoxRef.current.width / rect.width;
-    const scaleY = viewBoxRef.current.height / rect.height;
-    const newX = dragStartViewBox.current.x - dx * scaleX;
-    const newY = dragStartViewBox.current.y - dy * scaleY;
-    setViewBox(prev => ({ ...prev, x: newX, y: newY }));
+    // 1. PANNING LOGIC
+    if (isDragging.current && wrapperRef.current) {
+        const dx = e.clientX - dragStart.current.x;
+        const dy = e.clientY - dragStart.current.y;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved.current = true;
+        const rect = wrapperRef.current.getBoundingClientRect();
+        const scaleX = viewBoxRef.current.width / rect.width;
+        const scaleY = viewBoxRef.current.height / rect.height;
+        const newX = dragStartViewBox.current.x - dx * scaleX;
+        const newY = dragStartViewBox.current.y - dy * scaleY;
+        setViewBox(prev => ({ ...prev, x: newX, y: newY }));
+        return;
+    }
+
+    // 2. SELECTION BOX LOGIC
+    if (isSelectionDragging.current && wrapperRef.current) {
+        const currentPos = getMouseWorldPos(e.clientX, e.clientY);
+        selectionCurrentRef.current = currentPos;
+        
+        // Update visual state (batched by React)
+        if (selectionStartRef.current) {
+            setSelectionBox({ start: selectionStartRef.current, current: currentPos });
+        }
+    }
   };
 
-  const handleGlobalMouseUp = (_e: MouseEvent) => {
-    isDragging.current = false;
+  const handleGlobalMouseUp = (e: MouseEvent) => {
+    // 1. STOP PANNING
+    if (isDragging.current) {
+        isDragging.current = false;
+    }
+
+    // 2. FINISH SELECTION BOX
+    if (isSelectionDragging.current) {
+        isSelectionDragging.current = false;
+        
+        if (selectionStartRef.current && selectionCurrentRef.current) {
+            const start = selectionStartRef.current;
+            const current = selectionCurrentRef.current;
+            
+            const rect = { 
+                x1: start.x, 
+                y1: start.y, 
+                x2: current.x, 
+                y2: current.y 
+            };
+            
+            const newSelectedIds: string[] = [];
+            
+            // Check Intersection with Shapes using precise logic
+            footprintRef.current.shapes.forEach(shape => {
+                if (shape.type === "boardOutline" && !footprintRef.current.isBoard) return;
+                
+                // Use the new precise check which handles "hollow" outlines properly
+                if (isShapeInSelection(rect, shape, params, footprintRef.current, allFootprints)) {
+                    newSelectedIds.push(shape.id);
+                }
+            });
+
+            // Check Intersection with Meshes
+            (footprintRef.current.meshes || []).forEach(mesh => {
+                const px = evaluateExpression(mesh.x, params);
+                const py = -evaluateExpression(mesh.y, params); // Invert Y for Visual
+                // Simple point check for mesh origin
+                if (px >= Math.min(rect.x1, rect.x2) && px <= Math.max(rect.x1, rect.x2) &&
+                    py >= Math.min(rect.y1, rect.y2) && py <= Math.max(rect.y1, rect.y2)) {
+                    newSelectedIds.push(mesh.id);
+                }
+            });
+
+            const isMulti = e.shiftKey || e.metaKey || e.ctrlKey;
+            if (isMulti) {
+                setSelectedShapeIds(prev => Array.from(new Set([...prev, ...newSelectedIds])));
+            } else {
+                setSelectedShapeIds(newSelectedIds);
+            }
+        }
+
+        // Cleanup
+        setSelectionBox(null);
+        selectionStartRef.current = null;
+        selectionCurrentRef.current = null;
+    }
+
     window.removeEventListener('mousemove', handleGlobalMouseMove);
     window.removeEventListener('mouseup', handleGlobalMouseUp);
-    if (!hasMoved.current) {
-        if (clickedShapeId.current) setSelectedShapeIds([clickedShapeId.current]);
-        else setSelectedShapeIds([]);
-    }
     clickedShapeId.current = null;
   };
 
@@ -826,6 +934,17 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
 
         if (isInput) return;
 
+        // SELECT ALL
+        if (isCtrl && e.key.toLowerCase() === 'a') {
+            e.preventDefault();
+            const allIds = [
+                ...footprintRef.current.shapes.map(s => s.id),
+                ...(footprintRef.current.meshes || []).map(m => m.id)
+            ];
+            setSelectedShapeIds(allIds);
+            return;
+        }
+
         if (isCtrl && e.key.toLowerCase() === 'c') {
             e.preventDefault();
             handleCopy();
@@ -839,7 +958,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
             handleDuplicate();
         }
         
-        // NEW: Delete Key logic
+        // DELETE Key logic
         if (e.key === "Delete" || e.key === "Backspace") {
             selectedShapeIds.forEach(id => {
                 if (footprintRef.current.shapes.some(s => s.id === id)) {
@@ -1348,6 +1467,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                     className="fp-canvas" 
                     viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
                     onMouseDown={handleMouseDown}
+                    style={{ cursor: isDragging.current ? 'grabbing' : 'default' }}
                 >
                     <defs>
                     <pattern id="grid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
@@ -1416,8 +1536,24 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                         }
                         return null;
                     })}
+
+                    {/* NEW: Selection Box Overlay */}
+                    {selectionBox && (
+                        <rect 
+                            x={Math.min(selectionBox.start.x, selectionBox.current.x)}
+                            y={Math.min(selectionBox.start.y, selectionBox.current.y)}
+                            width={Math.abs(selectionBox.current.x - selectionBox.start.x)}
+                            height={Math.abs(selectionBox.current.y - selectionBox.start.y)}
+                            fill="rgba(100, 108, 255, 0.1)"
+                            stroke="#646cff"
+                            strokeWidth={1}
+                            strokeDasharray="4,2"
+                            vectorEffect="non-scaling-stroke"
+                            pointerEvents="none"
+                        />
+                    )}
                 </svg>
-                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan | Drag Handles | Ctrl+Drag Point for curve</div>
+                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Left Drag: Select | Right/Middle Drag: Pan | Scroll: Zoom</div>
             </div>
             
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>

@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import * as math from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape } from "../types";
 
 export function modifyExpression(expression: string, delta: number): string {
   if (delta === 0) return expression;
@@ -132,6 +132,327 @@ export const calcMid = (v1: string, v2: string) => {
     }
     return `(${v1} + ${v2}) / 2`;
 };
+
+// NEW: AABB Interface
+export interface Rect { x1: number, y1: number, x2: number, y2: number }
+
+// NEW: Check if two rectangles intersect
+export function doRectsIntersect(r1: Rect, r2: Rect): boolean {
+    const r1MinX = Math.min(r1.x1, r1.x2);
+    const r1MaxX = Math.max(r1.x1, r1.x2);
+    const r1MinY = Math.min(r1.y1, r1.y2);
+    const r1MaxY = Math.max(r1.y1, r1.y2);
+
+    const r2MinX = Math.min(r2.x1, r2.x2);
+    const r2MaxX = Math.max(r2.x1, r2.x2);
+    const r2MinY = Math.min(r2.y1, r2.y2);
+    const r2MaxY = Math.max(r2.y1, r2.y2);
+
+    return !(r2MinX > r1MaxX || 
+             r2MaxX < r1MinX || 
+             r2MinY > r1MaxY || 
+             r2MaxY < r1MinY);
+}
+
+// NEW: Calculate AABB for a shape in Visual Coordinates (where Y is inverted)
+export function getShapeAABB(
+    shape: FootprintShape,
+    params: Parameter[],
+    rootFootprint: Footprint,
+    allFootprints: Footprint[]
+): Rect | null {
+    
+    // VISUAL COORDINATES NOTE:
+    // The SVG renderer flips Y (`cy={-cy}`, `y={-y}`). 
+    // We must apply the same transform here to match the selection box.
+    // Visual X = Math X
+    // Visual Y = -Math Y
+
+    if (shape.type === "circle") {
+        const cx = evaluateExpression((shape as any).x, params);
+        const cy = -evaluateExpression((shape as any).y, params); // Invert Y
+        const d = evaluateExpression((shape as any).diameter, params);
+        const r = d / 2;
+        return { x1: cx - r, y1: cy - r, x2: cx + r, y2: cy + r };
+    }
+
+    if (shape.type === "rect") {
+        const cx = evaluateExpression((shape as any).x, params);
+        const cy = -evaluateExpression((shape as any).y, params); // Invert Y
+        const w = evaluateExpression((shape as any).width, params);
+        const h = evaluateExpression((shape as any).height, params);
+        const angle = evaluateExpression((shape as any).angle, params);
+
+        // Calculate corners relative to center
+        const hw = w / 2;
+        const hh = h / 2;
+        // In visual space, +Y is down. 
+        // Renderer uses `rotate(${-angle})`. Positive math angle = CCW.
+        // SVG rotate(-a) is CCW.
+        // We simulate the rotation on 4 corners.
+        const rad = -angle * (Math.PI / 180);
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        const corners = [
+            { x: hw, y: hh },
+            { x: -hw, y: hh },
+            { x: -hw, y: -hh },
+            { x: hw, y: -hh }
+        ];
+
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+
+        corners.forEach(p => {
+            // Rotate
+            const rx = p.x * cos - p.y * sin;
+            const ry = p.x * sin + p.y * cos;
+            // Translate
+            const fx = cx + rx;
+            const fy = cy + ry;
+            
+            minX = Math.min(minX, fx);
+            maxX = Math.max(maxX, fx);
+            minY = Math.min(minY, fy);
+            maxY = Math.max(maxY, fy);
+        });
+
+        return { x1: minX, y1: minY, x2: maxX, y2: maxY };
+    }
+
+    // Shapes defined by points (Line, Polygon, BoardOutline)
+    let points: Point[] = [];
+    let originX = 0;
+    let originY = 0;
+
+    if (shape.type === "line") {
+        points = (shape as any).points || [];
+        // Lines in current renderer do NOT use origin X/Y offset, they use points directly resolved.
+        // But `FootprintLine` has x/y properties. Renderer ignores them. We follow renderer.
+        originX = 0;
+        originY = 0;
+    } else if (shape.type === "polygon" || shape.type === "boardOutline") {
+        points = (shape as any).points || [];
+        originX = evaluateExpression((shape as any).x, params);
+        originY = evaluateExpression((shape as any).y, params);
+    } else if (shape.type === "wireGuide") {
+        // Just a point
+        const cx = evaluateExpression((shape as any).x, params);
+        const cy = -evaluateExpression((shape as any).y, params);
+        const r = 2; // Arbitrary small size
+        return { x1: cx - r, y1: cy - r, x2: cx + r, y2: cy + r };
+    } else if (shape.type === "footprint") {
+        // Recursive reference: approximate as a small box at origin?
+        // Or recursively calculate bounds? 
+        // For simplicity in selection, just use a box around center.
+        const cx = evaluateExpression((shape as any).x, params);
+        const cy = -evaluateExpression((shape as any).y, params);
+        const r = 5;
+        return { x1: cx - r, y1: cy - r, x2: cx + r, y2: cy + r };
+    }
+
+    if (points.length > 0) {
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        
+        points.forEach(p => {
+            const res = resolvePoint(p, rootFootprint, allFootprints, params);
+            // Apply Origin and Invert Y
+            const fx = originX + res.x;
+            const fy = -(originY + res.y);
+            
+            minX = Math.min(minX, fx);
+            maxX = Math.max(maxX, fx);
+            minY = Math.min(minY, fy);
+            maxY = Math.max(maxY, fy);
+        });
+
+        // Safe check for valid bounds
+        if (minX === Infinity) return null;
+        
+        // Add a little padding for thin lines
+        const padding = 1;
+        return { x1: minX - padding, y1: minY - padding, x2: maxX + padding, y2: maxY + padding };
+    }
+
+    return null;
+}
+
+// NEW: Helper to check if point is in rect
+function isPointInRect(p: {x:number, y:number}, r: Rect) {
+    const minX = Math.min(r.x1, r.x2);
+    const maxX = Math.max(r.x1, r.x2);
+    const minY = Math.min(r.y1, r.y2);
+    const maxY = Math.max(r.y1, r.y2);
+    return p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY;
+}
+
+// NEW: Helper to check segment intersection
+function doSegmentsIntersect(p0: {x:number, y:number}, p1: {x:number, y:number}, p2: {x:number, y:number}, p3: {x:number, y:number}): boolean {
+    const s1_x = p1.x - p0.x;     const s1_y = p1.y - p0.y;
+    const s2_x = p3.x - p2.x;     const s2_y = p3.y - p2.y;
+    const s = (-s1_y * (p0.x - p2.x) + s1_x * (p0.y - p2.y)) / (-s2_x * s1_y + s1_x * s2_y);
+    const t = ( s2_x * (p0.y - p2.y) - s2_y * (p0.x - p2.x)) / (-s2_x * s1_y + s1_x * s2_y);
+    return (s >= 0 && s <= 1 && t >= 0 && t <= 1);
+}
+
+// NEW: Check if segment intersects rect (or is contained)
+function segmentIntersectsRect(p1: {x:number, y:number}, p2: {x:number, y:number}, r: Rect): boolean {
+    if (isPointInRect(p1, r) || isPointInRect(p2, r)) return true;
+    
+    const minX = Math.min(r.x1, r.x2);
+    const maxX = Math.max(r.x1, r.x2);
+    const minY = Math.min(r.y1, r.y2);
+    const maxY = Math.max(r.y1, r.y2);
+    
+    // 4 Box Segments
+    const boxSegs = [
+        [{x:minX, y:minY}, {x:maxX, y:minY}],
+        [{x:maxX, y:minY}, {x:maxX, y:maxY}],
+        [{x:maxX, y:maxY}, {x:minX, y:maxY}],
+        [{x:minX, y:maxY}, {x:minX, y:minY}]
+    ];
+    
+    return boxSegs.some(s => doSegmentsIntersect(p1, p2, s[0], s[1]));
+}
+
+// NEW: Advanced Intersection Check
+// Returns true if:
+// 1. Box intersects shape edges
+// 2. Shape is fully inside Box
+// Returns FALSE if:
+// 1. Box is strictly INSIDE a closed shape (e.g. inside a board outline)
+// 2. No overlap at all
+export function isShapeInSelection(
+    selectionBox: Rect,
+    shape: FootprintShape,
+    params: Parameter[],
+    rootFootprint: Footprint,
+    allFootprints: Footprint[]
+): boolean {
+    // 1. Broad Phase: AABB Check
+    const aabb = getShapeAABB(shape, params, rootFootprint, allFootprints);
+    if (!aabb || !doRectsIntersect(selectionBox, aabb)) return false;
+
+    // 2. Narrow Phase
+    const boxMinX = Math.min(selectionBox.x1, selectionBox.x2);
+    const boxMaxX = Math.max(selectionBox.x1, selectionBox.x2);
+    const boxMinY = Math.min(selectionBox.y1, selectionBox.y2);
+    const boxMaxY = Math.max(selectionBox.y1, selectionBox.y2);
+
+    // CIRCLE
+    if (shape.type === "circle") {
+        const cx = evaluateExpression((shape as any).x, params);
+        const cy = -evaluateExpression((shape as any).y, params); // Visual Y
+        const r = evaluateExpression((shape as any).diameter, params) / 2;
+        
+        // Find closest point on Box to Center
+        const closeX = Math.max(boxMinX, Math.min(cx, boxMaxX));
+        const closeY = Math.max(boxMinY, Math.min(cy, boxMaxY));
+        
+        const dx = cx - closeX;
+        const dy = cy - closeY;
+        const distSq = dx*dx + dy*dy;
+        
+        if (distSq > r*r) return false; // No intersection with area
+        
+        // REJECTION: If Box is fully inside Circle
+        const corners = [
+            {x:boxMinX, y:boxMinY}, {x:boxMaxX, y:boxMinY},
+            {x:boxMaxX, y:boxMaxY}, {x:boxMinX, y:boxMaxY}
+        ];
+        const allCornersIn = corners.every(c => (c.x-cx)**2 + (c.y-cy)**2 < r*r);
+        return !allCornersIn;
+    }
+
+    if (shape.type === "wireGuide") return true; // AABB check sufficient
+
+    // RECT, LINE, POLYGON, BOARD OUTLINE -> Discretize to Segments
+    let segments: {p1: {x:number, y:number}, p2: {x:number, y:number}}[] = [];
+    
+    if (shape.type === "rect") {
+        const cx = evaluateExpression((shape as any).x, params);
+        const cy = -evaluateExpression((shape as any).y, params);
+        const w = evaluateExpression((shape as any).width, params);
+        const h = evaluateExpression((shape as any).height, params);
+        const angle = evaluateExpression((shape as any).angle, params);
+        
+        const rad = -angle * (Math.PI / 180);
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        
+        const hw = w/2; const hh = h/2;
+        const pts = [
+            {x: hw, y: hh}, {x: -hw, y: hh}, {x: -hw, y: -hh}, {x: hw, y: -hh}
+        ].map(p => ({
+            x: cx + (p.x * cos - p.y * sin),
+            y: cy + (p.x * sin + p.y * cos)
+        }));
+        
+        for(let i=0; i<4; i++) segments.push({p1: pts[i], p2: pts[(i+1)%4]});
+        
+    } else if (shape.type === "line" || shape.type === "boardOutline" || shape.type === "polygon") {
+        const ptsRaw = (shape as any).points || [];
+        if (ptsRaw.length < 2) return false;
+        
+        // Calculate Visual Global Coordinates for all points
+        const visualPoints = ptsRaw.map((p: any) => {
+             const res = resolvePoint(p, rootFootprint, allFootprints, params);
+             const sx = (shape.type === "line") ? 0 : evaluateExpression((shape as any).x, params);
+             const sy = (shape.type === "line") ? 0 : evaluateExpression((shape as any).y, params);
+             
+             // Visual X = Math X; Visual Y = -Math Y
+             const vx = sx + res.x;
+             const vy = -(sy + res.y);
+             
+             return {
+                 x: vx,
+                 y: vy,
+                 hOut: res.handleOut ? {x: res.handleOut.x, y: -res.handleOut.y} : undefined,
+                 hIn: res.handleIn ? {x: res.handleIn.x, y: -res.handleIn.y} : undefined
+             };
+        });
+
+        // Discretize curves
+        const isClosed = (shape.type !== "line");
+        const loopLen = isClosed ? visualPoints.length : visualPoints.length - 1;
+
+        for(let i=0; i < loopLen; i++) {
+            const curr = visualPoints[i];
+            const next = visualPoints[(i+1) % visualPoints.length];
+            
+            if (curr.hOut || next.hIn) {
+                // Bezier Discretization
+                const p0 = curr;
+                const p3 = next;
+                const p1 = { x: curr.x + (curr.hOut?.x||0), y: curr.y + (curr.hOut?.y||0) };
+                const p2 = { x: next.x + (next.hIn?.x||0), y: next.y + (next.hIn?.y||0) };
+                
+                const steps = 8;
+                let prevP = p0;
+                for(let s=1; s<=steps; s++) {
+                    const t = s/steps;
+                    const tx = bezier1D(p0.x, p1.x, p2.x, p3.x, t);
+                    const ty = bezier1D(p0.y, p1.y, p2.y, p3.y, t);
+                    const tp = {x: tx, y: ty};
+                    segments.push({p1: prevP, p2: tp});
+                    prevP = tp;
+                }
+            } else {
+                segments.push({p1: curr, p2: next});
+            }
+        }
+    } else if (shape.type === "footprint") {
+        // For Footprint References, checking overlap with AABB is usually sufficient and expected
+        return true;
+    }
+
+    // Check Segments against Selection Box
+    for(const s of segments) {
+        if (segmentIntersectsRect(s.p1, s.p2, selectionBox)) return true;
+    }
+
+    return false;
+}
 
 // NEW: Cubic Bezier calculation for 1D coordinate
 export function bezier1D(p0: number, p1: number, p2: number, p3: number, t: number): number {
