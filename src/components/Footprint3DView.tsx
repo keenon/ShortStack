@@ -454,16 +454,18 @@ function generateProceduralFillet(
     contextFp: Footprint,
     allFootprints: Footprint[],
     resolution = 32,
-    overrideCS?: any // NEW: Optional pre-computed CrossSection (Manifold object)
+    overrideCS?: any
 ) {
     let minDimension = Infinity;
     const rawVertices: number[] = [];
     const rawIndices: number[] = [];
 
+    // Store boundary contours for validity checks in the triangulation step
+    let boundaryLoops: THREE.Vector2[][] = [];
+
     // -----------------------------------------------------------------------
     // NEW: Cyclic Optimal Triangulation
-    // Runs the DP Tiling algorithm multiple times to find the best "Seam"
-    // to prevent twisting on low-poly shapes (like triangles/rectangles).
+    // Runs the DP Tiling algorithm multiple times to find the best "Seam".
     // -----------------------------------------------------------------------
     const triangulateRobust = (polyA: THREE.Vector2[], polyB: THREE.Vector2[], idxStartA: number, idxStartB: number) => {
         const lenA = polyA.length;
@@ -477,16 +479,14 @@ function generateProceduralFillet(
         const idx = (r: number, c: number) => r * dimCol + c;
 
         // Area Weight Constant
-        // Penalizes large triangles to prevent "shortcuts" across concave voids.
-        // A value of 1.0-10.0 keeps the solver focused on the ribbon path.
         const AREA_WEIGHT = 4.0; 
 
-        // Helper: Calculate 2x Area of triangle (to avoid 0.5 multiplication repeatedly)
         const getTriArea2x = (p1: THREE.Vector2, p2: THREE.Vector2, p3: THREE.Vector2) => {
             return Math.abs(p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
         };
 
-        const solveForOffset = (offsetB: number) => {
+        // Added 'strictMode' flag to allow fallback if geometry is impossible
+        const solveForOffset = (offsetB: number, strictMode: boolean) => {
             costTable.fill(Infinity);
             fromTable.fill(0);
             costTable[0] = 0; 
@@ -498,15 +498,100 @@ function generateProceduralFillet(
                     // Current vertices being considered
                     const pA = polyA[i % lenA];
                     const pB = polyB[(j + offsetB) % lenB]; 
+
+                    // ---------------------------------------------------------
+                    // VALIDITY CHECK: Prevent edges from crossing outside the polygon
+                    // Only run if strictMode is true
+                    // ---------------------------------------------------------
+                    if (strictMode && boundaryLoops.length > 0) {
+                        const midX = (pA.x + pB.x) * 0.5;
+                        const midY = (pA.y + pB.y) * 0.5;
+
+                        // 1. Point in Polygon Check (Midpoint)
+                        // Must handle points ON the boundary robustly (distance check)
+                        let inside = false;
+                        let onBoundary = false;
+                        
+                        for (const loop of boundaryLoops) {
+                            for (let k = 0, l = loop.length - 1; k < loop.length; l = k++) {
+                                const xi = loop[k].x, yi = loop[k].y;
+                                const xj = loop[l].x, yj = loop[l].y;
+
+                                // A. Standard Ray Casting
+                                const intersect = ((yi > midY) !== (yj > midY)) 
+                                    && (midX < (xj - xi) * (midY - yi) / (yj - yi) + xi);
+                                if (intersect) inside = !inside;
+
+                                // B. On-Segment Check (Distance Squared)
+                                // Only check if not already found on a boundary
+                                if (!onBoundary) {
+                                    const l2 = (xj - xi) ** 2 + (yj - yi) ** 2;
+                                    if (l2 > 1e-9) {
+                                        let t = ((midX - xi) * (xj - xi) + (midY - yi) * (yj - yi)) / l2;
+                                        t = Math.max(0, Math.min(1, t));
+                                        const dx = midX - (xi + t * (xj - xi));
+                                        const dy = midY - (yi + t * (yj - yi));
+                                        // 1e-6 tolerance for being "on" the wall
+                                        if ((dx*dx + dy*dy) < 1e-6) onBoundary = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // If it's on the boundary, it's valid regardless of ray cast result
+                        if (onBoundary) inside = true;
+                        
+                        if (!inside) continue; 
+
+                        // 2. Line Segment Intersection Check
+                        let intersectsBoundary = false;
+                        const minX = Math.min(pA.x, pB.x) - 0.001;
+                        const maxX = Math.max(pA.x, pB.x) + 0.001;
+                        const minY = Math.min(pA.y, pB.y) - 0.001;
+                        const maxY = Math.max(pA.y, pB.y) + 0.001;
+                        const dAx = pB.x - pA.x;
+                        const dAy = pB.y - pA.y;
+
+                        outerLoop:
+                        for (const loop of boundaryLoops) {
+                            for (let k = 0; k < loop.length; k++) {
+                                const b1 = loop[k];
+                                const b2 = loop[(k + 1) % loop.length];
+
+                                // AABB Optimization
+                                const bMinX = Math.min(b1.x, b2.x);
+                                const bMaxX = Math.max(b1.x, b2.x);
+                                if (maxX < bMinX || minX > bMaxX) continue;
+                                const bMinY = Math.min(b1.y, b2.y);
+                                const bMaxY = Math.max(b1.y, b2.y);
+                                if (maxY < bMinY || minY > bMaxY) continue;
+
+                                // Strict Intersection
+                                const dBx = b2.x - b1.x;
+                                const dBy = b2.y - b1.y;
+                                const det = dAx * dBy - dAy * dBx;
+
+                                if (det !== 0) {
+                                    const t = ((b1.x - pA.x) * dBy - (b1.y - pA.y) * dBx) / det;
+                                    const u = ((b1.x - pA.x) * dAy - (b1.y - pA.y) * dAx) / det;
+                                    // Range excludes endpoints to allow sharing vertices
+                                    if (t > 0.001 && t < 0.999 && u > 0.001 && u < 0.999) {
+                                        intersectsBoundary = true;
+                                        break outerLoop;
+                                    }
+                                }
+                            }
+                        }
+                        if (intersectsBoundary) continue;
+                    }
+
                     const distSq = pA.distanceToSquared(pB);
 
-                    // Transition 1: Move along Poly A (i-1 -> i)
-                    // Triangle created: (A[i-1], B[j], A[i])
+                    // Transition 1: Move along Poly A
                     if (i > 0) {
                         const c = costTable[idx(i - 1, j)];
                         if (c !== Infinity) {
                             const pPrevA = polyA[(i - 1) % lenA];
-                            // Add Area Cost to prevent degenerate giant triangles
                             const triArea = getTriArea2x(pPrevA, pB, pA) * 0.5;
                             const newCost = c + distSq + (triArea * AREA_WEIGHT);
 
@@ -517,13 +602,11 @@ function generateProceduralFillet(
                         }
                     }
 
-                    // Transition 2: Move along Poly B (j-1 -> j)
-                    // Triangle created: (A[i], B[j-1], B[j])
+                    // Transition 2: Move along Poly B
                     if (j > 0) {
                         const c = costTable[idx(i, j - 1)];
                         if (c !== Infinity) {
                             const pPrevB = polyB[(j - 1 + offsetB) % lenB];
-                            // Add Area Cost to prevent degenerate giant triangles
                             const triArea = getTriArea2x(pA, pPrevB, pB) * 0.5;
                             const newCost = c + distSq + (triArea * AREA_WEIGHT);
                             
@@ -538,14 +621,28 @@ function generateProceduralFillet(
             return costTable[idx(lenA, lenB)];
         };
 
-        const generateIndices = (offsetB: number) => {
-            solveForOffset(offsetB); 
+        const generateIndices = (offsetB: number, strictMode: boolean) => {
+            solveForOffset(offsetB, strictMode); 
             let curI = lenA;
             let curJ = lenB;
-            while (curI > 0 || curJ > 0) {
-                const dir = fromTable[idx(curI, curJ)];
+            
+            // --- INFINITE LOOP PROTECTION ---
+            let safety = 0;
+            const MAX_STEPS = (lenA + lenB) * 2; 
+
+            while ((curI > 0 || curJ > 0) && safety++ < MAX_STEPS) {
+                let dir = fromTable[idx(curI, curJ)];
+                
+                // --- FALLBACK FOR BROKEN PATHS ---
+                // If strict mode blocked all paths to this cell, dir will be 0.
+                if (dir === 0) {
+                     if (curI > 0) dir = 1;
+                     else dir = 2;
+                }
+
                 const vA_curr = idxStartA + (curI % lenA);
                 const vB_curr = idxStartB + ((curJ + offsetB) % lenB);
+                
                 if (dir === 1) {
                     const vA_prev = idxStartA + safeMod(curI - 1, lenA);
                     rawIndices.push(vA_prev, vB_curr, vA_curr);
@@ -556,12 +653,18 @@ function generateProceduralFillet(
                     curJ--;
                 }
             }
+
+            if (safety >= MAX_STEPS) {
+                console.warn("Triangulation emergency exit: Max steps reached.");
+            }
         };
 
         let bestOffset = 0;
         let minTotalCost = Infinity;
         let geoBestOffset = 0;
         let minGeoDist = Infinity;
+        
+        // Find geometric best start to limit search space
         for(let i=0; i<lenB; i++) {
             const d = polyA[0].distanceToSquared(polyB[i]);
             if(d < minGeoDist) { minGeoDist = d; geoBestOffset = i; }
@@ -574,11 +677,10 @@ function generateProceduralFillet(
             searchCount = 20;
         }
 
+        // --- FIRST PASS: STRICT MODE ---
         for (let k = 0; k < searchCount; k++) {
             const offset = safeMod(searchStart + k, lenB);
-            const cost = solveForOffset(offset);
-            
-            // Add seam cost (distance between start points)
+            const cost = solveForOffset(offset, true);
             const pA = polyA[0];
             const pB = polyB[offset];
             const seamDistSq = pA.distanceToSquared(pB);
@@ -589,7 +691,31 @@ function generateProceduralFillet(
                 bestOffset = offset;
             }
         }
-        generateIndices(bestOffset);
+
+        // --- SECOND PASS: PERMISSIVE FALLBACK ---
+        // If Strict Mode failed (Cost is Infinity), run again without checks.
+        let useStrict = true;
+        if (minTotalCost === Infinity) {
+            // DEBUG: Why did we fail?
+            console.warn(`[Fillet] Strict triangulation failed. Pts A: ${lenA}, B: ${lenB}. Fallback enabled.`);
+            
+            useStrict = false;
+            for (let k = 0; k < searchCount; k++) {
+                const offset = safeMod(searchStart + k, lenB);
+                const cost = solveForOffset(offset, false);
+                const pA = polyA[0];
+                const pB = polyB[offset];
+                const seamDistSq = pA.distanceToSquared(pB);
+                const totalCost = cost + seamDistSq;
+
+                if (totalCost < minTotalCost) {
+                    minTotalCost = totalCost;
+                    bestOffset = offset;
+                }
+            }
+        }
+
+        generateIndices(bestOffset, useStrict);
     };
 
     // If overrideCS provided OR shape is polygon, use the generalized Polygon logic
@@ -599,10 +725,10 @@ function generateProceduralFillet(
 
         if (overrideCS) {
             baseCS = overrideCS;
-            // Extract the 0-offset contour from the override Manifold object for triangulation
             const rawPolys = baseCS.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
-            if(rawPolys.length > 0) basePoints = rawPolys[0]; // Assume single contour for now or primary
-            // Fix winding if needed
+            if(rawPolys.length > 0) basePoints = rawPolys[0]; 
+            boundaryLoops = rawPolys;
+
             let area = 0;
             for (let i = 0; i < basePoints.length; i++) {
                 const j = (i + 1) % basePoints.length;
@@ -615,6 +741,8 @@ function generateProceduralFillet(
             const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
 
             basePoints = baseData.points;
+            boundaryLoops = [basePoints];
+
             let area = 0;
             for (let i = 0; i < basePoints.length; i++) {
                 const j = (i + 1) % basePoints.length;
@@ -624,14 +752,10 @@ function generateProceduralFillet(
                 basePoints.reverse();
             }
 
-            if (basePoints.length < 3) {
-                console.warn("Fillet generation failed: insufficient polygon points.");
-                return null;
-            }
+            if (basePoints.length < 3) return null;
             baseCS = new manifoldModule.CrossSection([basePoints.map(p => [p.x, p.y])], "EvenOdd");
         }
         
-        // Safety for empty geometry
         if (!basePoints || basePoints.length < 3) return null;
 
         const steps: { z: number, offset: number }[] = [];
@@ -651,22 +775,18 @@ function generateProceduralFillet(
             if (step.offset > 0.001) {
                 const cs = baseCS.offset(-step.offset, "Miter", 2.0);
                 const rawPolys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
-                // Clean up duplicate points which confuse triangulation
                 processedPolys = rawPolys.map((poly: any) => {
                     const clean = [poly[0]];
                     for(let i=1; i<poly.length; i++) {
                         if(poly[i].distanceToSquared(clean[clean.length-1]) > 1e-9) clean.push(poly[i]);
                     }
                     if(clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) clean.pop();
-                    
-                    // Ensure consistent winding order (CCW/Positive Area)
                     let area = 0;
                     for (let i = 0; i < clean.length; i++) {
                         const j = (i + 1) % clean.length;
                         area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
                     }
                     if (area < 0) clean.reverse();
-
                     return clean;
                 }).filter((p: any) => p.length >= 3);
             } else {
@@ -679,7 +799,6 @@ function generateProceduralFillet(
             });
         });
 
-        // Triangulate Top and Bottom Caps
         const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
             let offset = startIdx;
             contours.forEach(c => {
@@ -694,11 +813,15 @@ function generateProceduralFillet(
         triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
         triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
 
-        // Loft between layers
         for(let l=0; l<layerData.length-1; l++) {
             const up = layerData[l];
             const low = layerData[l+1];
             
+            // DEBUG: Check for Topology Mismatch
+            if (up.contours.length !== low.contours.length) {
+                console.warn(`[Fillet] Topology mismatch at depth ${up.z}. Up: ${up.contours.length} polys, Low: ${low.contours.length} polys. Artifacts likely.`);
+            }
+
             low.contours.forEach((lowPoly, iLow) => {
                 const lowCenter = new THREE.Vector2();
                 lowPoly.forEach(p => lowCenter.add(p));
@@ -719,7 +842,7 @@ function generateProceduralFillet(
             });
         }
     } else {
-        // ... (Existing primitive logic remains unchanged) ...
+        // ... (Primitive logic remains unchanged) ...
         const getContour = (offset: number): THREE.Vector2[] => {
             let rawPoints: THREE.Vector2[] = [];
             
@@ -737,26 +860,21 @@ function generateProceduralFillet(
                 const wRaw = evaluateExpression((shape as FootprintRect).width, params);
                 const hRaw = evaluateExpression((shape as FootprintRect).height, params);
                 minDimension = Math.min(wRaw, hRaw);
-                
                 const w = Math.max(0.001, wRaw - offset * 2);
                 const h = Math.max(0.001, hRaw - offset * 2);
                 const crRaw = evaluateExpression((shape as FootprintRect).cornerRadius, params);
-                
                 const halfW = w / 2;
                 const halfH = h / 2;
                 let cr = Math.max(0, crRaw - offset);
                 const limit = Math.min(halfW, halfH);
                 if (cr > limit) cr = limit;
-                
                 const segCorner = 32; 
-                
                 const quadrants = [
                     { x: halfW - cr, y: halfH - cr, startAng: 0 },         
                     { x: -halfW + cr, y: halfH - cr, startAng: Math.PI/2 },
                     { x: -halfW + cr, y: -halfH + cr, startAng: Math.PI }, 
                     { x: halfW - cr, y: -halfH + cr, startAng: 1.5*Math.PI}
                 ];
-
                 quadrants.forEach(q => {
                     const startAng = q.startAng;
                     const endAng = startAng + Math.PI/2;
@@ -766,7 +884,6 @@ function generateProceduralFillet(
                     const p2Y = q.y + cr * Math.sin(endAng);
                     const cpX = q.x + cr * (Math.cos(startAng) + Math.cos(endAng));
                     const cpY = q.y + cr * (Math.sin(startAng) + Math.sin(endAng));
-
                     for(let i=0; i<=segCorner; i++) {
                         const t = i / segCorner;
                         const invT = 1 - t;
@@ -806,7 +923,6 @@ function generateProceduralFillet(
 
         const baseProfile = getContour(0); 
         const vertsPerLayer = baseProfile.length;
-        
         if (vertsPerLayer < 3) return null;
 
         const safeR = Math.min(filletRadius, minDimension / 2 - 0.01, depth);
@@ -814,12 +930,10 @@ function generateProceduralFillet(
 
         const layers: { z: number, offset: number }[] = [];
         layers.push({ z: 0, offset: 0 });
-
         const wallBottomZ = -(depth - safeR);
         if (Math.abs(wallBottomZ) > 0.001) {
             layers.push({ z: wallBottomZ, offset: 0 });
         }
-
         const filletSteps = 8; 
         for(let i=1; i<=filletSteps; i++) {
             const theta = (i / filletSteps) * (Math.PI / 2);
@@ -836,7 +950,6 @@ function generateProceduralFillet(
             if (!topologyValid) return;
             points.forEach(p => rawVertices.push(p.x, layer.z, -p.y));
         });
-
         if (!topologyValid) return null;
 
         const getIdx = (layerIdx: number, ptIdx: number) => layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
