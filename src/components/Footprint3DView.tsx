@@ -810,34 +810,122 @@ function generateProceduralFillet(
                 offset += c.length;
             });
         };
+        // Top cap (Up-facing)
         triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
+        // Bottom cap is handled per-island now, but the final bottom is still capped if it exists
         triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
 
         for(let l=0; l<layerData.length-1; l++) {
             const up = layerData[l];
             const low = layerData[l+1];
             
-            // DEBUG: Check for Topology Mismatch
-            if (up.contours.length !== low.contours.length) {
-                console.warn(`[Fillet] Topology mismatch at depth ${up.z}. Up: ${up.contours.length} polys, Low: ${low.contours.length} polys. Artifacts likely.`);
-            }
+            // Map: Index of Up-Polygon -> Array of Indices of Low-Polygons contained within it
+            const upToLow = new Map<number, number[]>();
+            for(let i=0; i<up.contours.length; i++) upToLow.set(i, []);
 
+            // Identify containment (Parent -> Children)
+            // Since shapes shrink with offset, children are always strictly inside (or very close to) parent.
             low.contours.forEach((lowPoly, iLow) => {
                 const lowCenter = new THREE.Vector2();
                 lowPoly.forEach(p => lowCenter.add(p));
                 lowCenter.divideScalar(lowPoly.length);
-                let bestUpIdx = -1, minDist = Infinity;
+
+                let bestUp = -1;
+                let minDist = Infinity;
+
+                // 1. Try to find strict containment or closest centroid
                 up.contours.forEach((upPoly, iUp) => {
                     const upCenter = new THREE.Vector2();
                     upPoly.forEach(p => upCenter.add(p));
                     upCenter.divideScalar(upPoly.length);
                     const d = upCenter.distanceToSquared(lowCenter);
-                    if (d < minDist) { minDist = d; bestUpIdx = iUp; }
+                    
+                    if (d < minDist) {
+                        minDist = d;
+                        bestUp = iUp;
+                    }
                 });
-                if (bestUpIdx !== -1) {
-                    let sA = up.startIdx; for(let i=0; i<bestUpIdx; i++) sA += up.contours[i].length;
-                    let sB = low.startIdx; for(let i=0; i<iLow; i++) sB += low.contours[i].length;
-                    triangulateRobust(up.contours[bestUpIdx], lowPoly, sA, sB);
+
+                if (bestUp !== -1) {
+                    upToLow.get(bestUp)!.push(iLow);
+                }
+            });
+
+            // Iterate parents and handle topology transitions
+            upToLow.forEach((childIndices, iUp) => {
+                const upPoly = up.contours[iUp];
+                
+                if (childIndices.length === 1) {
+                    // --- CASE 1: 1-to-1 Topology (Use robust tiling) ---
+                    const iLow = childIndices[0];
+                    const lowPoly = low.contours[iLow];
+                    
+                    // Calculate absolute start indices in the global buffer
+                    let sA = up.startIdx; 
+                    for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+                    
+                    let sB = low.startIdx; 
+                    for(let k=0; k<iLow; k++) sB += low.contours[k].length;
+                    
+                    triangulateRobust(upPoly, lowPoly, sA, sB);
+
+                } else if (childIndices.length === 0) {
+                     // --- CASE 2: Disappearing Island (Cap) ---
+                     // The shape disappears at the lower level. We must cap it at the CURRENT (Upper) level.
+                     // The normal must face DOWN (into the void being cut).
+                     
+                     let sA = up.startIdx; 
+                     for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+
+                     const tris = THREE.ShapeUtils.triangulateShape(upPoly, []);
+                     tris.forEach(t => {
+                         // Reverse winding for Downward normal (since input is CCW/Up)
+                         rawIndices.push(sA + t[0], sA + t[2], sA + t[1]);
+                     });
+
+                } else {
+                    // --- CASE 3: Split into Multiple Islands (Loft with Holes) ---
+                    // Generates the web/shoulder connecting the single outer parent to multiple inner children.
+                    
+                    const holes = childIndices.map(i => low.contours[i]);
+                    // ShapeUtils expects holes to be opposite winding (CW). Our polys are CCW.
+                    const holesReversed = holes.map(h => [...h].reverse());
+
+                    const tris = THREE.ShapeUtils.triangulateShape(upPoly, holesReversed);
+                    
+                    let sA = up.startIdx; 
+                    for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+                    
+                    tris.forEach(t => {
+                        // Map local triangulation indices back to global buffer
+                        // Indices < upPoly.length belong to the Parent (Up layer)
+                        // Indices >= upPoly.length belong to Children (Low layer)
+                        const resolve = (localIdx: number) => {
+                            if (localIdx < upPoly.length) {
+                                return sA + localIdx;
+                            } else {
+                                let rem = localIdx - upPoly.length;
+                                for(let c=0; c<childIndices.length; c++) {
+                                    const hLen = holes[c].length;
+                                    if (rem < hLen) {
+                                        // It's in child c
+                                        const realChildIdx = childIndices[c];
+                                        let sB = low.startIdx;
+                                        for(let k=0; k<realChildIdx; k++) sB += low.contours[k].length;
+                                        
+                                        // Because we reversed the hole for triangulation, we must invert index logic
+                                        // to match the original (CCW) points in the buffer.
+                                        // Reversed: index 0 is Original: len-1
+                                        return sB + ((hLen - 1) - rem);
+                                    }
+                                    rem -= hLen;
+                                }
+                            }
+                            return sA; // Fallback
+                        };
+                        
+                        rawIndices.push(resolve(t[0]), resolve(t[2]), resolve(t[1]));
+                    });
                 }
             });
         }
