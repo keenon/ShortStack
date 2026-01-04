@@ -387,7 +387,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const isShapeDragging = useRef(false);
   const shapeDragStartPos = useRef({ x: 0, y: 0 });
   const shapeDragStartData = useRef<any>(null);
-  const dragTargetRef = useRef<{ id: string; pointIdx?: number; handleType?: 'in' | 'out'; } | null>(null);
+  const dragTargetRef = useRef<{ id: string; pointIdx?: number; handleType?: 'in' | 'out' | 'symmetric'; } | null>(null);
 
   // HEALING EFFECT: Convert non-GLB meshes to GLB
   useEffect(() => {
@@ -530,7 +530,14 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
       const shape = footprint.shapes.find(s => s.id === id);
       if (!shape) return;
       isShapeDragging.current = true;
-      dragTargetRef.current = { id, pointIdx: pointIndex };
+
+      // UPDATED: Check for Ctrl/Meta key to trigger symmetric handle creation
+      if (pointIndex !== undefined && (e.ctrlKey || e.metaKey)) {
+          dragTargetRef.current = { id, pointIdx: pointIndex, handleType: 'symmetric' };
+      } else {
+          dragTargetRef.current = { id, pointIdx: pointIndex };
+      }
+
       shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
       shapeDragStartData.current = JSON.parse(JSON.stringify(shape));
       
@@ -574,7 +581,17 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
           if (s.id === id) {
               if ((s.type === "line" || s.type === "boardOutline" || s.type === "polygon") && (startShape.type === "line" || startShape.type === "boardOutline" || startShape.type === "polygon")) {
                   const newPoints = [...startShape.points];
-                  if (handleType && pointIdx !== undefined) {
+
+                  if (handleType === 'symmetric' && pointIdx !== undefined) {
+                      // UPDATED: Handle Symmetric Handle Creation
+                      // Dragging away from point creates the handles.
+                      // handleOut follows mouse, handleIn goes opposite.
+                      newPoints[pointIdx] = {
+                          ...newPoints[pointIdx],
+                          handleOut: { x: parseFloat(dxWorld.toFixed(4)).toString(), y: parseFloat(dyWorld.toFixed(4)).toString() },
+                          handleIn: { x: parseFloat((-dxWorld).toFixed(4)).toString(), y: parseFloat((-dyWorld).toFixed(4)).toString() }
+                      };
+                  } else if (handleType && pointIdx !== undefined) {
                       const p = newPoints[pointIdx];
                       if (p.snapTo) return s; // Cannot drag handles of a point snapped to a guide
                       if (handleType === 'in' && p.handleIn) {
@@ -1271,6 +1288,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                 ref={wrapperRef}
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
+                onContextMenu={(e) => e.preventDefault()} // DISABLE CONTEXT MENU FOR MAC DRAG
             >
                 <button className="canvas-home-btn" onClick={handleHomeClick} title="Reset View">🏠</button>
 
@@ -1349,7 +1367,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                         return null;
                     })()}
                 </svg>
-                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan | Drag Handles</div>
+                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Scroll to Zoom | Drag to Pan | Drag Handles | Ctrl+Drag Point for curve</div>
             </div>
             
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
