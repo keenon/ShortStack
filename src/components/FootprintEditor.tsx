@@ -1074,12 +1074,41 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
   // --- UNION / UNGROUP LOGIC ---
 
-  const handleGroup = () => {
+const handleGroup = () => {
     if (selectedShapeIds.length < 2) return;
     
     // 1. Gather all unique primitive shapes (flattening any selected unions)
     const flattenedPrimitives: FootprintShape[] = [];
     
+    // --- NEW: Determine Layer Assignment Source ---
+    // We want the assignments from the largest union, or if none, the topmost shape in the list
+    let assignmentSource: FootprintShape | null = null;
+    let maxUnionArea = -1;
+
+    const selectedShapesInOrder = footprint.shapes.filter(s => selectedShapeIds.includes(s.id));
+    const selectedUnions = selectedShapesInOrder.filter(s => s.type === "union") as FootprintUnion[];
+
+    if (selectedUnions.length > 0) {
+        selectedUnions.forEach(u => {
+            const aabb = getShapeAABB(u, params, footprint, allFootprints);
+            if (aabb) {
+                const area = Math.abs((aabb.x2 - aabb.x1) * (aabb.y2 - aabb.y1));
+                if (area > maxUnionArea) {
+                    maxUnionArea = area;
+                    assignmentSource = u;
+                }
+            }
+        });
+    }
+
+    if (!assignmentSource) {
+        // Fallback to the shape closest to the top of the shape list (index 0)
+        assignmentSource = selectedShapesInOrder[0];
+    }
+
+    const inheritedAssignments = assignmentSource ? JSON.parse(JSON.stringify(assignmentSource.assignedLayers)) : {};
+    // ----------------------------------------------
+
     selectedShapeIds.forEach(id => {
         const shape = footprint.shapes.find(s => s.id === id);
         if (!shape) return;
@@ -1196,7 +1225,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
         x: cx.toFixed(4).toString(),
         y: cy.toFixed(4).toString(),
         angle: "0",
-        assignedLayers: {},
+        assignedLayers: inheritedAssignments, // UPDATED: Now uses inherited details
         shapes: []
     };
 
@@ -1232,7 +1261,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
     });
   };
 
-  const handleUngroup = (unionId: string) => {
+const handleUngroup = (unionId: string) => {
     const unionShape = footprint.shapes.find(s => s.id === unionId);
     if (!unionShape || unionShape.type !== "union") return;
     const union = unionShape as FootprintUnion;
@@ -1259,7 +1288,8 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
             ...s, 
             id: crypto.randomUUID(), // New ID
             x: parseFloat(gx.toFixed(4)).toString(), 
-            y: parseFloat(gy.toFixed(4)).toString() 
+            y: parseFloat(gy.toFixed(4)).toString(),
+            assignedLayers: JSON.parse(JSON.stringify(union.assignedLayers)) // UPDATED: Inherit from parent
         };
         
         if (s.type === "rect" || s.type === "footprint" || s.type === "union") {
