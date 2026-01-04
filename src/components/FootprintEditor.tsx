@@ -613,17 +613,34 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                 if (s.type === "rect" || s.type === "footprint") newProps.angle = formatVal(evaluateExpression(startState.angle, params) - deltaAngleDeg);
                 return { ...s, ...newProps };
             } else if (s.type === "line" || s.type === "boardOutline" || s.type === "polygon") {
-                const origin = getVis(startState.x || "0", startState.y || "0");
-                const rotatedOrigin = rotatePoint(origin, { x: cx, y: cy }, deltaAngleRad);
+                // Recompute point locations using static origin frame
+                const originX = (s.type === "line") ? 0 : evaluateExpression(startState.x, params);
+                const originY = (s.type === "line") ? 0 : -evaluateExpression(startState.y, params);
+                const cos = Math.cos(deltaAngleRad), sin = Math.sin(deltaAngleRad);
+
                 const rotatedPoints = (startState.points as Point[]).map(p => {
-                    const px = evaluateExpression(p.x, params), py = -evaluateExpression(p.y, params);
-                    const pRot = rotatePoint({x: px, y: py}, {x:0, y:0}, deltaAngleRad);
-                    let hIn, hOut;
-                    if (p.handleIn) { const hRot = rotatePoint({x: evaluateExpression(p.handleIn.x, params), y: -evaluateExpression(p.handleIn.y, params)}, {x:0, y:0}, deltaAngleRad); hIn = { x: formatVal(hRot.x), y: formatVal(-hRot.y) }; }
-                    if (p.handleOut) { const hRot = rotatePoint({x: evaluateExpression(p.handleOut.x, params), y: -evaluateExpression(p.handleOut.y, params)}, {x:0, y:0}, deltaAngleRad); hOut = { x: formatVal(hRot.x), y: formatVal(-hRot.y) }; }
-                    return { ...p, x: formatVal(pRot.x), y: formatVal(-pRot.y), handleIn: hIn, handleOut: hOut };
+                    const pxRaw = evaluateExpression(p.x, params), pyRaw = evaluateExpression(p.y, params);
+                    // Visual global position
+                    const vP = { x: originX + pxRaw, y: originY - pyRaw };
+                    const rP = rotatePoint(vP, { x: cx, y: cy }, deltaAngleRad);
+                    // Back to data local coordinates
+                    const npx = rP.x - originX, npy = -(rP.y - originY);
+                    
+                    const rotateVecExp = (h: {x: string, y: string}) => {
+                        const hx = evaluateExpression(h.x, params), hy = evaluateExpression(h.y, params);
+                        // Rotate visual vector (x, -y)
+                        const rvhx = hx * cos - (-hy) * sin, rvhy = hx * sin + (-hy) * cos;
+                        return { x: modifyExpression(h.x, rvhx - hx), y: modifyExpression(h.y, (-rvhy) - hy) };
+                    };
+                    return {
+                        ...p,
+                        x: modifyExpression(p.x, npx - pxRaw),
+                        y: modifyExpression(p.y, npy - pyRaw),
+                        handleIn: p.handleIn ? rotateVecExp(p.handleIn) : undefined,
+                        handleOut: p.handleOut ? rotateVecExp(p.handleOut) : undefined
+                    };
                 });
-                return { ...s, x: formatVal(rotatedOrigin.x), y: formatVal(-rotatedOrigin.y), points: rotatedPoints };
+                return { ...s, points: rotatedPoints };
             }
             return s;
         });
