@@ -1732,6 +1732,10 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
   const activeMesh = footprint.meshes ? footprint.meshes.find(m => m.id === primarySelectedId) : null;
   const gridSize = Math.pow(10, Math.floor(Math.log10(Math.max(viewBox.width / 10, 1e-6))));
 
+  // NEW: Scaling factors for SVG elements to prevent scaling issues on zoom
+  const strokeScale = viewBox.width / 800;
+  const handleRadius = viewBox.width / 100;
+
   const isShapeVisible = (shape: FootprintShape) => {
       // Board outlines visible based on isBoard flag
       if (shape.type === "boardOutline") return !!footprint.isBoard;
@@ -1744,8 +1748,6 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       if (assignedIds.length === 0) return layerVisibility["unassigned"] !== false;
       return !assignedIds.every(id => layerVisibility[id] === false);
   };
-
-  const handleRadius = viewBox.width / 100;
 
   // Jump into footprint handler for double-clicks
   const handleShapeDoubleClick = (e: React.MouseEvent, id: string) => {
@@ -1883,12 +1885,12 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                 >
                     <defs>
                     <pattern id="grid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
-                        <path d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} fill="none" stroke="#333" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+                        <path d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} fill="none" stroke="#333" strokeWidth={strokeScale} vectorEffect="non-scaling-stroke" />
                     </pattern>
                     </defs>
                     <rect x={viewBox.x} y={viewBox.y} width={viewBox.width} height={viewBox.height} fill="url(#grid)" />
-                    <line x1={viewBox.x} y1="0" x2={viewBox.x + viewBox.width} y2="0" stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-                    <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                    <line x1={viewBox.x} y1="0" x2={viewBox.x + viewBox.width} y2="0" stroke="#444" strokeWidth={strokeScale * 2} vectorEffect="non-scaling-stroke" />
+                    <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth={strokeScale * 2} vectorEffect="non-scaling-stroke" />
                     
                     {/* Shapes Rendered Reversed (Bottom to Top visual order) */}
                     {[...footprint.shapes].reverse().map((shape) => {
@@ -1914,6 +1916,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                                 hoveredMidpointIndex={hoveredMidpointIndex}
                                 setHoveredMidpointIndex={setHoveredMidpointIndex}
                                 onAddMidpoint={handleAddMidpoint}
+                                strokeScale={strokeScale}
                             />
                         );
                     })}
@@ -1943,6 +1946,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                                     setHoveredMidpointIndex={setHoveredMidpointIndex}
                                     onAddMidpoint={handleAddMidpoint}
                                     onlyHandles={true}
+                                    strokeScale={strokeScale}
                                 />
                             );
                         }

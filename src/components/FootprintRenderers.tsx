@@ -116,6 +116,8 @@ export const RecursiveShapeRenderer = ({
   setHoveredMidpointIndex, // NEW
   onAddMidpoint, // NEW
   onlyHandles = false, // IMPROVEMENT: New prop to render only interactive handles
+  strokeScale = 1, // NEW: Current view zoom scale for SVG filters
+  overrideStyle = null, // NEW: Internal prop to force styling on union children
 }: {
   shape: FootprintShape;
   allFootprints: Footprint[];
@@ -135,6 +137,8 @@ export const RecursiveShapeRenderer = ({
   setHoveredMidpointIndex?: (index: number | null) => void;
   onAddMidpoint?: (shapeId: string, index: number) => void;
   onlyHandles?: boolean;
+  strokeScale?: number;
+  overrideStyle?: { fill?: string, stroke?: string, strokeWidth?: number } | null;
 }) => {
   // --- BOARD OUTLINE RENDERER ---
   if (shape.type === "boardOutline") {
@@ -298,6 +302,7 @@ export const RecursiveShapeRenderer = ({
                     handleRadius={handleRadius}
                     rootFootprint={rootFootprint}
                     layerVisibility={layerVisibility}
+                    strokeScale={strokeScale}
                   />
               ))}
               
@@ -314,33 +319,84 @@ export const RecursiveShapeRenderer = ({
       const y = evaluateExpression(u.y, params);
       const angle = evaluateExpression(u.angle, params);
 
+      // Determine Colors for the Union silhouette
+      let strokeColor = isSelected ? "#646cff" : "#888";
+      const assigned = u.assignedLayers || {};
+      const highestLayer = stackup.find(l => assigned[l.id] !== undefined && layerVisibility[l.id] !== false);
+      if (highestLayer) { strokeColor = highestLayer.color; }
+
+      const filterId = `union-filter-${u.id}`;
+      // Calculate dilate radius: visually ~1.5px
+      const dilateRadius = strokeScale * 1.5;
+
       return (
           <g 
             transform={`translate(${x}, ${-y}) rotate(${-angle})`}
             onMouseDown={(e) => onMouseDown(e, shape.id)}
             style={{ cursor: "pointer", opacity: isSelected ? 1 : 0.9 }}
           >
+              {/* defs for boolean visual union effect */}
+              <defs>
+                  <filter id={filterId} x="-50%" y="-50%" width="200%" height="200%">
+                      <feMorphology operator="dilate" radius={dilateRadius} in="SourceAlpha" result="dilated"/>
+                      <feComposite operator="out" in="dilated" in2="SourceAlpha" result="outline"/>
+                      <feFlood floodColor={strokeColor} floodOpacity="1" result="flood"/>
+                      <feComposite operator="in" in="flood" in2="outline" result="coloredOutline"/>
+                  </filter>
+              </defs>
+
               {isSelected && !onlyHandles && (
                   <circle cx={0} cy={0} r={handleRadius} fill="#646cff" vectorEffect="non-scaling-stroke"/>
               )}
               
-              {[...u.shapes].reverse().map((child, idx) => (
-                  <RecursiveShapeRenderer
-                    key={`${shape.id}-${child.id}-${idx}`}
-                    shape={child}
-                    allFootprints={allFootprints}
-                    params={params}
-                    stackup={stackup}
-                    isSelected={false}
-                    isParentSelected={isSelected}
-                    onMouseDown={(e) => onMouseDown(e, shape.id)} 
-                    onHandleDown={() => {}} 
-                    handleRadius={handleRadius}
-                    rootFootprint={u as unknown as Footprint}
-                    layerVisibility={layerVisibility}
-                    onlyHandles={onlyHandles}
-                  />
-              ))}
+              {!onlyHandles && (
+                  <>
+                      {/* 1. FILL PASS: Opaque group with overall opacity for single background */}
+                      <g opacity={isSelected ? 0.3 : 0.2}>
+                          {[...u.shapes].reverse().map((child, idx) => (
+                              <RecursiveShapeRenderer
+                                key={`fill-${shape.id}-${child.id}-${idx}`}
+                                shape={child}
+                                allFootprints={allFootprints}
+                                params={params}
+                                stackup={stackup}
+                                isSelected={false}
+                                isParentSelected={isSelected}
+                                onMouseDown={() => {}} 
+                                onHandleDown={() => {}} 
+                                handleRadius={handleRadius}
+                                rootFootprint={u as unknown as Footprint}
+                                layerVisibility={layerVisibility}
+                                onlyHandles={false}
+                                strokeScale={strokeScale}
+                                overrideStyle={{ fill: highestLayer ? highestLayer.color : "#888", stroke: "none" }}
+                              />
+                          ))}
+                      </g>
+                      {/* 2. OUTLINE PASS: Apply silhouette filter for merged outline */}
+                      <g filter={`url(#${filterId})`}>
+                          {[...u.shapes].reverse().map((child, idx) => (
+                              <RecursiveShapeRenderer
+                                key={`outline-${shape.id}-${child.id}-${idx}`}
+                                shape={child}
+                                allFootprints={allFootprints}
+                                params={params}
+                                stackup={stackup}
+                                isSelected={false}
+                                isParentSelected={isSelected}
+                                onMouseDown={() => {}} 
+                                onHandleDown={() => {}} 
+                                handleRadius={handleRadius}
+                                rootFootprint={u as unknown as Footprint}
+                                layerVisibility={layerVisibility}
+                                onlyHandles={false}
+                                strokeScale={strokeScale}
+                                overrideStyle={{ fill: "black", stroke: "none" }}
+                              />
+                          ))}
+                      </g>
+                  </>
+              )}
           </g>
       );
   }
@@ -368,20 +424,27 @@ export const RecursiveShapeRenderer = ({
       fill = hexToRgba(highestLayer.color, 0.2);
   }
 
+  // Apply override from Union parent
+  if (overrideStyle) {
+      if (overrideStyle.fill) fill = overrideStyle.fill;
+      if (overrideStyle.stroke) stroke = overrideStyle.stroke;
+      strokeWidth = 0;
+  }
+
   // If inside a selected parent footprint, highlight slightly
-  if (isParentSelected && !isSelected) {
+  if (isParentSelected && !isSelected && !overrideStyle) {
       stroke = "#aaa";
   }
 
   const commonProps = {
     onMouseDown: (e: React.MouseEvent) => {
-      onMouseDown(e, shape.id);
+      if (!overrideStyle) onMouseDown(e, shape.id);
     },
     fill,
     stroke,
     strokeWidth,
     vectorEffect,
-    style: { cursor: "pointer" },
+    style: { cursor: overrideStyle ? "inherit" : "pointer" },
   };
 
   if (shape.type === "circle") {
@@ -454,7 +517,7 @@ export const RecursiveShapeRenderer = ({
           d += " Z";
       }
 
-      const handles = isSelected ? pts.map((pt, idx) => {
+      const handles = (isSelected && !overrideStyle) ? pts.map((pt, idx) => {
           const elements = [];
           const isHovered = hoveredPointIndex === idx;
           const anchorColor = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
@@ -490,7 +553,7 @@ export const RecursiveShapeRenderer = ({
           return elements;
       }) : null;
 
-      const midButtons = isSelected ? midPoints.map(m => {
+      const midButtons = (isSelected && !overrideStyle) ? midPoints.map(m => {
           const isHovered = hoveredMidpointIndex === m.index;
           const bgFill = isHovered ? "#ffaa00" : "#333";
           const strokeColor = isHovered ? "#fff" : "#666";
@@ -558,7 +621,7 @@ export const RecursiveShapeRenderer = ({
         // 2. Generate Outline Path for Visuals
         const outlineD = generateLineOutlinePath(pts, thickness);
 
-      const handles = isSelected ? pts.map((pt, idx) => {
+      const handles = (isSelected && !overrideStyle) ? pts.map((pt, idx) => {
           const elements = [];
           const isHovered = hoveredPointIndex === idx;
           const anchorFill = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
@@ -605,7 +668,7 @@ export const RecursiveShapeRenderer = ({
           return elements;
       }) : null;
 
-      const midButtons = isSelected ? midPoints.map(m => {
+      const midButtons = (isSelected && !overrideStyle) ? midPoints.map(m => {
           const isHovered = hoveredMidpointIndex === m.index;
           const bgFill = isHovered ? "#ffaa00" : "#333";
           const strokeColor = isHovered ? "#fff" : "#666";
