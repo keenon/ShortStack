@@ -94,6 +94,9 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
   if (activeFootprint) {
     return (
       <FootprintEditor
+        // FIX: Add key to force remount when switching footprints.
+        // This ensures internal state (pan/zoom, selection, history) is reset for the new footprint.
+        key={activeFootprint.id}
         footprint={activeFootprint}
         allFootprints={footprints} 
         onUpdate={handleFootprintUpdate}
