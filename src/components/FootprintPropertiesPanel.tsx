@@ -423,7 +423,7 @@ const FootprintPropertiesPanel = ({
                                         color: "#fff", borderRadius: "4px"
                                     }} 
                                     title="Insert Midpoint"
-                                    onMouseEnter={() => setHoveredMidpointIndex(m.index)}
+                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
                                     onMouseLeave={() => setHoveredMidpointIndex(null)}
                                 >
                                     + Midpoint
@@ -534,8 +534,8 @@ const FootprintPropertiesPanel = ({
           id: rect.id, 
           type: "polygon",
           name: rect.name.replace("New Rect", "Converted Polygon"),
-          x: rect.x,
-          y: rect.y,
+          x: "0",
+          y: "0",
           assignedLayers: rect.assignedLayers,
           points: polyPoints
       };

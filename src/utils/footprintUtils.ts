@@ -505,87 +505,152 @@ export function offsetPolygonContour(points: THREE.Vector2[], offset: number): T
 /**
  * Converts a Rectangle (with optional corner radius and rotation) 
  * into a set of Polygon points with appropriate Bezier handles.
+ * UPDATED: Now uses symbolic math to preserve expressions.
  */
 export function convertRectToPolyPoints(
     rect: FootprintRect, 
     params: Parameter[]
 ): Point[] {
-    const w = evaluateExpression(rect.width, params);
-    const h = evaluateExpression(rect.height, params);
-    const rawR = evaluateExpression(rect.cornerRadius, params);
-    const angle = evaluateExpression(rect.angle, params);
+    // 1. Determine topology based on CURRENT value of cornerRadius
+    // (We still evaluate to check if it's rounded, but logic is symbolic)
+    const currentR = evaluateExpression(rect.cornerRadius, params);
+    const isRounded = currentR > 0.001;
 
-    const hw = w / 2;
-    const hh = h / 2;
-    // Clamp radius to half the shortest side
-    const r = Math.max(0, Math.min(rawR, Math.min(hw, hh)));
+    // 2. Get Raw Strings (fallback to "0")
+    const W = rect.width && rect.width.trim() ? rect.width : "0";
+    const H = rect.height && rect.height.trim() ? rect.height : "0";
+    const X = rect.x && rect.x.trim() ? rect.x : "0";
+    const Y = rect.y && rect.y.trim() ? rect.y : "0";
+    const R = rect.cornerRadius && rect.cornerRadius.trim() ? rect.cornerRadius : "0";
+    const A = rect.angle && rect.angle.trim() ? rect.angle : "0";
     
-    // Kappa for cubic bezier approximation of 90deg arc
-    const k = r * 0.55228475; 
+    // Constant for cubic bezier 90deg arc approx: (4/3)*tan(pi/8)
+    const K = "0.55228475"; 
 
-    // Define vertices in local un-rotated space (CCW winding)
-    // Structure: { x, y, hIn?, hOut? } (Handles are relative vectors)
-    let rawVerts: { x: number, y: number, hIn?: {x:number, y:number}, hOut?: {x:number, y:number} }[] = [];
+    // Define Symbolic Point Structure
+    interface SymPoint { x: string, y: string, hIn?: {x:string, y:string}, hOut?: {x:string, y:string} }
+    let verts: SymPoint[] = [];
 
-    if (r < 0.001) {
-        // Sharp Corners
-        rawVerts = [
-            { x: hw, y: -hh },  // Bottom Right
-            { x: hw, y: hh },   // Top Right
-            { x: -hw, y: hh },  // Top Left
-            { x: -hw, y: -hh }  // Bottom Left
+    // Helper: Simplify expression string using mathjs
+    const S = (expr: string) => {
+        try {
+            return math.simplify(expr).toString();
+        } catch (e) {
+            return expr; // Fallback to raw string if invalid syntax
+        }
+    };
+
+    if (!isRounded) {
+        // 4 Corners: Clockwise starting Bottom Right to match visual expectation
+        // 1. Bottom Right: (W/2, -H/2)
+        // 2. Bottom Left: (-W/2, -H/2)
+        // 3. Top Left: (-W/2, H/2)
+        // 4. Top Right: (W/2, H/2)
+        verts = [
+            { x: `(${W}) / 2`, y: `-(${H}) / 2` },
+            { x: `-(${W}) / 2`, y: `-(${H}) / 2` },
+            { x: `-(${W}) / 2`, y: `(${H}) / 2` },
+            { x: `(${W}) / 2`, y: `(${H}) / 2` }
         ];
     } else {
-        // Rounded Corners (8 points)
-        // 1. Bottom Right Corner
-        rawVerts.push({ x: hw, y: -hh + r, hOut: { x: 0, y: -k } }); // Arc Start
-        rawVerts.push({ x: hw - r, y: -hh, hIn: { x: k, y: 0 } });   // Arc End
+        // 8 Points for Rounded Rect (Clockwise)
+        const KR = `${K} * (${R})`;
+        const hw = `(${W}) / 2`;
+        const hh = `(${H}) / 2`;
 
-        // 2. Bottom Left Corner
-        rawVerts.push({ x: -hw + r, y: -hh, hOut: { x: -k, y: 0 } });
-        rawVerts.push({ x: -hw, y: -hh + r, hIn: { x: 0, y: -k } });
-
-        // 3. Top Left Corner
-        rawVerts.push({ x: -hw, y: hh - r, hOut: { x: 0, y: k } });
-        rawVerts.push({ x: -hw + r, y: hh, hIn: { x: -k, y: 0 } });
-
-        // 4. Top Right Corner
-        rawVerts.push({ x: hw - r, y: hh, hOut: { x: k, y: 0 } });
-        rawVerts.push({ x: hw, y: hh - r, hIn: { x: 0, y: k } });
+        verts = [
+            // 1. Right Edge, near Bottom
+            { 
+                x: hw, 
+                y: `-(${hh}) + (${R})`, 
+                hOut: { x: "0", y: `-(${KR})` } 
+            },
+            // 2. Bottom Edge, near Right
+            { 
+                x: `(${hw}) - (${R})`, 
+                y: `-${hh}`, 
+                hIn: { x: KR, y: "0" } 
+            },
+            // 3. Bottom Edge, near Left
+            { 
+                x: `-(${hw}) + (${R})`, 
+                y: `-${hh}`, 
+                hOut: { x: `-(${KR})`, y: "0" } 
+            },
+            // 4. Left Edge, near Bottom
+            { 
+                x: `-(${hw})`, 
+                y: `-(${hh}) + (${R})`, 
+                hIn: { x: "0", y: `-(${KR})` } 
+            },
+            // 5. Left Edge, near Top
+            { 
+                x: `-(${hw})`, 
+                y: `(${hh}) - (${R})`, 
+                hOut: { x: "0", y: KR } 
+            },
+            // 6. Top Edge, near Left
+            { 
+                x: `-(${hw}) + (${R})`, 
+                y: hh, 
+                hIn: { x: `-(${KR})`, y: "0" } 
+            },
+            // 7. Top Edge, near Right
+            { 
+                x: `(${hw}) - (${R})`, 
+                y: hh, 
+                hOut: { x: KR, y: "0" } 
+            },
+            // 8. Right Edge, near Top
+            { 
+                x: hw, 
+                y: `(${hh}) - (${R})`, 
+                hIn: { x: "0", y: KR } 
+            }
+        ];
     }
 
-    // Apply Rotation
-    const rad = (angle * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
+    // 3. Apply Rotation and Translation Symbolically
+    // We append 'deg' to the angle so mathjs handles it as degrees for sin/cos
+    const ang = `(${A}) deg`;
+    const cosA = `cos(${ang})`;
+    const sinA = `sin(${ang})`;
 
-    const rotate = (x: number, y: number) => ({
-        x: x * cos - y * sin,
-        y: x * sin + y * cos
-    });
-
-    return rawVerts.map(v => {
-        const p = rotate(v.x, v.y);
+    const transform = (p: SymPoint): Point => {
+        const lx = p.x;
+        const ly = p.y;
         
-        // Handles are vectors, they rotate but don't translate
-        let newHIn = undefined;
-        if (v.hIn) {
-            const h = rotate(v.hIn.x, v.hIn.y);
-            newHIn = { x: parseFloat(h.x.toFixed(4)).toString(), y: parseFloat(h.y.toFixed(4)).toString() };
+        // Rotate (CW rotation formula for standard math, but check coordinate system)
+        // Canvas/SVG Y is down, but here usually Y is up in math logic. 
+        // We use standard rotation: x' = x cos - y sin, y' = x sin + y cos
+        // Note: X and Y are included because the polygon origin will be set to (0,0)
+        const gx = `${X} + (${lx}) * ${cosA} - (${ly}) * ${sinA}`;
+        const gy = `${Y} + (${lx}) * ${sinA} + (${ly}) * ${cosA}`;
+        
+        let hIn, hOut;
+        
+        // Handles are vectors, they rotate but do not translate
+        if (p.hIn) {
+            hIn = {
+                x: S(`(${p.hIn.x}) * ${cosA} - (${p.hIn.y}) * ${sinA}`),
+                y: S(`(${p.hIn.x}) * ${sinA} + (${p.hIn.y}) * ${cosA}`)
+            };
         }
-
-        let newHOut = undefined;
-        if (v.hOut) {
-            const h = rotate(v.hOut.x, v.hOut.y);
-            newHOut = { x: parseFloat(h.x.toFixed(4)).toString(), y: parseFloat(h.y.toFixed(4)).toString() };
+        if (p.hOut) {
+            hOut = {
+                x: S(`(${p.hOut.x}) * ${cosA} - (${p.hOut.y}) * ${sinA}`),
+                y: S(`(${p.hOut.x}) * ${sinA} + (${p.hOut.y}) * ${cosA}`)
+            };
         }
 
         return {
             id: crypto.randomUUID(),
-            x: parseFloat(p.x.toFixed(4)).toString(),
-            y: parseFloat(p.y.toFixed(4)).toString(),
-            handleIn: newHIn,
-            handleOut: newHOut
+            x: S(gx),
+            y: S(gy),
+            handleIn: hIn,
+            handleOut: hOut
         };
-    });
+    };
+
+    return verts.map(transform);
 }
