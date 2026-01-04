@@ -327,7 +327,8 @@ export const RecursiveShapeRenderer = ({
 
       const filterId = `union-filter-${u.id}`;
       // Calculate dilate radius: visually ~1.5px
-      const dilateRadius = strokeScale * 1.5;
+      const dilateRadius = strokeScale * 1.5 * (isSelected ? 2 : 1);
+      let defaultFill = isSelected ? "rgb(100, 108, 255)" : "rgb(255, 255, 255)";
 
       return (
           <g 
@@ -352,7 +353,7 @@ export const RecursiveShapeRenderer = ({
               {!onlyHandles && (
                   <>
                       {/* 1. FILL PASS: Opaque group with overall opacity for single background */}
-                      <g opacity={isSelected ? 0.3 : 0.2}>
+                      <g opacity={highestLayer ? (isSelected ? 0.3 : 0.2) : 0.05}>
                           {[...u.shapes].reverse().map((child, idx) => (
                               <RecursiveShapeRenderer
                                 key={`fill-${shape.id}-${child.id}-${idx}`}
@@ -369,7 +370,7 @@ export const RecursiveShapeRenderer = ({
                                 layerVisibility={layerVisibility}
                                 onlyHandles={false}
                                 strokeScale={strokeScale}
-                                overrideStyle={{ fill: highestLayer ? highestLayer.color : "#888", stroke: "none" }}
+                                overrideStyle={{ fill: highestLayer ? highestLayer.color : defaultFill, stroke: "none" }}
                               />
                           ))}
                       </g>
