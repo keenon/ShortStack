@@ -826,11 +826,11 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       let effectiveSelection: string[] = [];
 
       // Selection logic
-      if (multi) {
-          effectiveSelection = selectedShapeIds.includes(id) ? selectedShapeIds.filter(x => x !== id) : [...selectedShapeIds, id];
-      } else if (pointIndex !== undefined) {
+      if (pointIndex !== undefined) {
           // If we click a point, we focus that single shape
           effectiveSelection = [id];
+      } else if (multi) {
+          effectiveSelection = selectedShapeIds.includes(id) ? selectedShapeIds.filter(x => x !== id) : [...selectedShapeIds, id];
       } else if (!selectedShapeIds.includes(id)) {
           // Normal click on a new item resets selection
           effectiveSelection = [id];
