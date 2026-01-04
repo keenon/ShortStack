@@ -58,8 +58,7 @@ export interface FootprintWireGuide extends BaseShape {
   type: "wireGuide";
   x: string;
   y: string;
-  handleIn?: { x: string; y: string };
-  handleOut?: { x: string; y: string };
+  handle?: { x: string; y: string }; // Single handle for flow direction
 }
 
 export interface FootprintBoardOutline extends BaseShape {

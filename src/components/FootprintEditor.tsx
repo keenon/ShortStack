@@ -580,7 +580,8 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
       const updatedShapes = currentFP.shapes.map(s => {
           if (s.id === id) {
               if ((s.type === "line" || s.type === "boardOutline" || s.type === "polygon") && (startShape.type === "line" || startShape.type === "boardOutline" || startShape.type === "polygon")) {
-                  const newPoints = [...startShape.points];
+                  // Explicit cast to 'any' to access points safely
+                  const newPoints = [...(startShape as any).points];
 
                   if (handleType === 'symmetric' && pointIdx !== undefined) {
                       // UPDATED: Handle Symmetric Handle Creation
@@ -604,19 +605,23 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                       if (p.snapTo) return s; // Cannot drag position of a point snapped to a guide
                       newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) };
                   } else {
-                      const allMoved = newPoints.map(p => ({ ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) }));
+                      const allMoved = newPoints.map((p: any) => ({ ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) }));
                       return { ...s, points: allMoved };
                   }
                   return { ...s, points: newPoints };
               } 
               if ((s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide") && (startShape.type === "circle" || startShape.type === "rect" || startShape.type === "footprint" || startShape.type === "wireGuide")) {
-                  // Wire Guides have handle properties too (handleIn, handleOut), check if drag target is handle
+                  // Wire Guides have handle properties too (handle), check if drag target is handle
                   if (s.type === "wireGuide" && handleType) {
                        const startWg = startShape as FootprintWireGuide;
-                       if (handleType === 'in' && startWg.handleIn) {
-                           return { ...s, handleIn: { x: modifyExpression(startWg.handleIn.x, dxWorld), y: modifyExpression(startWg.handleIn.y, dyWorld) } };
-                       } else if (handleType === 'out' && startWg.handleOut) {
-                           return { ...s, handleOut: { x: modifyExpression(startWg.handleOut.x, dxWorld), y: modifyExpression(startWg.handleOut.y, dyWorld) } };
+                       if (startWg.handle) {
+                           return { 
+                               ...s, 
+                               handle: { 
+                                   x: modifyExpression(startWg.handle.x, dxWorld), 
+                                   y: modifyExpression(startWg.handle.y, dyWorld) 
+                               } 
+                           };
                        }
                   }
                   return { ...s, x: modifyExpression(startShape.x, dxWorld), y: modifyExpression(startShape.y, dyWorld) };

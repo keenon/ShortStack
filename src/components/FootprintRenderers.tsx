@@ -164,45 +164,68 @@ export const RecursiveShapeRenderer = ({
     const x = evaluateExpression(wg.x, params);
     const y = evaluateExpression(wg.y, params);
 
-    // Rendered with dotted/dashed lines in green to indicate "virtual" and "guide"
-    const stroke = isSelected ? "#646cff" : "#00ff00";
+    // Aesthetic: Subtle gray normally, bright purple when selected
+    const stroke = isSelected ? "#646cff" : "#666";
+    const opacity = isSelected ? 1 : 0.6;
+    const crossSize = handleRadius * 1.5;
 
     const elements = [];
     
-    // Constant size markers based on handleRadius, but slightly larger than standard handles
-    const markerSize = handleRadius * 3.0;
-    const circleRadius = handleRadius * 2.0;
-
-    // Main marker (Crosshair)
-    // If onlyHandles is true, we still render this as it is the "handle" for the guide
+    // Main marker: Minimalist crosshair
     elements.push(
-      <g key="marker" style={{ cursor: "pointer" }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
-        <line x1={x - markerSize} y1={-y} x2={x + markerSize} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />
-        <line x1={x} y1={-(y - markerSize)} x2={x} y2={-(y + markerSize)} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />
-        <circle cx={x} cy={-y} r={circleRadius} fill="transparent" stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="1,1" />
+      <g key="marker" style={{ cursor: "pointer", opacity }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
+        <line x1={x - crossSize} y1={-y} x2={x + crossSize} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+        <line x1={x} y1={-(y - crossSize)} x2={x} y2={-(y + crossSize)} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+        <circle cx={x} cy={-y} r={handleRadius * 0.3} fill={stroke} vectorEffect="non-scaling-stroke" />
+        {/* Transparent hit area */}
+        <circle cx={x} cy={-y} r={handleRadius * 2} fill="transparent" stroke="none" />
       </g>
     );
 
-    // Draggable handles for the guide itself
-    if (isSelected) {
-      if (wg.handleIn) {
-        const hx = x + evaluateExpression(wg.handleIn.x, params);
-        const hy = -(y + evaluateExpression(wg.handleIn.y, params));
+    // Direction arrow: Illustrates flow even when wire is not attached
+    if (wg.handle) {
+        const hx = x + evaluateExpression(wg.handle.x, params);
+        const hy = -(y + evaluateExpression(wg.handle.y, params));
+        
+        // Arrowhead math
+        const dx = hx - x;
+        const dy = hy - (-y);
+        const angle = Math.atan2(dy, dx);
+        const arrowLen = handleRadius * 1.5;
+        const a1x = hx - arrowLen * Math.cos(angle - Math.PI / 6);
+        const a1y = hy - arrowLen * Math.sin(angle - Math.PI / 6);
+        const a2x = hx - arrowLen * Math.cos(angle + Math.PI / 6);
+        const a2y = hy - arrowLen * Math.sin(angle + Math.PI / 6);
+
+        const arrowColor = isSelected ? "#00ffff" : "#00aaaa";
+
         elements.push(
-          <line key="h-in-l" x1={x} y1={-y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />,
-          <circle key="h-in-c" cx={hx} cy={hy} r={handleRadius * 0.8} fill={stroke} vectorEffect="non-scaling-stroke" style={{ cursor: 'crosshair' }}
-            onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'in'); }} />
+            <g key="direction" style={{ pointerEvents: 'auto' }}>
+                {/* 1. Transparent HIT TARGET - Always active to allow selection/dragging via arrow */}
+                <line 
+                    x1={x} y1={-y} x2={hx} y2={hy} 
+                    stroke="transparent" strokeWidth={10} vectorEffect="non-scaling-stroke" 
+                    style={{ cursor: isSelected ? 'crosshair' : 'pointer' }}
+                    onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'out'); }} 
+                />
+
+                {/* 2. Visual Dashed Line */}
+                <line 
+                    x1={x} y1={-y} x2={hx} y2={hy} 
+                    stroke={arrowColor} strokeWidth={1} strokeDasharray="3,2" vectorEffect="non-scaling-stroke" 
+                    style={{ pointerEvents: 'none' }}
+                />
+                
+                {/* 3. Arrow Head */}
+                <path d={`M ${hx} ${hy} L ${a1x} ${a1y} L ${a2x} ${a2y} Z`} fill={arrowColor} stroke="none" vectorEffect="non-scaling-stroke" style={{ pointerEvents: 'none' }} />
+                
+                {/* 4. Interactive Handle Dot */}
+                {isSelected && (
+                    <circle cx={hx} cy={hy} r={handleRadius * 0.8} fill={arrowColor} stroke="#fff" strokeWidth={1} vectorEffect="non-scaling-stroke" style={{ cursor: 'crosshair' }}
+                        onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'out'); }} />
+                )}
+            </g>
         );
-      }
-      if (wg.handleOut) {
-        const hx = x + evaluateExpression(wg.handleOut.x, params);
-        const hy = -(y + evaluateExpression(wg.handleOut.y, params));
-        elements.push(
-          <line key="h-out-l" x1={x} y1={-y} x2={hx} y2={hy} stroke="#888" strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="2,2" />,
-          <circle key="h-out-c" cx={hx} cy={hy} r={handleRadius * 0.8} fill={stroke} vectorEffect="non-scaling-stroke" style={{ cursor: 'crosshair' }}
-            onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'out'); }} />
-        );
-      }
     }
 
     return <g>{elements}</g>;

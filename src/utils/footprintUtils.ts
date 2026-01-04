@@ -320,22 +320,24 @@ export function resolvePoint(
              const gy = transform.y + (lx * sin + ly * cos);
 
              // Handles are VECTORS: they only rotate, they do not translate
-             const resolveHandle = (h?: {x: string, y: string}) => {
-                 if (!h) return undefined;
-                 const hx = evaluateExpression(h.x, params);
-                 const hy = evaluateExpression(h.y, params);
-                 return {
-                     x: hx * cos - hy * sin,
-                     y: hx * sin + hy * cos
-                 };
-             };
+             // UPDATED: Project single Wire Guide handle to symmetric in/out handles for the snapped point
+             // BUT use the POSITIVE vector for BOTH handles to create a "pinch" effect
+             if (wg.handle) {
+                 const hx = evaluateExpression(wg.handle.x, params);
+                 const hy = evaluateExpression(wg.handle.y, params);
+                 
+                 const rotX = hx * cos - hy * sin;
+                 const rotY = hx * sin + hy * cos;
 
-             return {
-                 x: gx,
-                 y: gy,
-                 handleIn: resolveHandle(wg.handleIn),
-                 handleOut: resolveHandle(wg.handleOut)
-             };
+                 return {
+                     x: gx,
+                     y: gy,
+                     handleOut: { x: rotX, y: rotY },
+                     handleIn: { x: rotX, y: rotY } // Changed from negative to positive for pinch
+                 };
+             }
+
+             return { x: gx, y: gy };
 
         } else if (shape.type === "footprint") {
              const ref = shape as FootprintReference;

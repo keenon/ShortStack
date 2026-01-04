@@ -7,7 +7,7 @@ import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
 
-import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline, MeshAsset } from "./types";
+import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline, MeshAsset, FootprintWireGuide } from "./types";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -240,6 +240,17 @@ function App() {
                     };
                 }
             });
+
+            // MIGRATION: Convert legacy Wire Guide handles to single handle
+            if (s.type === "wireGuide") {
+                const wg = s as any;
+                if (!wg.handle && (wg.handleOut || wg.handleIn)) {
+                    s.handle = wg.handleOut || { x: "5", y: "0" };
+                    delete s.handleOut;
+                    delete s.handleIn;
+                    needsUpgrade = true;
+                }
+            }
 
             const baseShape = {
               ...s,

@@ -61,8 +61,7 @@ const FootprintPropertiesPanel = ({
   const renderPointEditor = (p: Point, idx: number, updateFn: (newP: Point) => void, removeFn: () => void, allowHandles: boolean = true) => {
       // Look up snapped guide to determine handle overrides
       const snappedGuide = findWireGuideByPath(p.snapTo, footprint, allFootprints);
-      const guideHasIn = !!snappedGuide?.handleIn;
-      const guideHasOut = !!snappedGuide?.handleOut;
+      const guideHasDirection = !!snappedGuide?.handle;
 
       const isHovered = hoveredPointIndex === idx;
 
@@ -120,13 +119,13 @@ const FootprintPropertiesPanel = ({
                 <>
                     <div className="point-controls-toggles">
                         <label className="checkbox-label" style={p.snapTo ? { opacity: 0.7 } : {}}>
-                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasIn : !!p.handleIn} onChange={(e) => {
+                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasDirection : !!p.handleIn} onChange={(e) => {
                                     if (e.target.checked) updateFn({ ...p, handleIn: { x: "-5", y: "0" } });
                                     else { const { handleIn, ...rest } = p; updateFn(rest as Point); }
                                 }} /> In Handle
                         </label>
                         <label className="checkbox-label" style={p.snapTo ? { opacity: 0.7 } : {}}>
-                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasIn : !!p.handleOut} onChange={(e) => {
+                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasDirection : !!p.handleOut} onChange={(e) => {
                                     if (e.target.checked) updateFn({ ...p, handleOut: { x: "5", y: "0" } });
                                     else { const { handleIn, ...rest } = p; updateFn(rest as Point); }
                                 }} /> Out Handle
@@ -151,7 +150,7 @@ const FootprintPropertiesPanel = ({
                              </div>
                         </div>
                     )}
-                    {p.snapTo && (guideHasIn || guideHasOut) && (
+                    {p.snapTo && guideHasDirection && (
                         <div style={{ marginTop: '5px', fontSize: '0.8em', color: '#666' }}>
                            Handles are inherited from the Wire Guide.
                         </div>
@@ -563,42 +562,27 @@ const FootprintPropertiesPanel = ({
             </div>
             
             <div className="prop-section">
-                 <h4>Handles (Optional)</h4>
+                 <h4>Flow Direction Handle</h4>
                  <div className="point-controls-toggles">
                     <label className="checkbox-label">
-                        <input type="checkbox" checked={!!wg.handleIn} onChange={(e) => {
-                             if (e.target.checked) updateShape(wg.id, "handleIn", { x: "-5", y: "0" });
-                             else updateShape(wg.id, "handleIn", undefined);
-                        }} /> In Handle
-                    </label>
-                    <label className="checkbox-label">
-                        <input type="checkbox" checked={!!wg.handleOut} onChange={(e) => {
-                             if (e.target.checked) updateShape(wg.id, "handleOut", { x: "5", y: "0" });
-                             else updateShape(wg.id, "handleOut", undefined);
-                        }} /> Out Handle
+                        <input type="checkbox" checked={!!wg.handle} onChange={(e) => {
+                             if (e.target.checked) updateShape(wg.id, "handle", { x: "5", y: "0" });
+                             else updateShape(wg.id, "handle", undefined);
+                        }} /> Enable Direction
                     </label>
                 </div>
-                {wg.handleIn && (
+                {wg.handle && (
                     <div className="handle-sub-block">
-                         <div className="sub-label">Handle In</div>
+                         <div className="sub-label">Flow Vector (Relative)</div>
                          <div className="handle-inputs">
-                             <div className="mini-input"><span>dX</span><ExpressionEditor value={wg.handleIn.x} onChange={(v) => updateShape(wg.id, "handleIn", {...wg.handleIn, x:v})} params={params}/></div>
-                             <div className="mini-input"><span>dY</span><ExpressionEditor value={wg.handleIn.y} onChange={(v) => updateShape(wg.id, "handleIn", {...wg.handleIn, y:v})} params={params}/></div>
-                         </div>
-                    </div>
-                )}
-                {wg.handleOut && (
-                    <div className="handle-sub-block">
-                         <div className="sub-label">Handle Out</div>
-                         <div className="handle-inputs">
-                             <div className="mini-input"><span>dX</span><ExpressionEditor value={wg.handleOut.x} onChange={(v) => updateShape(wg.id, "handleOut", {...wg.handleOut, x:v})} params={params}/></div>
-                             <div className="mini-input"><span>dY</span><ExpressionEditor value={wg.handleOut.y} onChange={(v) => updateShape(wg.id, "handleOut", {...wg.handleOut, y:v})} params={params}/></div>
+                             <div className="mini-input"><span>dX</span><ExpressionEditor value={wg.handle.x} onChange={(v) => updateShape(wg.id, "handle", {...wg.handle, x:v})} params={params}/></div>
+                             <div className="mini-input"><span>dY</span><ExpressionEditor value={wg.handle.y} onChange={(v) => updateShape(wg.id, "handle", {...wg.handle, y:v})} params={params}/></div>
                          </div>
                     </div>
                 )}
             </div>
             <div className="prop-group">
-                <small style={{color: '#888'}}>Wire guides are virtual and do not appear in exports.</small>
+                <small style={{color: '#888'}}>Wire guides are virtual and do not appear in exports. Snapped points will flow through this guide along the vector.</small>
             </div>
         </div>
       );
