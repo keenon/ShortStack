@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import * as math from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion } from "../types";
 
 export function modifyExpression(expression: string, delta: number): string {
   if (delta === 0) return expression;
@@ -167,6 +167,43 @@ export function getShapeAABB(
     // We must apply the same transform here to match the selection box.
     // Visual X = Math X
     // Visual Y = -Math Y
+
+    if (shape.type === "union") {
+        const union = shape as FootprintUnion;
+        const ux = evaluateExpression(union.x, params);
+        const uy = -evaluateExpression(union.y, params);
+        const uAngle = evaluateExpression(union.angle, params);
+        
+        const rad = -uAngle * (Math.PI / 180);
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        let valid = false;
+
+        union.shapes.forEach(child => {
+            const childBounds = getShapeAABB(child, params, rootFootprint, allFootprints);
+            if (childBounds) {
+                valid = true;
+                const corners = [
+                    {x: childBounds.x1, y: childBounds.y1},
+                    {x: childBounds.x2, y: childBounds.y1},
+                    {x: childBounds.x2, y: childBounds.y2},
+                    {x: childBounds.x1, y: childBounds.y2}
+                ];
+                corners.forEach(p => {
+                    const rx = p.x * cos - p.y * sin;
+                    const ry = p.x * sin + p.y * cos;
+                    const fx = ux + rx;
+                    const fy = uy + ry;
+                    minX = Math.min(minX, fx); maxX = Math.max(maxX, fx);
+                    minY = Math.min(minY, fy); maxY = Math.max(maxY, fy);
+                });
+            }
+        });
+        if (!valid) return null;
+        return { x1: minX, y1: minY, x2: maxX, y2: maxY };
+    }
 
     if (shape.type === "circle") {
         const cx = evaluateExpression((shape as any).x, params);
@@ -441,8 +478,8 @@ export function isShapeInSelection(
                 segments.push({p1: curr, p2: next});
             }
         }
-    } else if (shape.type === "footprint") {
-        // For Footprint References, checking overlap with AABB is usually sufficient and expected
+    } else if (shape.type === "footprint" || shape.type === "union") {
+        // For Footprint References and Unions, checking overlap with AABB is usually sufficient and expected
         return true;
     }
 
@@ -475,18 +512,27 @@ export function getRecursiveLayers(
     const layerIds = new Set<string>();
     
     // Find layers in current footprint
-    fp.shapes.forEach(s => {
-        // IGNORE CHILD BOARD OUTLINES
-        if (s.type === "boardOutline") return;
+    const extractLayers = (shapes: FootprintShape[]) => {
+        shapes.forEach(s => {
+            // IGNORE CHILD BOARD OUTLINES
+            if (s.type === "boardOutline") return;
 
-        if (s.type === "footprint") {
-            const childRef = s as FootprintReference;
-            const childLayers = getRecursiveLayers(childRef.footprintId, allFootprints, stackup, visited);
-            childLayers.forEach(l => layerIds.add(l.id));
-        } else {
-            Object.keys(s.assignedLayers || {}).forEach(k => layerIds.add(k));
-        }
-    });
+            if (s.type === "footprint") {
+                const childRef = s as FootprintReference;
+                const childLayers = getRecursiveLayers(childRef.footprintId, allFootprints, stackup, visited);
+                childLayers.forEach(l => layerIds.add(l.id));
+            } else if (s.type === "union") {
+                Object.keys(s.assignedLayers || {}).forEach(k => layerIds.add(k));
+                if (Object.keys(s.assignedLayers || {}).length === 0) {
+                    extractLayers((s as FootprintUnion).shapes);
+                }
+            } else {
+                Object.keys(s.assignedLayers || {}).forEach(k => layerIds.add(k));
+            }
+        });
+    }
+
+    extractLayers(fp.shapes);
 
     // Return unique layers sorted by stackup order
     return stackup.filter(l => layerIds.has(l.id));
@@ -538,8 +584,8 @@ export function getAvailableWireGuides(
 ): WireGuideDefinition[] {
     const results: WireGuideDefinition[] = [];
 
-    function recurse(fp: Footprint, pathIds: string[], names: string[]) {
-        fp.shapes.forEach(s => {
+    function recurse(shapes: FootprintShape[], pathIds: string[], names: string[]) {
+        shapes.forEach(s => {
             if (s.type === "wireGuide") {
                 // If it's a wire guide, add it
                 const fullId = [...pathIds, s.id].join(":");
@@ -550,13 +596,15 @@ export function getAvailableWireGuides(
                 const ref = s as FootprintReference;
                 const child = allFootprints.find(f => f.id === ref.footprintId);
                 if (child) {
-                    recurse(child, [...pathIds, s.id], [...names, s.name]);
+                    recurse(child.shapes, [...pathIds, s.id], [...names, s.name]);
                 }
+            } else if (s.type === "union") {
+                recurse((s as FootprintUnion).shapes, [...pathIds, s.id], [...names, s.name]);
             }
         });
     }
 
-    recurse(rootFootprint, [], []);
+    recurse(rootFootprint.shapes, [], []);
     return results;
 }
 
@@ -568,11 +616,11 @@ export function findWireGuideByPath(
 ): FootprintWireGuide | null {
     if (!pathId) return null;
     const path = pathId.split(":");
-    let currentFp = rootFootprint;
+    let currentShapes = rootFootprint.shapes;
 
     for (let i = 0; i < path.length; i++) {
         const id = path[i];
-        const shape = currentFp.shapes.find(s => s.id === id);
+        const shape = currentShapes.find(s => s.id === id);
         if (!shape) return null;
 
         if (shape.type === "wireGuide") {
@@ -581,7 +629,9 @@ export function findWireGuideByPath(
             const ref = shape as FootprintReference;
             const nextFp = allFootprints.find(f => f.id === ref.footprintId);
             if (!nextFp) return null;
-            currentFp = nextFp;
+            currentShapes = nextFp.shapes;
+        } else if (shape.type === "union") {
+            currentShapes = (shape as FootprintUnion).shapes;
         } else {
             return null;
         }
@@ -616,14 +666,14 @@ export function resolvePoint(
     if (!point.snapTo) return defaultRes;
 
     const path = point.snapTo.split(":");
-    let currentFp = rootFootprint;
+    let currentShapes = rootFootprint.shapes;
     
     // Accumulate transform from root to the guide
     let transform = { x: 0, y: 0, angle: 0 }; 
 
     for (let i = 0; i < path.length; i++) {
         const id = path[i];
-        const shape = currentFp.shapes.find(s => s.id === id);
+        const shape = currentShapes.find(s => s.id === id);
         if (!shape) return defaultRes;
 
         if (shape.type === "wireGuide") {
@@ -678,7 +728,22 @@ export function resolvePoint(
              transform.y += (lx * sin + ly * cos);
              transform.angle += la;
              
-             currentFp = nextFp;
+             currentShapes = nextFp.shapes;
+        } else if (shape.type === "union") {
+            const u = shape as FootprintUnion;
+            const lx = evaluateExpression(u.x, params);
+            const ly = evaluateExpression(u.y, params);
+            const la = evaluateExpression(u.angle, params);
+
+            const rad = (transform.angle * Math.PI) / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            
+            transform.x += (lx * cos - ly * sin);
+            transform.y += (lx * sin + ly * cos);
+            transform.angle += la;
+            
+            currentShapes = u.shapes;
         } else {
             return defaultRes;
         }

@@ -1,7 +1,7 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
 import { Fragment, useMemo, useRef, useEffect } from "react";
-import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape } from "../types";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints } from "../utils/footprintUtils";
 
@@ -9,6 +9,7 @@ const FootprintPropertiesPanel = ({
   footprint,
   allFootprints,
   selectedId,
+  selectedShapeIds,
   updateShape,
   updateMesh, // NEW
   updateFootprint,
@@ -23,10 +24,13 @@ const FootprintPropertiesPanel = ({
   onDuplicate, // NEW
   onEditChild, // NEW
   onConvertShape,
+  onGroup,
+  onUngroup,
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
   selectedId: string | null;
+  selectedShapeIds: string[];
   updateShape: (id: string, field: string, val: any) => void;
   updateMesh: (id: string, field: string, val: any) => void; // NEW
   updateFootprint: (field: string, val: any) => void;
@@ -41,6 +45,8 @@ const FootprintPropertiesPanel = ({
   onDuplicate: () => void; // NEW
   onEditChild: (id: string) => void; // NEW
   onConvertShape?: (oldId: string, newShape: FootprintShape) => void;
+  onGroup?: () => void;
+  onUngroup?: (id: string) => void;
 }) => {
   
   // Get available wire guides for Snapping
@@ -56,6 +62,24 @@ const FootprintPropertiesPanel = ({
         rowRefs.current.get(scrollToPointIndex)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, [scrollToPointIndex]);
+
+  if (selectedShapeIds.length > 1) {
+    return (
+        <div className="properties-panel">
+            <h3>Multiple shapes selected</h3>
+            <p>{selectedShapeIds.length} items</p>
+            
+            <div className="prop-group">
+                <button onClick={onGroup} style={{ width: '100%', padding: '12px' }}>
+                    Union
+                </button>
+                <p style={{fontSize: '0.85em', color:'#888', marginTop:'5px'}}>
+                    Joins selected shapes together into a union group.
+                </p>
+            </div>
+        </div>
+    );
+  }
 
   // Helper to render property editors for a Point (used in Lines and Board Outline)
   const renderPointEditor = (p: Point, idx: number, updateFn: (newP: Point) => void, removeFn: () => void, allowHandles: boolean = true) => {
@@ -422,7 +446,7 @@ const FootprintPropertiesPanel = ({
                                         color: "#fff", borderRadius: "4px"
                                     }} 
                                     title="Insert Midpoint"
-                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
+                                    onMouseEnter={() => setHoveredMidpointIndex(m.index)}
                                     onMouseLeave={() => setHoveredMidpointIndex(null)}
                                 >
                                     + Midpoint
@@ -629,6 +653,95 @@ const FootprintPropertiesPanel = ({
                 <label style={{color: '#666', fontStyle: 'italic', fontSize: '0.85em'}}>
                     Note: Layers assigned within the referenced footprint are preserved. Recursion is visual only.
                 </label>
+            </div>
+        </div>
+      );
+  }
+
+  if (shape.type === "union") {
+      const u = shape as FootprintUnion;
+      return (
+        <div className="properties-panel">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <h3 style={{ margin: 0 }}>UNION Properties</h3>
+                <button onClick={onDuplicate} title="Duplicate Union" style={{ padding: '4px 10px', fontSize: '0.9em' }}>Duplicate</button>
+            </div>
+
+            <div className="prop-group">
+                <button className="secondary" onClick={() => onUngroup && onUngroup(u.id)} style={{ width: '100%' }}>
+                    Ungroup
+                </button>
+            </div>
+
+            {/* Layer Assignments (Overrides) */}
+            <div className="prop-section">
+                <h4>Layer Overrides</h4>
+                <div className="layer-list">
+                    {stackup.map((layer: StackupLayer) => {
+                        const isChecked = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
+                        const assignment = isChecked ? (shape.assignedLayers[layer.id] as LayerAssignment) : { depth: "0", endmillRadius: "0" };
+                        
+                        return (
+                            <div key={layer.id} className="layer-assignment-row">
+                                <input className="layer-checkbox" type="checkbox" checked={isChecked}
+                                    onChange={(e) => {
+                                        const newAssignments = { ...(shape.assignedLayers || {}) };
+                                        if (e.target.checked) newAssignments[layer.id] = { depth: "0", endmillRadius: "0" }; 
+                                        else delete newAssignments[layer.id];
+                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                    }}
+                                />
+                                <div className="layer-color-badge" style={{ backgroundColor: layer.color }} />
+                                <span className="layer-name">{layer.name}</span>
+                                {isChecked && layer.type === "Carved/Printed" && (
+                                    <div className="layer-depth-wrapper">
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Override Depth</div>
+                                                <ExpressionEditor value={assignment.depth} onChange={(val) => {
+                                                        const newAssignments = { ...shape.assignedLayers };
+                                                        newAssignments[layer.id] = { ...assignment, depth: val };
+                                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                                    }} params={params} placeholder="Depth" />
+                                            </div>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Override Endmill Radius</div>
+                                                <ExpressionEditor value={assignment.endmillRadius} onChange={(val) => {
+                                                        const newAssignments = { ...shape.assignedLayers };
+                                                        newAssignments[layer.id] = { ...assignment, endmillRadius: val };
+                                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                                    }} params={params} placeholder="0" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            <div className="prop-group">
+                <label>Name</label>
+                <input type="text" value={u.name} onChange={(e) => updateShape(u.id, "name", e.target.value)} />
+            </div>
+            <div className="prop-group">
+                <label>Origin X</label>
+                <ExpressionEditor value={u.x} onChange={(val) => updateShape(u.id, "x", val)} params={params} />
+            </div>
+            <div className="prop-group">
+                <label>Origin Y</label>
+                <ExpressionEditor value={u.y} onChange={(val) => updateShape(u.id, "y", val)} params={params} />
+            </div>
+            <div className="prop-group">
+                <label>Rotation</label>
+                <ExpressionEditor value={u.angle} onChange={(val) => updateShape(u.id, "angle", val)} params={params} />
+            </div>
+            
+            <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
+                <p style={{fontSize: '0.85em', color: '#888'}}>
+                    Contains {u.shapes.length} shapes. Ungroup to edit individual children.
+                </p>
             </div>
         </div>
       );

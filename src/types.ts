@@ -20,7 +20,7 @@ export interface StackupLayer {
 
 // --- FOOTPRINT TYPES ---
 
-export type ShapeType = "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon";
+export type ShapeType = "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon" | "union";
 
 export interface LayerAssignment {
     depth: string;
@@ -101,7 +101,15 @@ export interface FootprintReference extends BaseShape {
   footprintId: string; // The ID of the child footprint
 }
 
-export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide | FootprintBoardOutline | FootprintPolygon;
+export interface FootprintUnion extends BaseShape {
+  type: "union";
+  x: string;
+  y: string;
+  angle: string;
+  shapes: FootprintShape[];
+}
+
+export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide | FootprintBoardOutline | FootprintPolygon | FootprintUnion;
 
 export interface MeshAsset {
   id: string;

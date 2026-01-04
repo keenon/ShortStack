@@ -1,6 +1,6 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion } from "../types";
 import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
@@ -304,6 +304,43 @@ export const RecursiveShapeRenderer = ({
               {targetFp.shapes.length === 0 && (
                    <circle cx={0} cy={0} r={5} stroke="#666" strokeDasharray="2,2" fill="none" vectorEffect="non-scaling-stroke" />
               )}
+          </g>
+      );
+  }
+
+  if (shape.type === "union") {
+      const u = shape as FootprintUnion;
+      const x = evaluateExpression(u.x, params);
+      const y = evaluateExpression(u.y, params);
+      const angle = evaluateExpression(u.angle, params);
+
+      return (
+          <g 
+            transform={`translate(${x}, ${-y}) rotate(${-angle})`}
+            onMouseDown={(e) => onMouseDown(e, shape.id)}
+            style={{ cursor: "pointer", opacity: isSelected ? 1 : 0.9 }}
+          >
+              {isSelected && !onlyHandles && (
+                  <circle cx={0} cy={0} r={handleRadius} fill="#646cff" vectorEffect="non-scaling-stroke"/>
+              )}
+              
+              {[...u.shapes].reverse().map((child, idx) => (
+                  <RecursiveShapeRenderer
+                    key={`${shape.id}-${child.id}-${idx}`}
+                    shape={child}
+                    allFootprints={allFootprints}
+                    params={params}
+                    stackup={stackup}
+                    isSelected={false}
+                    isParentSelected={isSelected}
+                    onMouseDown={(e) => onMouseDown(e, shape.id)} 
+                    onHandleDown={() => {}} 
+                    handleRadius={handleRadius}
+                    rootFootprint={u as unknown as Footprint}
+                    layerVisibility={layerVisibility}
+                    onlyHandles={onlyHandles}
+                  />
+              ))}
           </g>
       );
   }

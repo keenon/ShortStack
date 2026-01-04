@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
@@ -150,6 +150,7 @@ const ShapeListPanel = ({
           case "wireGuide": return <IconGuide className="shape-icon" />;
           case "boardOutline": return <IconOutline className="shape-icon" />;
           case "footprint": return <IconFootprint className="shape-icon" />;
+          case "union": return <div className="shape-icon" style={{fontWeight:'bold', width:16, textAlign:'center'}}>U</div>;
           default: return null;
       }
   };
@@ -620,7 +621,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                 y: -evaluateExpression(sy, params) // Visual Y is inverted
             });
 
-            if (s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide") {
+            if (s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide" || s.type === "union") {
                 // 1. Calculate Numeric Rotation
                 const origin = getVis(startState.x, startState.y);
                 const rotatedOrigin = rotatePoint(origin, { x: cx, y: cy }, deltaAngleRad);
@@ -641,8 +642,8 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                     y: modifyExpression(startState.y, dy) 
                 };
 
-                // 4. Handle Rotation Property (Rects/Footprints)
-                if (s.type === "rect" || s.type === "footprint") {
+                // 4. Handle Rotation Property (Rects/Footprints/Unions)
+                if (s.type === "rect" || s.type === "footprint" || s.type === "union") {
                     newProps.angle = modifyExpression(startState.angle, -deltaAngleDeg);
                 }
 
@@ -1070,6 +1071,208 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
         handlePaste();
     }
   }, [selectedShapeIds, handleCopy, handlePaste]);
+
+  // --- UNION / UNGROUP LOGIC ---
+
+  const handleGroup = () => {
+    if (selectedShapeIds.length < 2) return;
+    
+    // 1. Calculate Centroid of Selection for Union Center
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const selectedShapes = footprint.shapes.filter(s => selectedShapeIds.includes(s.id));
+    
+    selectedShapes.forEach(s => {
+        const aabb = getShapeAABB(s, params, footprint, allFootprints);
+        if (aabb) {
+            minX = Math.min(minX, aabb.x1, aabb.x2); maxX = Math.max(maxX, aabb.x1, aabb.x2);
+            minY = Math.min(minY, aabb.y1, aabb.y2); maxY = Math.max(maxY, aabb.y1, aabb.y2);
+        }
+    });
+    
+    if (minX === Infinity) return;
+    
+    const cx = (minX + maxX) / 2;
+    const cy = -((minY + maxY) / 2); // Convert Visual Y back to Math Y
+    
+    // 2. Create Union Shape
+    const unionId = crypto.randomUUID();
+    const newUnion: FootprintUnion = {
+        id: unionId,
+        type: "union",
+        name: "Union Group",
+        x: parseFloat(cx.toFixed(4)).toString(),
+        y: parseFloat(cy.toFixed(4)).toString(),
+        angle: "0",
+        assignedLayers: {},
+        shapes: []
+    };
+
+    // 3. Move shapes into union (adjusting coords relative to union center)
+    const movedShapes = selectedShapes.map(s => {
+        const dx = -cx;
+        const dy = -cy;
+        
+        if (s.type === "line") {
+            // For Lines (where x/y are ignored by renderer), translate points
+            const pts = (s as any).points.map((p: any) => ({
+                ...p,
+                x: modifyExpression(p.x, dx),
+                y: modifyExpression(p.y, dy)
+            }));
+            return { ...s, points: pts };
+        } else if (s.type === "polygon" || s.type === "boardOutline") {
+            // For Polygons/Outlines (where renderer adds shape.x + point.x),
+            // we shift the shape.x/y ONLY. We do NOT shift points, 
+            // otherwise we apply the transform twice!
+            return {
+                ...s,
+                x: modifyExpression((s as any).x, dx),
+                y: modifyExpression((s as any).y, dy)
+            };
+        }
+        
+        // For Primitives
+        return {
+            ...s,
+            x: modifyExpression((s as any).x, dx),
+            y: modifyExpression((s as any).y, dy)
+        };
+    });
+    newUnion.shapes = movedShapes;
+
+    // 4. Update Footprint (Replace selected shapes with Union)
+    const remainingShapes = footprint.shapes.filter(s => !selectedShapeIds.includes(s.id));
+    updateHistory({
+        footprint: { ...footprint, shapes: [newUnion, ...remainingShapes] },
+        selectedShapeIds: [unionId]
+    });
+  };
+
+  const handleUngroup = (unionId: string) => {
+    const unionShape = footprint.shapes.find(s => s.id === unionId);
+    if (!unionShape || unionShape.type !== "union") return;
+    const union = unionShape as FootprintUnion;
+
+    const ux = evaluateExpression(union.x, params);
+    const uy = evaluateExpression(union.y, params);
+    const uAngle = evaluateExpression(union.angle, params);
+
+    // Transform logic: apply union's translation and rotation back to individual shapes
+    const rad = uAngle * (Math.PI / 180);
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    const restoredShapes = union.shapes.map(s => {
+        const lx = evaluateExpression((s as any).x || "0", params);
+        const ly = evaluateExpression((s as any).y || "0", params);
+        
+        // Frame translation & rotation for Shape Origin
+        const gx = ux + (lx * cos - ly * sin);
+        const gy = uy + (lx * sin + ly * cos);
+        
+        // Base restoration object
+        let newS: any = { 
+            ...s, 
+            x: parseFloat(gx.toFixed(4)).toString(), 
+            y: parseFloat(gy.toFixed(4)).toString() 
+        };
+        
+        if (s.type === "rect" || s.type === "footprint" || s.type === "union") {
+            const sa = evaluateExpression((s as any).angle, params);
+            newS.angle = parseFloat((sa + uAngle).toFixed(4)).toString();
+        }
+
+        if (s.type === "line") {
+            // Lines rely on point coordinates. Bake rotation/translation into points.
+            const pts = (s as any).points.map((p: any) => {
+                const lpx = evaluateExpression(p.x, params);
+                const lpy = evaluateExpression(p.y, params);
+                
+                // Point location is relative to shape origin (which is usually 0 for lines)
+                // We add the shape's local origin (lx, ly) just in case
+                const absLx = lx + lpx;
+                const absLy = ly + lpy;
+
+                // Rotate around Union Origin
+                const rpx = absLx * cos - absLy * sin;
+                const rpy = absLx * sin + absLy * cos;
+                
+                const gpx = ux + rpx;
+                const gpy = uy + rpy;
+
+                // ROTATE HANDLES
+                const rotHandle = (h?: {x:string, y:string}) => {
+                    if (!h) return undefined;
+                    const hx = evaluateExpression(h.x, params);
+                    const hy = evaluateExpression(h.y, params);
+                    // Standard vector rotation
+                    const rhx = hx * cos - hy * sin;
+                    const rhy = hx * sin + hy * cos;
+                    return {
+                        x: parseFloat(rhx.toFixed(4)).toString(),
+                        y: parseFloat(rhy.toFixed(4)).toString()
+                    };
+                };
+
+                return {
+                    ...p,
+                    x: parseFloat(gpx.toFixed(4)).toString(),
+                    y: parseFloat(gpy.toFixed(4)).toString(),
+                    handleIn: rotHandle(p.handleIn),
+                    handleOut: rotHandle(p.handleOut)
+                };
+            });
+            newS.points = pts;
+            newS.x = "0"; 
+            newS.y = "0";
+        } else if (s.type === "polygon" || s.type === "boardOutline") {
+            // Polygons use Shape Origin + Point. 
+            // We have already set newS.x/y to the transformed Global Origin (gx, gy).
+            // If there was a rotation (uAngle), we must rotate the points around the shape's new origin.
+            if (Math.abs(uAngle) > 0.001) {
+                const pts = (s as any).points.map((p: any) => {
+                    const px = evaluateExpression(p.x, params);
+                    const py = evaluateExpression(p.y, params);
+                    
+                    // Rotate point around local (0,0) by uAngle
+                    const rpx = px * cos - py * sin;
+                    const rpy = px * sin + py * cos;
+
+                    // ROTATE HANDLES
+                    const rotHandle = (h?: {x:string, y:string}) => {
+                        if (!h) return undefined;
+                        const hx = evaluateExpression(h.x, params);
+                        const hy = evaluateExpression(h.y, params);
+                        // Standard vector rotation
+                        const rhx = hx * cos - hy * sin;
+                        const rhy = hx * sin + hy * cos;
+                        return {
+                            x: parseFloat(rhx.toFixed(4)).toString(),
+                            y: parseFloat(rhy.toFixed(4)).toString()
+                        };
+                    };
+                    
+                    return {
+                        ...p,
+                        x: parseFloat(rpx.toFixed(4)).toString(),
+                        y: parseFloat(rpy.toFixed(4)).toString(),
+                        handleIn: rotHandle(p.handleIn),
+                        handleOut: rotHandle(p.handleOut)
+                    };
+                });
+                newS.points = pts;
+            }
+        }
+
+        return newS as FootprintShape;
+    });
+
+    const others = footprint.shapes.filter(s => s.id !== unionId);
+    updateHistory({
+        footprint: { ...footprint, shapes: [...restoredShapes, ...others] },
+        selectedShapeIds: restoredShapes.map(s => s.id)
+    });
+  };
   
   const deleteShape = useCallback((shapeId: string) => {
     const shapeToDelete = footprintRef.current.shapes.find(s => s.id === shapeId);
@@ -1166,6 +1369,10 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
             e.preventDefault();
             handleDuplicate();
         }
+        if (isCtrl && e.key.toLowerCase() === 'g') {
+            e.preventDefault();
+            handleGroup();
+        }
         
         // DELETE Key logic
         if (e.key === "Delete" || e.key === "Backspace") {
@@ -1181,7 +1388,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleCopy, handlePaste, handleDuplicate, editorState, deleteShape, deleteMesh, undo, redo, canUndo, canRedo]);
+  }, [handleCopy, handlePaste, handleDuplicate, editorState, deleteShape, deleteMesh, undo, redo, canUndo, canRedo, handleGroup]);
 
   // --- ACTIONS ---
   const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon", footprintId?: string) => {
@@ -1801,12 +2008,13 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
         </div>
 
         <div className="fp-sidebar">
-          {activeShape || activeMesh ? (
+          {selectedShapeIds.length > 0 || activeMesh ? (
             <>
               <FootprintPropertiesPanel 
                 footprint={footprint}
                 allFootprints={allFootprints}
                 selectedId={primarySelectedId}
+                selectedShapeIds={selectedShapeIds}
                 updateShape={updateShape} 
                 updateMesh={updateMesh} // NEW
                 updateFootprint={updateFootprintField}
@@ -1821,6 +2029,8 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                 onDuplicate={handleDuplicate} // NEW
                 onEditChild={onEditChild}
                 onConvertShape={convertShape}
+                onGroup={handleGroup}
+                onUngroup={handleUngroup}
               />
               {activeShape && (
                 <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
@@ -1898,6 +2108,44 @@ function collectExportShapes(
                      { x: gx, y: gy, angle: globalAngle }
                  ));
              }
+        } else if (shape.type === "union") {
+             const u = shape as FootprintUnion;
+             const assigned = u.assignedLayers?.[layer.id];
+             let overrideDepth = -1;
+             let overrideRadius = 0;
+             
+             if (assigned) {
+                 if (layer.type === "Cut") {
+                     overrideDepth = layerThickness;
+                 } else {
+                     const val = evaluateExpression(typeof assigned === 'object' ? assigned.depth : assigned, params);
+                     overrideDepth = Math.max(0, val);
+                     if (typeof assigned === 'object') {
+                         overrideRadius = evaluateExpression(assigned.endmillRadius, params);
+                     }
+                 }
+             }
+
+             const uAngle = evaluateExpression(u.angle, params);
+             const globalAngle = transform.angle + uAngle;
+             
+             const childrenExport = collectExportShapes(
+                 contextFootprint,
+                 u.shapes,
+                 allFootprints,
+                 params,
+                 layer,
+                 layerThickness,
+                 { x: gx, y: gy, angle: globalAngle }
+             );
+
+             if (overrideDepth >= 0) {
+                 childrenExport.forEach(child => {
+                     child.depth = overrideDepth;
+                     if (overrideRadius > 0) child.endmill_radius = overrideRadius;
+                 });
+             }
+             result = result.concat(childrenExport);
         } else {
              // Check assignment
              if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;

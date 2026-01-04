@@ -4,7 +4,7 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
 import { STLLoader, OBJLoader, GLTFLoader } from "three-stdlib";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, FootprintPolygon, Point, MeshAsset } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, FootprintPolygon, Point, MeshAsset, FootprintUnion } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
 import { evaluateExpression, resolvePoint, modifyExpression, getPolyOutlinePoints } from "../utils/footprintUtils";
 import Module from "manifold-3d";
@@ -367,7 +367,7 @@ function flattenShapes(
         const globalY = transform.y + (localX * sin + localY * cos);
         
         let localRotation = 0;
-        if (shape.type === "rect" || shape.type === "footprint") {
+        if (shape.type === "rect" || shape.type === "footprint" || shape.type === "union") {
             localRotation = evaluate((shape as any).angle, params);
         }
         const globalRotation = transform.rotation + localRotation;
@@ -383,6 +383,21 @@ function flattenShapes(
                 }, depth + 1);
                 result = result.concat(children);
             }
+        } else if (shape.type === "union") {
+            const u = shape as FootprintUnion;
+            const children = flattenShapes(u as unknown as Footprint, u.shapes, allFootprints, params, {
+                x: globalX,
+                y: globalY,
+                rotation: globalRotation
+            }, depth + 1);
+
+            // Apply override logic: if Union has layer assignments, they propagate to all children
+            if (Object.keys(u.assignedLayers || {}).length > 0) {
+                children.forEach(c => {
+                    c.shape = { ...c.shape, assignedLayers: u.assignedLayers };
+                });
+            }
+            result = result.concat(children);
         } else {
             result.push({
                 shape: shape,
@@ -1383,6 +1398,26 @@ function flattenMeshes(
                      ancestorRefId || ref.id
                  ));
              }
+        } else if (s.type === "union") {
+             const u = s as FootprintUnion;
+             const x = evaluate(u.x, params);
+             const y = evaluate(u.y, params);
+             const angle = evaluate(u.angle, params);
+
+             const uMat = new THREE.Matrix4();
+             uMat.makeRotationY(angle * Math.PI / 180);
+             uMat.setPosition(x, 0, -y);
+
+             const globalUMat = transform.clone().multiply(uMat);
+
+             // Recurse using the union's internal shapes
+             result = result.concat(flattenMeshes(
+                 u as unknown as Footprint,
+                 allFootprints,
+                 params,
+                 globalUMat,
+                 ancestorRefId || u.id
+             ));
         }
     });
 
