@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import * as math from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect } from "../types";
 
 export function modifyExpression(expression: string, delta: number): string {
   if (delta === 0) return expression;
@@ -500,4 +500,92 @@ export function offsetPolygonContour(points: THREE.Vector2[], offset: number): T
     }
 
     return result;
+}
+
+/**
+ * Converts a Rectangle (with optional corner radius and rotation) 
+ * into a set of Polygon points with appropriate Bezier handles.
+ */
+export function convertRectToPolyPoints(
+    rect: FootprintRect, 
+    params: Parameter[]
+): Point[] {
+    const w = evaluateExpression(rect.width, params);
+    const h = evaluateExpression(rect.height, params);
+    const rawR = evaluateExpression(rect.cornerRadius, params);
+    const angle = evaluateExpression(rect.angle, params);
+
+    const hw = w / 2;
+    const hh = h / 2;
+    // Clamp radius to half the shortest side
+    const r = Math.max(0, Math.min(rawR, Math.min(hw, hh)));
+    
+    // Kappa for cubic bezier approximation of 90deg arc
+    const k = r * 0.55228475; 
+
+    // Define vertices in local un-rotated space (CCW winding)
+    // Structure: { x, y, hIn?, hOut? } (Handles are relative vectors)
+    let rawVerts: { x: number, y: number, hIn?: {x:number, y:number}, hOut?: {x:number, y:number} }[] = [];
+
+    if (r < 0.001) {
+        // Sharp Corners
+        rawVerts = [
+            { x: hw, y: -hh },  // Bottom Right
+            { x: hw, y: hh },   // Top Right
+            { x: -hw, y: hh },  // Top Left
+            { x: -hw, y: -hh }  // Bottom Left
+        ];
+    } else {
+        // Rounded Corners (8 points)
+        // 1. Bottom Right Corner
+        rawVerts.push({ x: hw, y: -hh + r, hOut: { x: 0, y: -k } }); // Arc Start
+        rawVerts.push({ x: hw - r, y: -hh, hIn: { x: k, y: 0 } });   // Arc End
+
+        // 2. Bottom Left Corner
+        rawVerts.push({ x: -hw + r, y: -hh, hOut: { x: -k, y: 0 } });
+        rawVerts.push({ x: -hw, y: -hh + r, hIn: { x: 0, y: -k } });
+
+        // 3. Top Left Corner
+        rawVerts.push({ x: -hw, y: hh - r, hOut: { x: 0, y: k } });
+        rawVerts.push({ x: -hw + r, y: hh, hIn: { x: -k, y: 0 } });
+
+        // 4. Top Right Corner
+        rawVerts.push({ x: hw - r, y: hh, hOut: { x: k, y: 0 } });
+        rawVerts.push({ x: hw, y: hh - r, hIn: { x: 0, y: k } });
+    }
+
+    // Apply Rotation
+    const rad = (angle * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    const rotate = (x: number, y: number) => ({
+        x: x * cos - y * sin,
+        y: x * sin + y * cos
+    });
+
+    return rawVerts.map(v => {
+        const p = rotate(v.x, v.y);
+        
+        // Handles are vectors, they rotate but don't translate
+        let newHIn = undefined;
+        if (v.hIn) {
+            const h = rotate(v.hIn.x, v.hIn.y);
+            newHIn = { x: parseFloat(h.x.toFixed(4)).toString(), y: parseFloat(h.y.toFixed(4)).toString() };
+        }
+
+        let newHOut = undefined;
+        if (v.hOut) {
+            const h = rotate(v.hOut.x, v.hOut.y);
+            newHOut = { x: parseFloat(h.x.toFixed(4)).toString(), y: parseFloat(h.y.toFixed(4)).toString() };
+        }
+
+        return {
+            id: crypto.randomUUID(),
+            x: parseFloat(p.x.toFixed(4)).toString(),
+            y: parseFloat(p.y.toFixed(4)).toString(),
+            handleIn: newHIn,
+            handleOut: newHOut
+        };
+    });
 }

@@ -1,9 +1,9 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
 import { Fragment, useMemo, useRef, useEffect } from "react";
-import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset } from "../types";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
+import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints } from "../utils/footprintUtils";
 
 const FootprintPropertiesPanel = ({
   footprint,
@@ -22,6 +22,7 @@ const FootprintPropertiesPanel = ({
   setHoveredMidpointIndex,
   onDuplicate, // NEW
   onEditChild, // NEW
+  onConvertShape,
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -39,6 +40,7 @@ const FootprintPropertiesPanel = ({
   setHoveredMidpointIndex: (index: number | null) => void;
   onDuplicate: () => void; // NEW
   onEditChild: (id: string) => void; // NEW
+  onConvertShape?: (oldId: string, newShape: FootprintShape) => void;
 }) => {
   
   // Get available wire guides for Snapping
@@ -124,7 +126,7 @@ const FootprintPropertiesPanel = ({
                                 }} /> In Handle
                         </label>
                         <label className="checkbox-label" style={p.snapTo ? { opacity: 0.7 } : {}}>
-                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasOut : !!p.handleOut} onChange={(e) => {
+                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasIn : !!p.handleOut} onChange={(e) => {
                                     if (e.target.checked) updateFn({ ...p, handleOut: { x: "5", y: "0" } });
                                     else { const { handleIn, ...rest } = p; updateFn(rest as Point); }
                                 }} /> Out Handle
@@ -421,7 +423,7 @@ const FootprintPropertiesPanel = ({
                                         color: "#fff", borderRadius: "4px"
                                     }} 
                                     title="Insert Midpoint"
-                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
+                                    onMouseEnter={() => setHoveredMidpointIndex(m.index)}
                                     onMouseLeave={() => setHoveredMidpointIndex(null)}
                                 >
                                     + Midpoint
@@ -521,6 +523,25 @@ const FootprintPropertiesPanel = ({
         </button>
     </div>
   );
+
+  const handleConvertToPolygon = () => {
+      if (shape.type !== 'rect' || !onConvertShape) return;
+      
+      const rect = shape as FootprintRect;
+      const polyPoints = convertRectToPolyPoints(rect, params);
+      
+      const newPoly: FootprintPolygon = {
+          id: rect.id, 
+          type: "polygon",
+          name: rect.name.replace("New Rect", "Converted Polygon"),
+          x: rect.x,
+          y: rect.y,
+          assignedLayers: rect.assignedLayers,
+          points: polyPoints
+      };
+      
+      onConvertShape(rect.id, newPoly);
+  };
 
   // NEW: Wire Guide Properties
   if (shape.type === "wireGuide") {
@@ -726,6 +747,15 @@ const FootprintPropertiesPanel = ({
           <div className="prop-group">
             <label>Corner Radius</label>
             <ExpressionEditor value={(shape as FootprintRect).cornerRadius} onChange={(val) => updateShape(shape.id, "cornerRadius", val)} params={params} placeholder="0" />
+          </div>
+
+          <div style={{ marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px' }}>
+              <button onClick={handleConvertToPolygon} style={{ width: '100%', backgroundColor: '#2d4b38', border: '1px solid #487e5b' }}>
+                  Convert to Polygon
+              </button>
+              <div style={{ fontSize: '0.8em', color: '#888', marginTop: '5px' }}>
+                  Bakes rotation and radius into editable points.
+              </div>
           </div>
         </>
       )}

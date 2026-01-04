@@ -716,6 +716,32 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
     setSelectedShapeId(null);
   }, [updateHistory]);
 
+  const convertShape = useCallback((oldShapeId: string, newShape: FootprintShape) => {
+      const currentShapes = footprintRef.current.shapes;
+      const index = currentShapes.findIndex(s => s.id === oldShapeId);
+      if (index === -1) return;
+
+      const newShapes = [...currentShapes];
+      newShapes[index] = newShape;
+
+      // Update board outline assignments if necessary
+      let newAssignments = { ...footprintRef.current.boardOutlineAssignments };
+      if (footprintRef.current.isBoard) {
+          Object.keys(newAssignments).forEach(layerId => {
+              if (newAssignments[layerId] === oldShapeId) {
+                  newAssignments[layerId] = newShape.id;
+              }
+          });
+      }
+
+      updateHistory({ 
+          ...footprintRef.current, 
+          shapes: newShapes, 
+          boardOutlineAssignments: newAssignments 
+      });
+      setSelectedShapeId(newShape.id);
+  }, [updateHistory]);
+
   const deleteMesh = useCallback((meshId: string) => {
       updateHistory({ ...footprintRef.current, meshes: (footprintRef.current.meshes || []).filter(m => m.id !== meshId) });
       if (selectedShapeId === meshId) setSelectedShapeId(null);
@@ -1356,6 +1382,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                 setHoveredMidpointIndex={setHoveredMidpointIndex}
                 onDuplicate={handleDuplicate} // NEW
                 onEditChild={onEditChild}
+                onConvertShape={convertShape}
               />
               {activeShape && (
                 <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
