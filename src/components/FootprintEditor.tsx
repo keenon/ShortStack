@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, doRectsIntersect, isShapeInSelection, rotatePoint } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh, IconPolygon } from "./Icons";
@@ -592,50 +592,123 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
     }
   };
 
-  const handleGlobalMouseMove = (e: MouseEvent) => {
+const handleGlobalMouseMove = (e: MouseEvent) => {
     // 1. ROTATION LOGIC
     if (isRotating.current && rotationStartData.current) {
         const mousePos = getMouseWorldPos(e.clientX, e.clientY);
         setRotationGuide({ center: rotationStartData.current.center, current: mousePos });
+        
         const currentAngle = Math.atan2(mousePos.y - rotationStartData.current.center.y, mousePos.x - rotationStartData.current.center.x);
         const deltaAngleRad = currentAngle - rotationStartData.current.startMouseAngle;
         const deltaAngleDeg = deltaAngleRad * (180 / Math.PI);
-        const cx = rotationStartData.current.center.x, cy = rotationStartData.current.center.y;
+        
+        const cx = rotationStartData.current.center.x; 
+        const cy = rotationStartData.current.center.y;
+
+        // Pre-calculate Handle Rotation Trigs (Inverted Angle for Math Space vectors)
+        // Visual CW (+angle) == Math CW (-angle) because Y is inverted.
+        const hCos = Math.cos(-deltaAngleRad);
+        const hSin = Math.sin(-deltaAngleRad);
+        
         const newShapes = footprintRef.current.shapes.map(s => {
             const startState = rotationStartData.current!.initialShapes.get(s.id);
             if (!startState) return s;
-            const formatVal = (v: number) => parseFloat(v.toFixed(4)).toString();
-            const getVis = (sx: string, sy: string) => ({ x: evaluateExpression(sx, params), y: -evaluateExpression(sy, params) });
+
+            // Helper: Resolve visual origin from expression string
+            const getVis = (sx: string, sy: string) => ({ 
+                x: evaluateExpression(sx, params), 
+                y: -evaluateExpression(sy, params) // Visual Y is inverted
+            });
+
             if (s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide") {
+                // 1. Calculate Numeric Rotation
                 const origin = getVis(startState.x, startState.y);
                 const rotatedOrigin = rotatePoint(origin, { x: cx, y: cy }, deltaAngleRad);
-                const newProps: any = { x: formatVal(rotatedOrigin.x), y: formatVal(-rotatedOrigin.y) };
-                if (s.type === "rect" || s.type === "footprint") newProps.angle = formatVal(evaluateExpression(startState.angle, params) - deltaAngleDeg);
+                
+                // 2. Calculate Deltas (New Numeric - Old Numeric)
+                const startXVal = origin.x;
+                const startYVal = -origin.y; // Convert visual Y back to math Y
+                
+                const newXVal = rotatedOrigin.x;
+                const newYVal = -rotatedOrigin.y; // Convert visual Y back to math Y
+                
+                const dx = newXVal - startXVal;
+                const dy = newYVal - startYVal;
+
+                // 3. Apply Deltas to Expressions
+                const newProps: any = { 
+                    x: modifyExpression(startState.x, dx), 
+                    y: modifyExpression(startState.y, dy) 
+                };
+
+                // 4. Handle Rotation Property (Rects/Footprints)
+                if (s.type === "rect" || s.type === "footprint") {
+                    newProps.angle = modifyExpression(startState.angle, -deltaAngleDeg);
+                }
+
+                // 5. Handle Wire Guide Orientation Handle (if exists)
+                if (s.type === "wireGuide" && (s as any).handle) {
+                    const h = (startState as any).handle;
+                    const hx = evaluateExpression(h.x, params);
+                    const hy = evaluateExpression(h.y, params);
+                    
+                    const rvhx = hx * hCos - hy * hSin;
+                    const rvhy = hx * hSin + hy * hCos;
+                    
+                    newProps.handle = {
+                        x: modifyExpression(h.x, rvhx - hx),
+                        y: modifyExpression(h.y, rvhy - hy)
+                    };
+                }
+
                 return { ...s, ...newProps };
+
             } else if (s.type === "line" || s.type === "boardOutline" || s.type === "polygon") {
                 // Recompute point locations using static origin frame
                 const originX = (s.type === "line") ? 0 : evaluateExpression(startState.x, params);
-                const originY = (s.type === "line") ? 0 : -evaluateExpression(startState.y, params);
-                const cos = Math.cos(deltaAngleRad), sin = Math.sin(deltaAngleRad);
+                const visualOriginX = originX;
+                const visualOriginY = (s.type === "line") ? 0 : -evaluateExpression(startState.y, params);
 
                 const rotatedPoints = (startState.points as Point[]).map(p => {
-                    const pxRaw = evaluateExpression(p.x, params), pyRaw = evaluateExpression(p.y, params);
-                    // Visual global position
-                    const vP = { x: originX + pxRaw, y: originY - pyRaw };
-                    const rP = rotatePoint(vP, { x: cx, y: cy }, deltaAngleRad);
-                    // Back to data local coordinates
-                    const npx = rP.x - originX, npy = -(rP.y - originY);
+                    const pxRaw = evaluateExpression(p.x, params);
+                    const pyRaw = evaluateExpression(p.y, params);
                     
-                    const rotateVecExp = (h: {x: string, y: string}) => {
-                        const hx = evaluateExpression(h.x, params), hy = evaluateExpression(h.y, params);
-                        // Rotate visual vector (x, -y)
-                        const rvhx = hx * cos - (-hy) * sin, rvhy = hx * sin + (-hy) * cos;
-                        return { x: modifyExpression(h.x, rvhx - hx), y: modifyExpression(h.y, (-rvhy) - hy) };
+                    // Visual global position: (ShapeOrigin + PointLocal)
+                    // Visual Y = VisualOriginY - pyRaw (since pyRaw is positive up)
+                    const vP = { 
+                        x: visualOriginX + pxRaw, 
+                        y: visualOriginY - pyRaw 
                     };
+
+                    // Rotate the VISUAL point around the Centroid
+                    const rP = rotatePoint(vP, { x: cx, y: cy }, deltaAngleRad);
+                    
+                    // Convert back to Local Math Coordinates
+                    const npx = rP.x - visualOriginX;
+                    const npy = visualOriginY - rP.y;
+                    
+                    const dx = npx - pxRaw;
+                    const dy = npy - pyRaw;
+
+                    // Rotate Handles (Vectors)
+                    // Uses hCos/hSin (Negative Angle) to rotate correctly in Math Space
+                    const rotateVecExp = (h: {x: string, y: string}) => {
+                        const hx = evaluateExpression(h.x, params);
+                        const hy = evaluateExpression(h.y, params);
+                        
+                        const rvhx = hx * hCos - hy * hSin;
+                        const rvhy = hx * hSin + hy * hCos;
+                        
+                        return { 
+                            x: modifyExpression(h.x, rvhx - hx), 
+                            y: modifyExpression(h.y, rvhy - hy) 
+                        };
+                    };
+
                     return {
                         ...p,
-                        x: modifyExpression(p.x, npx - pxRaw),
-                        y: modifyExpression(p.y, npy - pyRaw),
+                        x: modifyExpression(p.x, dx),
+                        y: modifyExpression(p.y, dy),
                         handleIn: p.handleIn ? rotateVecExp(p.handleIn) : undefined,
                         handleOut: p.handleOut ? rotateVecExp(p.handleOut) : undefined
                     };
@@ -666,8 +739,6 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
     if (isSelectionDragging.current && wrapperRef.current) {
         const currentPos = getMouseWorldPos(e.clientX, e.clientY);
         selectionCurrentRef.current = currentPos;
-        
-        // Update visual state (batched by React)
         if (selectionStartRef.current) {
             setSelectionBox({ start: selectionStartRef.current, current: currentPos });
         }
@@ -744,6 +815,9 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   };
 
   const handleShapeMouseDown = (e: React.MouseEvent, id: string, pointIndex?: number) => {
+      // Pass through if Alt is held to allow Global Rotation
+      if (e.altKey) return; 
+
       e.stopPropagation(); e.preventDefault();
       if (viewMode !== "2D") return;
 
@@ -803,6 +877,9 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   };
 
   const handleHandleMouseDown = (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => {
+      // Pass through if Alt is held to allow Global Rotation
+      if (e.altKey) return; 
+
       e.stopPropagation(); e.preventDefault();
       if (viewMode !== "2D") return;
       
