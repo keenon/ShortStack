@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, doRectsIntersect, isShapeInSelection } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, getRecursiveLayers, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, doRectsIntersect, isShapeInSelection, rotatePoint } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh, IconPolygon } from "./Icons";
@@ -369,6 +369,15 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const selectionStartRef = useRef<{x: number, y: number} | null>(null);
   const selectionCurrentRef = useRef<{x: number, y: number} | null>(null);
 
+  // Rotation State
+  const [rotationGuide, setRotationGuide] = useState<{ center: {x:number, y:number}, current: {x:number, y:number} } | null>(null);
+  const isRotating = useRef(false);
+  const rotationStartData = useRef<{
+    center: { x: number, y: number };
+    startMouseAngle: number;
+    initialShapes: Map<string, any>;
+  } | null>(null);
+
   // NEW: State for point interaction
   const [hoveredPointIndex, setHoveredPointIndex] = useState<number | null>(null);
   const [scrollToPointIndex, setScrollToPointIndex] = useState<number | null>(null);
@@ -520,7 +529,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const handleMouseDown = (e: React.MouseEvent) => {
     if (viewMode !== "2D") return;
     
-    // CHANGED: Right Click (2) or Middle Click (1) for PAN
+    // Right Click (2) or Middle Click (1) for PAN
     if (e.button === 1 || e.button === 2) {
         e.preventDefault();
         isDragging.current = true;
@@ -532,7 +541,37 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
         return;
     }
 
-    // NEW: Left Click (0) for SELECTION BOX
+    // ALT + Left Click -> ROTATION
+    if (e.button === 0 && e.altKey && selectedShapeIds.length > 0) {
+        e.stopPropagation(); e.preventDefault();
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        let count = 0;
+        selectedShapeIds.forEach(id => {
+            const shape = footprint.shapes.find(s => s.id === id);
+            if (shape) {
+                const aabb = getShapeAABB(shape, params, footprint, allFootprints);
+                if (aabb) {
+                    minX = Math.min(minX, aabb.x1, aabb.x2); maxX = Math.max(maxX, aabb.x1, aabb.x2);
+                    minY = Math.min(minY, aabb.y1, aabb.y2); maxY = Math.max(maxY, aabb.y1, aabb.y2);
+                    count++;
+                }
+            }
+        });
+        if (count === 0) return;
+        const centroid = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+        const mousePos = getMouseWorldPos(e.clientX, e.clientY);
+        const startAngle = Math.atan2(mousePos.y - centroid.y, mousePos.x - centroid.x);
+        const snapshot = new Map<string, any>();
+        footprint.shapes.forEach(s => { if (selectedShapeIds.includes(s.id)) snapshot.set(s.id, JSON.parse(JSON.stringify(s))); });
+        isRotating.current = true;
+        rotationStartData.current = { center: centroid, startMouseAngle: startAngle, initialShapes: snapshot };
+        setRotationGuide({ center: centroid, current: mousePos });
+        window.addEventListener('mousemove', handleGlobalMouseMove);
+        window.addEventListener('mouseup', handleGlobalMouseUp);
+        return;
+    }
+
+    // Left Click (0) for SELECTION BOX
     if (e.button === 0) {
         // If Shift/Ctrl is NOT held, clear selection when clicking background
         const isMulti = e.shiftKey || e.metaKey || e.ctrlKey;
@@ -554,7 +593,45 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   };
 
   const handleGlobalMouseMove = (e: MouseEvent) => {
-    // 1. PANNING LOGIC
+    // 1. ROTATION LOGIC
+    if (isRotating.current && rotationStartData.current) {
+        const mousePos = getMouseWorldPos(e.clientX, e.clientY);
+        setRotationGuide({ center: rotationStartData.current.center, current: mousePos });
+        const currentAngle = Math.atan2(mousePos.y - rotationStartData.current.center.y, mousePos.x - rotationStartData.current.center.x);
+        const deltaAngleRad = currentAngle - rotationStartData.current.startMouseAngle;
+        const deltaAngleDeg = deltaAngleRad * (180 / Math.PI);
+        const cx = rotationStartData.current.center.x, cy = rotationStartData.current.center.y;
+        const newShapes = footprintRef.current.shapes.map(s => {
+            const startState = rotationStartData.current!.initialShapes.get(s.id);
+            if (!startState) return s;
+            const formatVal = (v: number) => parseFloat(v.toFixed(4)).toString();
+            const getVis = (sx: string, sy: string) => ({ x: evaluateExpression(sx, params), y: -evaluateExpression(sy, params) });
+            if (s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide") {
+                const origin = getVis(startState.x, startState.y);
+                const rotatedOrigin = rotatePoint(origin, { x: cx, y: cy }, deltaAngleRad);
+                const newProps: any = { x: formatVal(rotatedOrigin.x), y: formatVal(-rotatedOrigin.y) };
+                if (s.type === "rect" || s.type === "footprint") newProps.angle = formatVal(evaluateExpression(startState.angle, params) - deltaAngleDeg);
+                return { ...s, ...newProps };
+            } else if (s.type === "line" || s.type === "boardOutline" || s.type === "polygon") {
+                const origin = getVis(startState.x || "0", startState.y || "0");
+                const rotatedOrigin = rotatePoint(origin, { x: cx, y: cy }, deltaAngleRad);
+                const rotatedPoints = (startState.points as Point[]).map(p => {
+                    const px = evaluateExpression(p.x, params), py = -evaluateExpression(p.y, params);
+                    const pRot = rotatePoint({x: px, y: py}, {x:0, y:0}, deltaAngleRad);
+                    let hIn, hOut;
+                    if (p.handleIn) { const hRot = rotatePoint({x: evaluateExpression(p.handleIn.x, params), y: -evaluateExpression(p.handleIn.y, params)}, {x:0, y:0}, deltaAngleRad); hIn = { x: formatVal(hRot.x), y: formatVal(-hRot.y) }; }
+                    if (p.handleOut) { const hRot = rotatePoint({x: evaluateExpression(p.handleOut.x, params), y: -evaluateExpression(p.handleOut.y, params)}, {x:0, y:0}, deltaAngleRad); hOut = { x: formatVal(hRot.x), y: formatVal(-hRot.y) }; }
+                    return { ...p, x: formatVal(pRot.x), y: formatVal(-pRot.y), handleIn: hIn, handleOut: hOut };
+                });
+                return { ...s, x: formatVal(rotatedOrigin.x), y: formatVal(-rotatedOrigin.y), points: rotatedPoints };
+            }
+            return s;
+        });
+        setFootprint({ ...footprintRef.current, shapes: newShapes });
+        return;
+    }
+
+    // 2. PANNING LOGIC
     if (isDragging.current && wrapperRef.current) {
         const dx = e.clientX - dragStart.current.x;
         const dy = e.clientY - dragStart.current.y;
@@ -568,7 +645,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
         return;
     }
 
-    // 2. SELECTION BOX LOGIC
+    // 3. SELECTION BOX LOGIC
     if (isSelectionDragging.current && wrapperRef.current) {
         const currentPos = getMouseWorldPos(e.clientX, e.clientY);
         selectionCurrentRef.current = currentPos;
@@ -581,12 +658,18 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   };
 
   const handleGlobalMouseUp = (e: MouseEvent) => {
-    // 1. STOP PANNING
+    // 1. ROTATION STOP
+    if (isRotating.current) {
+        isRotating.current = false; setRotationGuide(null); rotationStartData.current = null;
+        updateHistory({ footprint: footprintRef.current, selectedShapeIds });
+    }
+
+    // 2. STOP PANNING
     if (isDragging.current) {
         isDragging.current = false;
     }
 
-    // 2. FINISH SELECTION BOX
+    // 3. FINISH SELECTION BOX
     if (isSelectionDragging.current) {
         isSelectionDragging.current = false;
         
@@ -1565,6 +1648,27 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                         return null;
                     })}
 
+                    {/* Rotation Guide Line */}
+                    {rotationGuide && (
+                        <g pointerEvents="none">
+                            <line 
+                                x1={rotationGuide.center.x} y1={rotationGuide.center.y}
+                                x2={rotationGuide.current.x} y2={rotationGuide.current.y}
+                                stroke="#646cff"
+                                strokeWidth={1}
+                                strokeDasharray="4,4"
+                                vectorEffect="non-scaling-stroke"
+                            />
+                            {/* Centroid Pivot */}
+                            <circle 
+                                cx={rotationGuide.center.x} cy={rotationGuide.center.y}
+                                r={handleRadius}
+                                fill="#646cff"
+                                vectorEffect="non-scaling-stroke"
+                            />
+                        </g>
+                    )}
+
                     {/* NEW: Selection Box Overlay */}
                     {selectionBox && (
                         <rect 
@@ -1581,7 +1685,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
                         />
                     )}
                 </svg>
-                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Left Drag: Select | Right/Middle Drag: Pan | Scroll: Zoom</div>
+                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Left Drag: Select | Alt + Drag: Rotate | Right/Middle Drag: Pan | Scroll: Zoom</div>
             </div>
             
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>

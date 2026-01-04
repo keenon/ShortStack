@@ -977,3 +977,19 @@ export function convertRectToPolyPoints(
 
     return verts.map(transform);
 }
+
+// Point rotation helper
+export function rotatePoint(
+    point: { x: number, y: number },
+    center: { x: number, y: number },
+    angleRad: number
+): { x: number, y: number } {
+    const cos = Math.cos(angleRad);
+    const sin = Math.sin(angleRad);
+    const dx = point.x - center.x;
+    const dy = point.y - center.y;
+    return {
+        x: center.x + (dx * cos - dy * sin),
+        y: center.y + (dx * sin + dy * cos)
+    };
+}
