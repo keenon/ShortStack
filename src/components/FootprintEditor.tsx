@@ -409,6 +409,9 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   // UPDATED: Store start state for ALL selected shapes
   const shapeDragStartDataMap = useRef<Map<string, any>>(new Map());
   const dragTargetRef = useRef<{ id: string; pointIdx?: number; handleType?: 'in' | 'out' | 'symmetric'; } | null>(null);
+  
+  // FIX: Store the effective selection used during drag so we don't rely on stale closure state
+  const dragSelectionRef = useRef<string[]>([]);
 
   // HEALING EFFECT: Convert non-GLB meshes to GLB
   useEffect(() => {
@@ -645,17 +648,23 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
       if (viewMode !== "2D") return;
 
       const multi = e.metaKey || e.ctrlKey;
-      
+      let effectiveSelection: string[] = [];
+
       // Selection logic
       if (multi) {
-          setSelectedShapeIds(selectedShapeIds.includes(id) ? selectedShapeIds.filter(x => x !== id) : [...selectedShapeIds, id]);
+          effectiveSelection = selectedShapeIds.includes(id) ? selectedShapeIds.filter(x => x !== id) : [...selectedShapeIds, id];
       } else if (pointIndex !== undefined) {
           // If we click a point, we focus that single shape
-          setSelectedShapeIds([id]);
+          effectiveSelection = [id];
       } else if (!selectedShapeIds.includes(id)) {
           // Normal click on a new item resets selection
-          setSelectedShapeIds([id]);
+          effectiveSelection = [id];
+      } else {
+          // Already selected, preserve for group drag
+          effectiveSelection = [...selectedShapeIds];
       }
+
+      setSelectedShapeIds(effectiveSelection);
       
       // NEW: Trigger scroll to point properties if a specific point was clicked
       if (pointIndex !== undefined) {
@@ -677,10 +686,14 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
 
       shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
       
+      // FIX: Store effective selection in ref to be used in mouseMove
+      dragSelectionRef.current = effectiveSelection;
+
       // SNAPSHOT ALL SELECTED SHAPES
+      // FIX: Use effectiveSelection calculated synchronously to ensure drag snapshot is correct
       shapeDragStartDataMap.current.clear();
       footprint.shapes.forEach(s => {
-          if (s.id === id || selectedShapeIds.includes(s.id)) {
+          if (effectiveSelection.includes(s.id)) {
               shapeDragStartDataMap.current.set(s.id, JSON.parse(JSON.stringify(s)));
           }
       });
@@ -693,7 +706,9 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
       e.stopPropagation(); e.preventDefault();
       if (viewMode !== "2D") return;
       
-      setSelectedShapeIds([id]);
+      const effectiveSelection = [id];
+      setSelectedShapeIds(effectiveSelection);
+      dragSelectionRef.current = effectiveSelection; // Sync drag ref
       
       // NEW: Trigger scroll
       setScrollToPointIndex(pointIndex);
@@ -731,7 +746,8 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
           if (!startShape) return s;
 
           // Only move if part of selection, OR it is the specific target shape
-          if (s.id === targetId || selectedShapeIds.includes(s.id)) {
+          // FIX: Use dragSelectionRef instead of state to avoid stale closure issues
+          if (s.id === targetId || dragSelectionRef.current.includes(s.id)) {
               
               // Case A: Dragging a specific Point or Handle (Only affect the targetId shape)
               if (pointIdx !== undefined && s.id === targetId) {
@@ -779,7 +795,12 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
           }
           return s;
       });
-      setFootprint({ ...currentFP, shapes: updatedShapes });
+      
+      // FIX: Update history directly using the cached selection ref to ensure we don't revert selection
+      updateHistory({
+          footprint: { ...currentFP, shapes: updatedShapes },
+          selectedShapeIds: dragSelectionRef.current
+      });
   };
 
   const handleShapeMouseUp = (e: MouseEvent) => {
