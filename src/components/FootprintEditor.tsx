@@ -862,9 +862,21 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
 
     if (!p1Raw || !p2Raw) return;
 
+    // Resolve Origin X/Y
+    const originX = (shape.type === "boardOutline" || shape.type === "polygon") ? evaluateExpression(shape.x, params) : 0;
+    const originY = (shape.type === "boardOutline" || shape.type === "polygon") ? evaluateExpression(shape.y, params) : 0;
+
     // Resolve points to numeric values (handling parameters and snaps)
-    const p1 = resolvePoint(p1Raw, footprint, allFootprints, params);
-    const p2 = resolvePoint(p2Raw, footprint, allFootprints, params);
+    let p1 = resolvePoint(p1Raw, footprint, allFootprints, params);
+    let p2 = resolvePoint(p2Raw, footprint, allFootprints, params);
+
+    // Normalize coordinates to Global Space before averaging
+    if (!p1Raw.snapTo) {
+        p1 = { ...p1, x: p1.x + originX, y: p1.y + originY };
+    }
+    if (!p2Raw.snapTo) {
+        p2 = { ...p2, x: p2.x + originX, y: p2.y + originY };
+    }
 
     let midX, midY;
 
@@ -888,13 +900,9 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
         midY = (p1.y + p2.y) / 2;
     }
 
-    // If Board Outline or Polygon, adjust for Shape Origin
-    if (shape.type === "boardOutline" || shape.type === "polygon") {
-        const originX = evaluateExpression(shape.x, params);
-        const originY = evaluateExpression(shape.y, params);
-        midX -= originX;
-        midY -= originY;
-    }
+    // Convert back to Local Space
+    midX -= originX;
+    midY -= originY;
 
     const newPoint: Point = {
         id: crypto.randomUUID(),
