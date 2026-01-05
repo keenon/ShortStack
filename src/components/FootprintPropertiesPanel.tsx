@@ -446,7 +446,7 @@ const FootprintPropertiesPanel = ({
                                         color: "#fff", borderRadius: "4px"
                                     }} 
                                     title="Insert Midpoint"
-                                    onMouseEnter={() => setHoveredMidpointIndex(m.index)}
+                                    onMouseEnter={() => setHoveredMidpointIndex(idx)}
                                     onMouseLeave={() => setHoveredMidpointIndex(null)}
                                 >
                                     + Midpoint
