@@ -13,7 +13,7 @@ import * as THREE from "three";
 import './FootprintEditor.css';
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
-let GLOBAL_CLIPBOARD: { type: "shape" | "mesh", data: any } | null = null;
+let GLOBAL_CLIPBOARD: { type: "shapes" | "meshes", data: any[] } | null = null;
 
 interface Props {
   footprint: Footprint;
@@ -996,26 +996,25 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       window.removeEventListener('mouseup', handleShapeMouseUp);
   };
 
-  // ------------------------------------------------------------------
+// ------------------------------------------------------------------
   // COPY / PASTE / DUPLICATE LOGIC
   // ------------------------------------------------------------------
 
   const handleCopy = useCallback(() => {
     if (selectedShapeIds.length === 0) return;
-    const primaryId = selectedShapeIds[0];
-
-    // Check Shapes
-    const shape = footprint.shapes.find(s => s.id === primaryId);
-    if (shape) {
-        GLOBAL_CLIPBOARD = { type: "shape", data: JSON.parse(JSON.stringify(shape)) };
+    
+    // Check Shapes: Filter preserves the internal Z-order from footprint.shapes
+    const selectedShapes = footprint.shapes.filter(s => selectedShapeIds.includes(s.id));
+    if (selectedShapes.length > 0) {
+        GLOBAL_CLIPBOARD = { type: "shapes", data: JSON.parse(JSON.stringify(selectedShapes)) };
         return;
     }
 
     // Check Meshes
     if (footprint.meshes) {
-        const mesh = footprint.meshes.find(m => m.id === primaryId);
-        if (mesh) {
-            GLOBAL_CLIPBOARD = { type: "mesh", data: JSON.parse(JSON.stringify(mesh)) };
+        const selectedMeshes = footprint.meshes.filter(m => selectedShapeIds.includes(m.id));
+        if (selectedMeshes.length > 0) {
+            GLOBAL_CLIPBOARD = { type: "meshes", data: JSON.parse(JSON.stringify(selectedMeshes)) };
             return;
         }
     }
@@ -1025,44 +1024,73 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
     if (!GLOBAL_CLIPBOARD) return;
     const { type, data } = GLOBAL_CLIPBOARD;
 
-    // 1. Clone Data
-    const newItem = JSON.parse(JSON.stringify(data));
-    
-    // 2. Assign New ID
-    newItem.id = crypto.randomUUID();
+    if (!Array.isArray(data)) return;
 
-    // 3. Regenerate Sub-IDs (e.g. Points in Lines/Outlines)
-    if (newItem.points && Array.isArray(newItem.points)) {
-        newItem.points = newItem.points.map((p: any) => ({
-            ...p,
-            id: crypto.randomUUID()
-        }));
-    }
+    const newItems: any[] = [];
+    const newIds: string[] = [];
 
-    // 4. Generate Unique Name
-    let baseName = newItem.name;
-    // Strip trailing increment if exists: "Shape (1)" -> "Shape"
-    const match = baseName.match(/^(.*) \(\d+\)$/);
-    if (match) baseName = match[1];
-
-    let newName = baseName;
-    let counter = 1;
+    // Setup name collision detection against existing items
     const existingNames = new Set([
         ...footprint.shapes.map(s => s.name),
         ...(footprint.meshes || []).map(m => m.name)
     ]);
 
-    while (existingNames.has(newName)) {
-        newName = `${baseName} (${counter})`;
-        counter++;
-    }
-    newItem.name = newName;
+    data.forEach(item => {
+        // 1. Clone Data
+        const newItem = JSON.parse(JSON.stringify(item));
+        
+        // 2. Assign New ID
+        newItem.id = crypto.randomUUID();
+        newIds.push(newItem.id);
 
-    // 5. Add to Footprint (IMPROVEMENT: Prepend to appear on top of list and visuals)
-    if (type === "shape") {
-        updateHistory({ footprint: { ...footprint, shapes: [newItem, ...footprint.shapes] }, selectedShapeIds: [newItem.id] });
-    } else if (type === "mesh") {
-        updateHistory({ footprint: { ...footprint, meshes: [newItem, ...(footprint.meshes || [])] }, selectedShapeIds: [newItem.id] });
+        // 3. Regenerate Sub-IDs (Points)
+        if (newItem.points && Array.isArray(newItem.points)) {
+            newItem.points = newItem.points.map((p: any) => ({
+                ...p,
+                id: crypto.randomUUID()
+            }));
+        }
+
+        // 4. Regenerate Union Child IDs (Deep copy safety)
+        if (newItem.type === "union" && Array.isArray(newItem.shapes)) {
+             newItem.shapes = newItem.shapes.map((child: any) => {
+                 const newChild = { ...child, id: crypto.randomUUID() };
+                 if (newChild.points && Array.isArray(newChild.points)) {
+                     newChild.points = newChild.points.map((p: any) => ({ ...p, id: crypto.randomUUID() }));
+                 }
+                 return newChild;
+             });
+        }
+
+        // 5. Generate Unique Name
+        let baseName = newItem.name;
+        // Strip trailing increment if exists: "Shape (1)" -> "Shape"
+        const match = baseName.match(/^(.*) \(\d+\)$/);
+        if (match) baseName = match[1];
+
+        let newName = baseName;
+        let counter = 1;
+        while (existingNames.has(newName)) {
+            newName = `${baseName} (${counter})`;
+            counter++;
+        }
+        newItem.name = newName;
+        existingNames.add(newName); // Add to set so next item in loop doesn't take same name
+
+        newItems.push(newItem);
+    });
+
+    // 6. Add to Footprint (Prepend to appear on top)
+    if (type === "shapes") {
+        updateHistory({ 
+            footprint: { ...footprint, shapes: [...newItems, ...footprint.shapes] }, 
+            selectedShapeIds: newIds 
+        });
+    } else if (type === "meshes") {
+        updateHistory({ 
+            footprint: { ...footprint, meshes: [...newItems, ...(footprint.meshes || [])] }, 
+            selectedShapeIds: newIds 
+        });
     }
   }, [footprint, editorState, updateHistory]);
 
