@@ -1384,122 +1384,107 @@ const LayerSolid = ({
 
             if (!combinedCS) return;
 
-            // 3. Check Intersection with previous cuts (Restorative Logic)
-            let isRestorative = false;
-            for (const prev of processedCuts) {
-                if (prev.depth > actualDepth + CSG_EPSILON) {
-                    const intersection = collect(combinedCS.intersect(prev.cs));
-                    if (!intersection.isEmpty()) {
-                        isRestorative = true;
-                        break;
-                    }
-                }
-            }
-            // Add current combined CS to processed list
-            processedCuts.push({ depth: actualDepth, cs: combinedCS, id: exec.type === "union" ? exec.unionId! : primaryItem.originalId });
-
-            // 4. Boolean Operations (Using Combined CS)
-            const throughHeight = thickness + 0.2; 
+            // Split non-contiguous shapes (islands) into an array of CrossSections.
+            // This prevents the fillet algorithm from generating artifacts between disjoint shapes.
+            const disjointComponents = combinedCS.decompose(); 
             
-            if (isRestorative) {
-                const toolCutThrough = collect(collect(combinedCS.extrude(throughHeight)).translate([0, 0, -throughHeight/2]));
-                const toolAligned = collect(toolCutThrough.rotate([-90, 0, 0])); 
+            disjointComponents.forEach((rawComponent: any, k: number) => {
+                // Must collect componentCS so it gets cleaned up at the end
+                const componentCS = collect(rawComponent);
+
+                // 3. Check Intersection with previous cuts (Per Island)
+                let isRestorative = false;
+                for (const prev of processedCuts) {
+                    if (prev.depth > actualDepth + CSG_EPSILON) {
+                        const intersection = collect(componentCS.intersect(prev.cs));
+                        if (!intersection.isEmpty()) {
+                            isRestorative = true;
+                            break;
+                        }
+                    }
+                }
                 
-                const diff = collect(Manifold.difference(base, toolAligned));
-                base = diff;
+                // Track this cut
+                processedCuts.push({ 
+                    depth: actualDepth, 
+                    cs: componentCS, 
+                    id: exec.type === "union" ? `${exec.unionId}_${k}` : primaryItem.originalId 
+                });
 
-                let fillHeight = thickness - actualDepth;
-                if (shouldRound) fillHeight += safeRadius;
-
-                if (fillHeight > CSG_EPSILON) {
-                    const toolFill = collect(collect(combinedCS.extrude(fillHeight)).translate([0, 0, -fillHeight/2]));
-                    const fillAligned = collect(toolFill.rotate([-90, 0, 0]));
+                // 4. Boolean Operations (Using Component CS)
+                const throughHeight = thickness + 0.2; 
+                
+                if (isRestorative) {
+                    const toolCutThrough = collect(collect(componentCS.extrude(throughHeight)).translate([0, 0, -throughHeight/2]));
+                    const toolAligned = collect(toolCutThrough.rotate([-90, 0, 0])); 
                     
-                    const fillY = layer.carveSide === "Top" 
-                        ? (-thickness / 2 + fillHeight / 2) 
-                        : (thickness / 2 - fillHeight / 2);
+                    const diff = collect(Manifold.difference(base, toolAligned));
+                    base = diff;
+
+                    let fillHeight = thickness - actualDepth;
+                    if (shouldRound) fillHeight += safeRadius;
+
+                    if (fillHeight > CSG_EPSILON) {
+                        const toolFill = collect(collect(componentCS.extrude(fillHeight)).translate([0, 0, -fillHeight/2]));
+                        const fillAligned = collect(toolFill.rotate([-90, 0, 0]));
                         
-                    const moved = collect(fillAligned.translate([0, fillY, 0]));
-                    base = collect(Manifold.union(base, moved));
-                }
-            } else {
-                if (!shouldRound && actualDepth > CSG_EPSILON) {
-                    const toolCut = collect(collect(combinedCS.extrude(actualDepth)).translate([0, 0, -actualDepth/2]));
-                    const toolAligned = collect(toolCut.rotate([-90, 0, 0]));
-
-                    const cutY = layer.carveSide === "Top"
-                        ? (thickness / 2 - actualDepth / 2)
-                        : (-thickness / 2 + actualDepth / 2);
-
-                    const moved = collect(toolAligned.translate([0, cutY, 0]));
-                    base = collect(Manifold.difference(base, moved));
-                }
-            }
-
-            // 5. Fillet Subtraction (Using Unified Geometry)
-            if (shouldRound) {
-                // We pass the combined CrossSection as an override. 
-                // We need to pass a dummy shape because the signature requires it, but it will be ignored by the override.
-                const result = generateProceduralFillet(
-                    manifoldModule, 
-                    shape, 
-                    params, 
-                    actualDepth,
-                    safeRadius,
-                    primaryItem.contextFp,
-                    allFootprints,
-                    32,
-                    combinedCS // OVERRIDE
-                );
-
-                if (result && result.manifold) {
-                    const toolFillet = collect(result.manifold);
-                    // The combinedCS is ALREADY transformed (rotated/translated).
-                    // generateProceduralFillet returns geometry based on the CS provided.
-                    // The CS is in Layer Space (X, -Z).
-                    // The logic inside `generateProceduralFillet` extrudes along Y (which maps to Z in CS space).
-                    // Wait, `generateProceduralFillet` builds vertices: `p.x, step.z, -p.y`.
-                    // Since `combinedCS` points (p) are already Global X and Global -Z (as 2D Y).
-                    // p.y is -GlobalZ. So -p.y is GlobalZ.
-                    // So vertices are (GlobalX, depth, GlobalZ).
-                    // This creates the fillet in correct orientation (relative to board center).
-                    // We just need to place it at the correct height (Y).
-                    
-                    // Standard logic rotates [0, globalRot, 0] then translates [localX, ...]
-                    // But our geometry is already rotated and translated in X/Z.
-                    // So we skip the global transform on the result manifold, just apply Y translation.
-
-                    let final;
-                    if (layer.carveSide === "Top") {
-                        const topY = thickness / 2;
-                        final = collect(toolFillet.translate([0, topY, 0]));
-                    } else {
-                        // For bottom, we might need to mirror? 
-                        // Existing logic: `flipped = r.rotate([180, 0, 0])`.
-                        // If we rotate 180 X, Z flips. 
-                        const flipped = collect(toolFillet.rotate([180, 0, 0]));
-                        final = collect(flipped.translate([0, -thickness/2, 0]));
+                        const fillY = layer.carveSide === "Top" 
+                            ? (-thickness / 2 + fillHeight / 2) 
+                            : (thickness / 2 - fillHeight / 2);
+                            
+                        const moved = collect(fillAligned.translate([0, fillY, 0]));
+                        base = collect(Manifold.union(base, moved));
                     }
-                    
-                    base = collect(Manifold.difference(base, final));
+                } else {
+                    if (!shouldRound && actualDepth > CSG_EPSILON) {
+                        const toolCut = collect(collect(componentCS.extrude(actualDepth)).translate([0, 0, -actualDepth/2]));
+                        const toolAligned = collect(toolCut.rotate([-90, 0, 0]));
 
-                } else if (result && result.vertProperties && result.triVerts) {
-                    // Fallback for failed manifolds (visual debug)
-                    const geom = new THREE.BufferGeometry();
-                    geom.setAttribute('position', new THREE.BufferAttribute(result.vertProperties, 3));
-                    geom.setIndex(new THREE.BufferAttribute(result.triVerts, 1));
-                    
-                    // Align Y
-                    if (layer.carveSide === "Top") {
-                        geom.translate(0, thickness / 2, 0);
-                    } else {
-                        geom.rotateX(Math.PI);
-                        geom.translate(0, -thickness / 2, 0);
+                        const cutY = layer.carveSide === "Top"
+                            ? (thickness / 2 - actualDepth / 2)
+                            : (-thickness / 2 + actualDepth / 2);
+
+                        const moved = collect(toolAligned.translate([0, cutY, 0]));
+                        base = collect(Manifold.difference(base, moved));
                     }
-                    
-                    failedFillets.push(geom);
                 }
-            }
+
+                // 5. Fillet Subtraction (Using Component CS)
+                if (shouldRound) {
+                    const result = generateProceduralFillet(
+                        manifoldModule, 
+                        shape, 
+                        params, 
+                        actualDepth,
+                        safeRadius,
+                        primaryItem.contextFp,
+                        allFootprints,
+                        32,
+                        componentCS // Use decomposed island
+                    );
+
+                    if (result && result.manifold) {
+                        const toolFillet = collect(result.manifold);
+                        let final;
+                        if (layer.carveSide === "Top") {
+                            final = collect(toolFillet.translate([0, thickness / 2, 0]));
+                        } else {
+                            const flipped = collect(toolFillet.rotate([180, 0, 0]));
+                            final = collect(flipped.translate([0, -thickness/2, 0]));
+                        }
+                        base = collect(Manifold.difference(base, final));
+                    } else if (result && result.vertProperties && result.triVerts) {
+                        const geom = new THREE.BufferGeometry();
+                        geom.setAttribute('position', new THREE.BufferAttribute(result.vertProperties, 3));
+                        geom.setIndex(new THREE.BufferAttribute(result.triVerts, 1));
+                        
+                        if (layer.carveSide === "Top") geom.translate(0, thickness / 2, 0);
+                        else { geom.rotateX(Math.PI); geom.translate(0, -thickness / 2, 0); }
+                        
+                        failedFillets.push(geom);
+                    }
+                }
+            });
         });
 
         if (failedFillets.length > 0) {
