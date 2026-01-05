@@ -3,9 +3,8 @@ import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, 
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
-import { STLLoader, OBJLoader, GLTFLoader } from "three-stdlib";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, FootprintPolygon, Point, MeshAsset, FootprintUnion } from "../types";
-import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
+import { Footprint, Parameter, StackupLayer, FootprintMesh, FootprintReference, FootprintUnion, MeshAsset, FootprintBoardOutline } from "../types";
+import { mergeVertices } from "three-stdlib";
 import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
 
 // WORKER IMPORT
@@ -158,10 +157,21 @@ const LayerSolid = ({
   onProgress: (p: any) => void;
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
 }) => {
-  // Center X/Z logic from previous implementation
+  // Determine Center X/Z to match Worker Logic
+  // This ensures the local geometry returned by the worker aligns with the React mesh position
   const isBoard = footprint.isBoard;
-  const centerX = isBoard ? 0 : (bounds.minX + bounds.maxX) / 2;
-  const centerZ = isBoard ? 0 : (bounds.minY + bounds.maxY) / 2;
+  
+  const assignments = footprint.boardOutlineAssignments || {};
+  const assignedId = assignments[layer.id];
+  let outlineShape = footprint.shapes.find(s => s.id === assignedId);
+  if (!outlineShape) {
+      outlineShape = footprint.shapes.find(s => s.type === "boardOutline");
+  }
+  
+  // If board + outline exists, origin is 0,0. Else, bounds center.
+  const useBoardOrigin = isBoard && !!outlineShape;
+  const centerX = useBoardOrigin ? 0 : (bounds.minX + bounds.maxX) / 2;
+  const centerZ = useBoardOrigin ? 0 : (bounds.minY + bounds.maxY) / 2;
   const centerY = bottomZ + thickness / 2;
 
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
@@ -249,8 +259,8 @@ const LayerSolid = ({
 interface FlatMesh {
     mesh: FootprintMesh;
     globalTransform: THREE.Matrix4;
-    selectableId: string;
-    isEditable: boolean;
+    selectableId: string; // The ID to select when clicking (parent ref or self)
+    isEditable: boolean; // Only true if direct child of current footprint
 }
 
 function flattenMeshes(
@@ -322,6 +332,7 @@ function flattenMeshes(
 
              const globalUMat = transform.clone().multiply(uMat);
 
+             // Recurse using the union's internal shapes
              result = result.concat(flattenMeshes(
                  u as unknown as Footprint,
                  allFootprints,
@@ -395,6 +406,7 @@ const MeshObject = ({
         return () => { mounted = false; };
     }, [mesh.meshId, meshAssets]);
 
+    // 1. Calculate transforms from the matrix immediately during render
     const position = useMemo(() => new THREE.Vector3().setFromMatrixPosition(globalTransform), [globalTransform]);
     const quaternion = useMemo(() => new THREE.Quaternion().setFromRotationMatrix(globalTransform), [globalTransform]);
     const scale = useMemo(() => new THREE.Vector3().setFromMatrixScale(globalTransform), [globalTransform]);
@@ -405,6 +417,7 @@ const MeshObject = ({
         const ghostPos = ghostRef.current.position;
         const ghostRot = ghostRef.current.rotation; 
         
+        // Compare against the authoritative state
         const currentPos = new THREE.Vector3().setFromMatrixPosition(globalTransform);
         const currentRot = new THREE.Euler().setFromRotationMatrix(globalTransform);
 
@@ -435,6 +448,7 @@ const MeshObject = ({
             <mesh 
                 ref={meshRef}
                 geometry={geometry} 
+                // Apply transforms to visible mesh
                 position={position}
                 quaternion={quaternion}
                 scale={scale}
@@ -496,11 +510,14 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   const [progress, setProgress] = useState({ active: false, text: "", percent: 0 });
 
   const handleProgress = useCallback((p: any) => {
-      setProgress({ active: p.percent < 1, text: p.message, percent: p.percent });
-      if (p.percent >= 1) {
+      // Calculate overall progress based on layer index and task percent
+      const overall = (p.layerIndex + p.percent) / (stackup.length || 1);
+      
+      setProgress({ active: overall < 0.99, text: p.message, percent: overall });
+      if (overall >= 0.99) {
           setTimeout(() => setProgress(prev => ({ ...prev, active: false })), 800);
       }
-  }, []);
+  }, [stackup.length]);
 
   const fitToHome = useCallback(() => {
     const controls = controlsRef.current;
@@ -613,8 +630,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     convertMeshToGlb: async (mesh: FootprintMesh): Promise<FootprintMesh | null> => {
         const mock = mesh as any;
         try {
-            // Need base64ToArrayBuffer here? No, convert logic expects buffer.
-            // But content is string.
+            // Convert base64 string to buffer for worker
             const binString = window.atob(mock.content);
             const len = binString.length;
             const bytes = new Uint8Array(len);

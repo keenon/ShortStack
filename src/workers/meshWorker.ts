@@ -321,10 +321,12 @@ self.onmessage = async (e: MessageEvent) => {
              let geometry: THREE.BufferGeometry | null = null;
              
              if (format === "stl") {
-                 geometry = new STLLoader().parse(buffer);
+                 const loader = new STLLoader();
+                 geometry = loader.parse(buffer);
              } else if (format === "obj") {
                  const text = new TextDecoder().decode(buffer);
-                 const group = new OBJLoader().parse(text);
+                 const loader = new OBJLoader();
+                 const group = loader.parse(text);
                  const geoms: THREE.BufferGeometry[] = [];
                  group.traverse((c: any) => { if(c.isMesh) geoms.push(c.geometry); });
                  if(geoms.length) geometry = mergeBufferGeometries(geoms);
@@ -365,70 +367,78 @@ self.onmessage = async (e: MessageEvent) => {
             const garbage: any[] = [];
             const collect = <T>(obj: T): T => { if(obj && (obj as any).delete) garbage.push(obj); return obj; };
 
-            const report = (msg: string, step: number, totalSteps: number) => {
+            const report = (msg: string, percent: number) => {
                 self.postMessage({ 
                     type: "progress", 
                     id, 
                     payload: { 
                         message: msg, 
-                        percent: (layerIndex + step/totalSteps) / totalLayers,
+                        percent,
                         layerIndex
                     } 
                 });
             };
 
-            report(`Layer ${layerIndex+1}/${totalLayers}: Preparing...`, 0, 10);
+            report(`Layer ${layer.name}: Preparing geometry...`, 0);
 
             try {
+                // --- COORDINATE SYSTEM SETUP ---
+                // We must match the View's coordinate logic to align the generated mesh with the scene.
+                // In the View, the mesh is positioned at [centerX, centerY, centerZ].
+                // Therefore, geometry generated here must be centered around (0,0) LOCAL space.
+                
+                const isBoard = footprint.isBoard;
+                
+                // Resolve Assigned Board Outline to determine origin context
+                const assignments = footprint.boardOutlineAssignments || {};
+                const assignedId = assignments[layer.id];
+                let outlineShape = footprint.shapes.find((s: any) => s.id === assignedId) as FootprintBoardOutline | undefined;
+                if (!outlineShape) {
+                    outlineShape = footprint.shapes.find((s: any) => s.type === "boardOutline") as FootprintBoardOutline | undefined;
+                }
+                
+                // If this is a board with an outline, origin is (0,0). Otherwise, it's the bounds center.
+                const useBoardOrigin = isBoard && !!outlineShape;
+                const centerX = useBoardOrigin ? 0 : (bounds.minX + bounds.maxX) / 2;
+                const centerZ = useBoardOrigin ? 0 : (bounds.minY + bounds.maxY) / 2;
+                
                 const width = bounds.maxX - bounds.minX;
                 const depth = bounds.maxY - bounds.minY; 
-                const centerX = bounds.minX + width / 2;
-                const centerZ = bounds.minY + depth / 2;
 
-                // 1. Board Outline / Base
+                // 1. Generate Base
                 let base: any;
                 let boardShape: THREE.Shape | null = null;
                 
-                if (footprint.isBoard) {
-                    const assignments = footprint.boardOutlineAssignments || {};
-                    const assignedId = assignments[layer.id];
-                    let outlineShape = footprint.shapes.find((s: any) => s.id === assignedId) as FootprintBoardOutline | undefined;
-                    if (!outlineShape) {
-                        outlineShape = footprint.shapes.find((s: any) => s.type === "boardOutline") as FootprintBoardOutline | undefined;
-                    }
-                    if (outlineShape) {
-                        boardShape = createBoardShape(outlineShape, params, footprint, allFootprints);
-                    }
+                if (useBoardOrigin && outlineShape) {
+                    boardShape = createBoardShape(outlineShape, params, footprint, allFootprints);
                 }
 
                 if (boardShape) {
                     const cs = collect(shapeToManifold(manifoldModule, boardShape));
                     const ext = collect(cs.extrude(thickness));
                     const rotated = collect(ext.rotate([-90, 0, 0]));
+                    // Board shape is already at global (0,0), so local transform is just centering Z (height)
                     base = collect(rotated.translate([0, -thickness/2, 0]));
                 } else {
-                    // Default cube centered at bounds logic
-                    const cube = collect(Manifold.cube([width, thickness, depth], true));
-                    // Translate to align with bounds center
-                    // Manifold Cube centered at 0,0,0 means extents are +/- size/2
-                    // We want center to be (centerX, 0, centerZ)
-                    // Wait, Manifold.cube(size, center=true) is centered at origin.
-                    // LayerSolid in React expected bounds logic.
-                    // We need to shift it so it covers minX..maxX and minY..maxY
-                    // Actually, let's keep it simple: translate it to (centerX, 0, centerZ)
-                    // Note: In 3D view, Y is Up. Our 2D Y is 3D Z. 
-                    base = collect(cube.translate([centerX, 0, centerZ]));
+                    // Create Cube
+                    // Manifold cube(size, true) creates a cube at (0,0,0). 
+                    // Since the React Mesh is placed at (centerX, centerY, centerZ), 
+                    // a local (0,0,0) cube aligns perfectly with the bounds.
+                    base = collect(Manifold.cube([width, thickness, depth], true));
                 }
 
+                // 2. Flatten Shapes
                 const flatShapes = flattenShapes(footprint, footprint.shapes, allFootprints, params);
                 
-                // Grouping Logic
+                // 3. Grouping Logic
                 interface ExecutionItem { type: "single" | "union"; shapes: FlatShape[]; unionId?: string; }
                 const executionList: ExecutionItem[] = [];
                 const unionMap = new Map<string, ExecutionItem>();
                 
+                // Reverse to match stack visual order
                 [...flatShapes].reverse().forEach(item => {
                     if (!item.shape.assignedLayers || item.shape.assignedLayers[layer.id] === undefined) return;
+                    
                     if (item.unionId) {
                         if (!unionMap.has(item.unionId)) {
                             const group: ExecutionItem = { type: "union", shapes: [], unionId: item.unionId };
@@ -443,24 +453,26 @@ self.onmessage = async (e: MessageEvent) => {
 
                 const CSG_EPSILON = 0.001;
                 const processedCuts: { depth: number, cs: any, id: string }[] = [];
-                const failedFillets: number[] = []; // Stores combined geometry for errors
 
-                // CSG LOOP
+                // 4. CSG Execution Loop
                 executionList.forEach((exec, idx) => {
-                    report(`Layer ${layerIndex+1}: Object ${idx+1}/${executionList.length}`, 1 + (idx / executionList.length)*9, 10);
+                    const progressPercent = (idx / executionList.length);
+                    if (idx % 5 === 0) report(`Layer ${layer.name}: Processing cut ${idx+1}/${executionList.length}`, progressPercent);
                     
                     const primaryItem = exec.shapes[0];
                     const shape = primaryItem.shape;
                     
-                    // Params
+                    // Determine Parameters
                     let actualDepth = thickness;
                     let endmillRadius = 0;
+
                     if (layer.type === "Cut") {
                         actualDepth = thickness; 
                     } else {
                         const assignment = shape.assignedLayers![layer.id];
                         const valExpr = (typeof assignment === 'object') ? assignment.depth : (assignment as string);
                         const radiusExpr = (typeof assignment === 'object') ? assignment.endmillRadius : "0";
+
                         const val = evaluateExpression(valExpr, params);
                         endmillRadius = evaluateExpression(radiusExpr, params);
                         actualDepth = Math.max(0, Math.min(val, thickness));
@@ -488,30 +500,18 @@ self.onmessage = async (e: MessageEvent) => {
                     const hasRadius = safeRadius > CSG_EPSILON;
                     const shouldRound = isPartialCut && hasRadius;
 
+                    // Generate Combined CrossSection
                     let combinedCS: any = null;
 
                     exec.shapes.forEach(item => {
                         const s = item.shape;
-                        // Center is 0,0 for boardShape mode, but if using Bounds mode, we need to respect that.
-                        // However, flattenShapes returns Global coords based on footprint origin.
-                        // If boardShape exists, footprint origin (0,0) aligns with board origin.
-                        // If using bounds cube, we positioned cube at Bounds Center.
-                        // We must align the cuts to the World Coordinate System.
                         
-                        // NOTE: In Footprint3DView, logic was:
-                        // localX = item.x - centerX;
-                        // localZ = centerZ - item.y;
-                        // This assumes the view is centered.
-                        // For simplicity in worker, let's assume item.x/item.y are absolute World Coords.
-                        // If we have boardShape, World (0,0) is correct.
-                        // If we have Cube, Cube is at (centerX, 0, centerZ).
-                        // So Cut at (item.x, item.y) should be at (item.x, -item.y) in 3D.
-                        
-                        // The previous logic shifted everything by centerX/centerZ.
-                        // Let's replicate that exactly to maintain alignment with the base.
-                        // Wait, if base is boardShape, centerX is 0.
-                        const cutX = boardShape ? item.x : (item.x - (bounds.minX + bounds.maxX)/2); 
-                        const cutZ = boardShape ? -item.y : ((bounds.minY + bounds.maxY)/2 - item.y); 
+                        // --- COORDINATE TRANSFORM (Global -> Local) ---
+                        // item.x/item.y are in Global coordinates.
+                        // We need to shift them to be relative to the mesh origin (centerX, centerZ).
+                        // Note: View logic uses: localZ = centerZ - item.y (Axis flip).
+                        const localX = item.x - centerX;
+                        const localZ = centerZ - item.y; 
 
                         // Resolve Local CS
                         let cs = null;
@@ -523,6 +523,7 @@ self.onmessage = async (e: MessageEvent) => {
                             const h = evaluateExpression((s as FootprintRect).height, params);
                             const crRaw = evaluateExpression((s as FootprintRect).cornerRadius, params);
                             const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                            
                             if (w > 0 && h > 0) {
                                 cs = collect(CrossSection.square([w, h], true));
                                 if (cr > 0.001) cs = collect(cs.offset(-cr, "Round", 8)).offset(cr, "Round", 8);
@@ -541,8 +542,14 @@ self.onmessage = async (e: MessageEvent) => {
                         }
 
                         if (cs) {
+                            // 1. Rotate
                             cs = collect(cs.rotate(item.rotation));
-                            cs = collect(cs.translate([cutX, cutZ]));
+                            // 2. Translate to Local Position
+                            // In Manifold 2D (X,Y), we map our Local X to X, and Local Z to Y (negated logic handled by view transform usually, but here:
+                            // View: cs.translate([localX, -localZ]). 
+                            // -localZ = -(centerZ - item.y) = item.y - centerZ.
+                            cs = collect(cs.translate([localX, -localZ]));
+
                             if (!combinedCS) combinedCS = cs;
                             else combinedCS = collect(combinedCS.add(cs));
                         }
@@ -550,7 +557,9 @@ self.onmessage = async (e: MessageEvent) => {
 
                     if (!combinedCS) return;
 
+                    // Decompose Islands
                     const disjointComponents = combinedCS.decompose(); 
+                    
                     disjointComponents.forEach((rawComponent: any, k: number) => {
                         const componentCS = collect(rawComponent);
 
@@ -559,7 +568,10 @@ self.onmessage = async (e: MessageEvent) => {
                         for (const prev of processedCuts) {
                             if (prev.depth > actualDepth + CSG_EPSILON) {
                                 const intersection = collect(componentCS.intersect(prev.cs));
-                                if (!intersection.isEmpty()) { isRestorative = true; break; }
+                                if (!intersection.isEmpty()) {
+                                    isRestorative = true;
+                                    break;
+                                }
                             }
                         }
                         
@@ -569,11 +581,13 @@ self.onmessage = async (e: MessageEvent) => {
                             id: exec.type === "union" ? `${exec.unionId}_${k}` : primaryItem.originalId 
                         });
 
+                        // Boolean Operations
                         const throughHeight = thickness + 0.2; 
                         
                         if (isRestorative) {
                             const toolCutThrough = collect(collect(componentCS.extrude(throughHeight)).translate([0, 0, -throughHeight/2]));
                             const toolAligned = collect(toolCutThrough.rotate([-90, 0, 0])); 
+                            
                             const diff = collect(Manifold.difference(base, toolAligned));
                             base = diff;
 
@@ -583,7 +597,11 @@ self.onmessage = async (e: MessageEvent) => {
                             if (fillHeight > CSG_EPSILON) {
                                 const toolFill = collect(collect(componentCS.extrude(fillHeight)).translate([0, 0, -fillHeight/2]));
                                 const fillAligned = collect(toolFill.rotate([-90, 0, 0]));
-                                const fillY = layer.carveSide === "Top" ? (-thickness / 2 + fillHeight / 2) : (thickness / 2 - fillHeight / 2);
+                                
+                                const fillY = layer.carveSide === "Top" 
+                                    ? (-thickness / 2 + fillHeight / 2) 
+                                    : (thickness / 2 - fillHeight / 2);
+                                    
                                 const moved = collect(fillAligned.translate([0, fillY, 0]));
                                 base = collect(Manifold.union(base, moved));
                             }
@@ -591,7 +609,11 @@ self.onmessage = async (e: MessageEvent) => {
                             if (!shouldRound && actualDepth > CSG_EPSILON) {
                                 const toolCut = collect(collect(componentCS.extrude(actualDepth)).translate([0, 0, -actualDepth/2]));
                                 const toolAligned = collect(toolCut.rotate([-90, 0, 0]));
-                                const cutY = layer.carveSide === "Top" ? (thickness / 2 - actualDepth / 2) : (-thickness / 2 + actualDepth / 2);
+
+                                const cutY = layer.carveSide === "Top"
+                                    ? (thickness / 2 - actualDepth / 2)
+                                    : (-thickness / 2 + actualDepth / 2);
+
                                 const moved = collect(toolAligned.translate([0, cutY, 0]));
                                 base = collect(Manifold.difference(base, moved));
                             }
@@ -599,7 +621,6 @@ self.onmessage = async (e: MessageEvent) => {
 
                         // Fillet Subtraction
                         if (shouldRound) {
-                            // Call the procedural fillet function (to be pasted below)
                             const result = generateProceduralFillet(
                                 manifoldModule, 
                                 shape, 
@@ -609,18 +630,11 @@ self.onmessage = async (e: MessageEvent) => {
                                 primaryItem.contextFp,
                                 allFootprints,
                                 32,
-                                componentCS
+                                componentCS // Use decomposed island
                             );
 
                             if (result && result.manifold) {
                                 const toolFillet = collect(result.manifold);
-                                // Re-apply global position logic to fillet? 
-                                // No, generateProceduralFillet should return geometry around 0,0 origin of the CrossSection passed in (componentCS).
-                                // But componentCS is already transformed to Global (cutX, cutZ).
-                                // Wait, generateProceduralFillet generates geometry based on the input polygon.
-                                // If input polygon is already global, the result is global.
-                                // We just need to align Y (height).
-                                
                                 let final;
                                 if (layer.carveSide === "Top") {
                                     final = collect(toolFillet.translate([0, thickness / 2, 0]));
@@ -629,15 +643,12 @@ self.onmessage = async (e: MessageEvent) => {
                                     final = collect(flipped.translate([0, -thickness/2, 0]));
                                 }
                                 base = collect(Manifold.difference(base, final));
-                            } else if (result && result.vertProperties && result.triVerts) {
-                                // Error fallback mesh generation logic would go here if we were passing meshes back
-                                // For now we just log it or skip
                             }
                         }
                     });
                 });
 
-                report(`Layer ${layerIndex+1}/${totalLayers}: Mesh Generation`, 10, 10);
+                report(`Layer ${layer.name}: Finalizing mesh...`, 1.0);
 
                 const mesh = base.getMesh();
                 self.postMessage({ 
@@ -649,7 +660,9 @@ self.onmessage = async (e: MessageEvent) => {
                 });
 
             } finally {
-                garbage.forEach(g => g.delete());
+                garbage.forEach(g => {
+                    try { g.delete(); } catch(e) {}
+                });
             }
         }
         
@@ -678,10 +691,12 @@ self.onmessage = async (e: MessageEvent) => {
                         const geom = new THREE.BufferGeometry();
                         const positions = new Float32Array(m.attributes.position.array);
                         geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                        
                         if(m.attributes.normal) {
                              const normals = new Float32Array(m.attributes.normal.array);
                              geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
                         }
+                        
                         if(m.index) {
                             const indices = new Uint16Array(m.index.array);
                             geom.setIndex(new THREE.BufferAttribute(indices, 1));
@@ -691,24 +706,32 @@ self.onmessage = async (e: MessageEvent) => {
                     geometry = mergeBufferGeometries(geometries);
                 }
             } else if (format === "glb" || format === "gltf") {
+                 // Pass through if already GLB
                  const base64 = arrayBufferToBase64(buffer);
                  self.postMessage({ id, type: "success", payload: { base64, format: "glb" } });
                  return;
             }
 
-            if (!geometry) throw new Error(`Failed to parse geometry for ${fileName}`);
+            if (!geometry) {
+                throw new Error(`Failed to parse geometry for ${fileName} (${format})`);
+            }
 
             const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
             const exporter = new GLTFExporter();
+
             exporter.parse(
                 mesh,
                 (gltf) => {
                     if (gltf instanceof ArrayBuffer) {
                         const base64 = arrayBufferToBase64(gltf);
                         self.postMessage({ id, type: "success", payload: { base64, format: "glb" } });
+                    } else {
+                        self.postMessage({ id, type: "error", error: "GLTF Exporter returned JSON" });
                     }
                 },
-                (err) => { throw err; },
+                (err) => {
+                    self.postMessage({ id, type: "error", error: err.message });
+                },
                 { binary: true }
             );
         }
