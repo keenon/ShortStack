@@ -1,10 +1,10 @@
 // src/components/FootprintEditor.tsx
-import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
@@ -272,6 +272,13 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   // NEW: State for midpoint interaction
   const [hoveredMidpointIndex, setHoveredMidpointIndex] = useState<number | null>(null);
 
+  // NEW: State for visual feedback during soft-snapping
+  const [snapPreview, setSnapPreview] = useState<{
+    targetId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
   const footprintRef = useRef(footprint);
   useEffect(() => {
     footprintRef.current = footprint;
@@ -321,6 +328,27 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   
   // FIX: Store the effective selection used during drag so we don't rely on stale closure state
   const dragSelectionRef = useRef<string[]>([]);
+
+  // NEW: Memoized list of guide positions for proximity checking
+  const snapTargets = useMemo(() => {
+    // We only care about guides at the current footprint level for simplicity, 
+    // but this uses the pathId for full compatibility.
+    return getAvailableWireGuides(footprint, allFootprints).map(guideDef => {
+        const guide = findWireGuideByPath(guideDef.pathId, footprint, allFootprints);
+        if (!guide) return null;
+        
+        // Use resolvePoint to get global coordinates within this footprint's frame
+        // (Note: resolvePoint handles the math of nested footprints if the path is complex)
+        const res = resolvePoint({ snapTo: guideDef.pathId } as Point, footprint, allFootprints, params);
+        
+        return {
+            pathId: guideDef.pathId,
+            id: guide.id,
+            x: res.x,
+            y: -res.y // Visual Y is inverted
+        };
+    }).filter(t => t !== null) as { pathId: string, id: string, x: number, y: number }[];
+  }, [footprint, allFootprints, params]);
 
   // HEALING EFFECT: Convert non-GLB meshes to GLB
   useEffect(() => {
@@ -896,9 +924,11 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                   }
               }
 
-              // --- STANDARD MOVE LOGIC ---
+              // --- UPDATED POINT MOVE LOGIC WITH SOFT SNAP ---
               if (pointIdx !== undefined && s.id === targetId) {
                   const newPoints = [...(startShape as any).points];
+                  const startPt = startShape.points[pointIdx];
+
                   if (handleType === 'symmetric') {
                       newPoints[pointIdx] = { ...newPoints[pointIdx], 
                           handleOut: { x: dxWorld.toFixed(4), y: dyWorldMath.toFixed(4) },
@@ -909,8 +939,50 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                       if (handleType === 'in' && p.handleIn) newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorldMath) } };
                       else if (handleType === 'out' && p.handleOut) newPoints[pointIdx] = { ...p, handleOut: { x: modifyExpression(p.handleOut.x, dxWorld), y: modifyExpression(p.handleOut.y, dyWorldMath) } };
                   } else {
-                      const p = newPoints[pointIdx];
-                      if (!p.snapTo) newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorldMath) };
+                      // DRAGGING THE ANCHOR POINT
+                      const SNAP_DISTANCE = 10 * scaleX; // 10 pixels threshold
+                      
+                      // 1. Calculate the raw "unsnapped" position based on mouse movement
+                      const resStart = resolvePoint(startPt, footprint, allFootprints, params);
+                      const currentMouseLocalX = resStart.x + dxWorld;
+                      const currentMouseLocalY = resStart.y + dyWorldMath;
+
+                      // 2. Find if we are near any guides
+                      let bestSnapId: string | undefined = undefined;
+                      let closestDist = Infinity;
+                      let snapVisualPos = { x: 0, y: 0 };
+
+                      // Shape origin for global comparison
+                      const sOriginX = (s.type === "line") ? 0 : evaluateExpression((startShape as any).x, params);
+                      const sOriginY = (s.type === "line") ? 0 : evaluateExpression((startShape as any).y, params);
+
+                      snapTargets.forEach(target => {
+                          // Compare current point world pos to guide world pos
+                          const pWorldX = sOriginX + currentMouseLocalX;
+                          const pWorldY = -(sOriginY + currentMouseLocalY); // Visual Y
+                          
+                          const d = Math.sqrt((pWorldX - target.x)**2 + (pWorldY - target.y)**2);
+                          if (d < SNAP_DISTANCE && d < closestDist) {
+                              closestDist = d;
+                              bestSnapId = target.pathId;
+                              snapVisualPos = { x: target.x, y: target.y };
+                          }
+                      });
+
+                      if (bestSnapId) {
+                          // CASE: SNAP TO GUIDE
+                          newPoints[pointIdx] = { ...startPt, snapTo: bestSnapId };
+                          setSnapPreview({ targetId: bestSnapId, x: snapVisualPos.x, y: snapVisualPos.y });
+                      } else {
+                          // CASE: FREE DRAG (or Unsnap)
+                          newPoints[pointIdx] = { 
+                              ...startPt, 
+                              snapTo: undefined, 
+                              x: currentMouseLocalX.toFixed(4), 
+                              y: currentMouseLocalY.toFixed(4) 
+                          };
+                          setSnapPreview(null);
+                      }
                   }
                   return { ...s, points: newPoints } as any;
               }
@@ -931,6 +1003,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
   const handleShapeMouseUp = (e: MouseEvent) => {
       isShapeDragging.current = false;
+      setSnapPreview(null); // Clear visuals
       
       // If we didn't move much and didn't use meta/ctrl, reset selection to single item
       if (!hasMoved.current && !e.metaKey && !e.ctrlKey && dragTargetRef.current?.pointIdx === undefined) {
@@ -2112,6 +2185,29 @@ const handleUngroup = (unionId: string) => {
                                 cx={rotationGuide.center.x} cy={rotationGuide.center.y}
                                 r={handleRadius}
                                 fill="#646cff"
+                                vectorEffect="non-scaling-stroke"
+                            />
+                        </g>
+                    )}
+
+                    {/* NEW: Snap Preview Highlight */}
+                    {snapPreview && (
+                        <g pointerEvents="none">
+                            <circle 
+                                cx={snapPreview.x} 
+                                cy={snapPreview.y} 
+                                r={handleRadius * 1.5} 
+                                fill="none" 
+                                stroke="#00ff00" 
+                                strokeWidth={2} 
+                                strokeDasharray="2,2"
+                                vectorEffect="non-scaling-stroke"
+                            />
+                            <circle 
+                                cx={snapPreview.x} 
+                                cy={snapPreview.y} 
+                                r={handleRadius * 0.5} 
+                                fill="#00ff00" 
                                 vectorEffect="non-scaling-stroke"
                             />
                         </g>
