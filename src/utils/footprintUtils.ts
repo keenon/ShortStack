@@ -191,6 +191,26 @@ export function getShapeAABB(
         return valid ? { x1: minX, y1: minY, x2: maxX, y2: maxY } : null;
     }
 
+    if (shape.type === "footprint") {
+        const ref = shape as FootprintReference;
+        const target = allFootprints.find(f => f.id === ref.footprintId);
+        if (!target) return null;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        let valid = false;
+
+        target.shapes.forEach(child => {
+            const childBounds = getShapeAABB(child, params, target, allFootprints, gx, gy, gA);
+            if (childBounds) {
+                valid = true;
+                minX = Math.min(minX, childBounds.x1, childBounds.x2); 
+                maxX = Math.max(maxX, childBounds.x1, childBounds.x2);
+                minY = Math.min(minY, childBounds.y1, childBounds.y2); 
+                maxY = Math.max(maxY, childBounds.y1, childBounds.y2);
+            }
+        });
+        return valid ? { x1: minX, y1: minY, x2: maxX, y2: maxY } : null;
+    }
+
     if (shape.type === "circle") {
         const cx = gx;
         const cy = -gy; // Visual Y
