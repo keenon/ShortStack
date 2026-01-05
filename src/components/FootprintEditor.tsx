@@ -1524,12 +1524,73 @@ const handleUngroup = (unionId: string) => {
   };
   const updateFootprintField = (field: string, val: any) => { setFootprint({ ...footprint, [field]: val }); };
 
-  const moveShape = (index: number, direction: -1 | 1) => {
-    if (direction === -1 && index === 0) return;
-    if (direction === 1 && index === footprint.shapes.length - 1) return;
-    const newShapes = [...footprint.shapes];
-    [newShapes[index], newShapes[index + direction]] = [newShapes[index + direction], newShapes[index]];
-    setFootprint({ ...footprint, shapes: newShapes });
+  const handleReorder = (dragIndex: number, targetIndex: number) => {
+    const currentShapes = [...footprint.shapes];
+    const draggedShape = currentShapes[dragIndex];
+
+    // Determine which shapes are moving
+    let idsToMove: string[] = [];
+    
+    // If dragging a selected item, move ALL selected items
+    if (selectedShapeIds.includes(draggedShape.id)) {
+        // Filter out IDs that might no longer exist in shapes array for safety
+        idsToMove = selectedShapeIds.filter(id => currentShapes.some(s => s.id === id));
+    } else {
+        // Otherwise, just move the single dragged item
+        idsToMove = [draggedShape.id];
+    }
+
+    // Extract the shapes to move, preserving their relative order
+    const shapesToMove = currentShapes.filter(s => idsToMove.includes(s.id));
+    
+    // Create the list WITHOUT the moving shapes
+    const remainingShapes = currentShapes.filter(s => !idsToMove.includes(s.id));
+
+    // Calculate insertion index
+    // We need to map the targetIndex (which comes from the ORIGINAL list) 
+    // to a position in the 'remainingShapes' list.
+    
+    let insertionIndex = 0;
+    
+    if (targetIndex >= currentShapes.length) {
+        // Dropped at the very end
+        insertionIndex = remainingShapes.length;
+    } else {
+        // Find the shape that was originally at targetIndex
+        const targetShapeId = currentShapes[targetIndex].id;
+        
+        // If the target itself is being moved, we need to find the "visual" target.
+        // But in standard DnD, if you drop ON a moving item, behavior is undefined/no-op.
+        // If we drop on a non-moving item, we insert before it.
+        
+        const indexInRemaining = remainingShapes.findIndex(s => s.id === targetShapeId);
+        
+        if (indexInRemaining !== -1) {
+            insertionIndex = indexInRemaining;
+        } else {
+            // If we are dropping onto a selected item (which is technically removed from remaining),
+            // it usually implies no change if within the block, or complex calc.
+            // Simplified: If target is part of moving group, assume we want to place 'shapesToMove' 
+            // where 'dragIndex' was? No, simpler to just abort or append if confused.
+            // A robust strategy: Find the nearest non-moving neighbor.
+            
+            // For this specific logic: strictly insert BEFORE the item currently at targetIndex,
+            // UNLESS that item is also moving.
+            
+            // Fallback: If target index was "after" the dragged items in original list, 
+            // we effectively subtract the number of moved items before it.
+            let unadjustedIndex = 0;
+            for(let i=0; i<targetIndex; i++) {
+                if (!idsToMove.includes(currentShapes[i].id)) unadjustedIndex++;
+            }
+            insertionIndex = unadjustedIndex;
+        }
+    }
+
+    // Insert
+    remainingShapes.splice(insertionIndex, 0, ...shapesToMove);
+    
+    setFootprint({ ...footprint, shapes: remainingShapes });
   };
   
   // --- MESH ACTIONS ---
@@ -1856,7 +1917,7 @@ const handleUngroup = (unionId: string) => {
                 onSelect={handleSelection}
                 onDelete={deleteShape}
                 onRename={(id, name) => updateShape(id, "name", name)}
-                onMove={moveShape}
+                onReorder={handleReorder}
                 stackup={stackup}
                 isShapeVisible={isShapeVisible}
             />

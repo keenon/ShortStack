@@ -121,21 +121,22 @@
     border-radius: 2px;
 }
 
+/* UPDATED: Force monospace to match the rest of the app's inputs */
 .shape-name-edit {
-    background: transparent;
-    border: none;
+    font-family: monospace; 
+    background: #111;
+    border: 1px solid #555;
     color: #fff;
     flex-grow: 1;
     margin-right: 8px;
     padding: 2px 4px;
     font-size: 0.9em;
     min-width: 0;
-}
-
-.shape-name-edit:focus {
-    background: #1a1a1a;
-    outline: 1px solid #555;
     border-radius: 2px;
+}
+.shape-name-edit:focus {
+    background: #000;
+    outline: 1px solid #646cff;
 }
 
 .empty-state-small {
@@ -215,8 +216,8 @@
     border-radius: 3px;
     min-width: 50px;
     text-align: center;
-    border: none; /* Added for consistency with LayoutEditor */
-    cursor: pointer; /* Added for better UX */
+    border: none;
+    cursor: pointer;
 }
 
 .vis-toggle-btn.visible {
@@ -564,4 +565,45 @@
 @keyframes spin {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
+}
+
+.drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #666;
+    transition: color 0.2s;
+}
+.shape-item:hover .drag-handle {
+    color: #aaa;
+}
+
+/* While an item is being dragged, the browser handles opacity usually, 
+   but we can style the 'drag over' state via the prop we added in React 
+   (border-top color) */
+
+.shape-item {
+    /* Existing styles... */
+    transition: border-top-color 0.1s, margin-top 0.1s, background-color 0.1s;
+}
+
+/* Ensure the grip cursor appears */
+.shape-item {
+    cursor: default; /* Reset from pointer if needed */
+}
+
+/* UPDATED: Force monospace to match the input */
+.shape-name-display {
+    font-family: monospace; 
+    flex-grow: 1;
+    color: #ddd;
+    font-size: 0.9em;
+    padding: 3px 5px; /* Matches input padding + border to avoid layout jump */
+    margin-right: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none; /* Crucial: prevents text selection so row dragging works */
+    border: 1px solid transparent; /* Reserve space for border */
+    cursor: inherit;
 }
