@@ -2,7 +2,7 @@
 import { useState, useRef } from "react";
 import { Footprint, FootprintShape, StackupLayer, FootprintReference } from "../types";
 import { isFootprintOptionValid, getRecursiveLayers } from "../utils/footprintUtils";
-import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconPolygon } from "./Icons";
+import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconPolygon, IconText } from "./Icons";
 
 // Helper Icon for the Drag Handle
 const IconGrip = ({ className }: { className?: string }) => (
@@ -48,6 +48,7 @@ const ShapeListPanel = ({
           case "wireGuide": return <IconGuide className="shape-icon" />;
           case "boardOutline": return <IconOutline className="shape-icon" />;
           case "footprint": return <IconFootprint className="shape-icon" />;
+          case "text": return <IconText className="shape-icon" />;
           case "union": return <div className="shape-icon" style={{fontWeight:'bold', width:16, textAlign:'center'}}>U</div>;
           default: return null;
       }

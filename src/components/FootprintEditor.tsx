@@ -2,12 +2,12 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
-import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon } from "./Icons";
+import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
 import { useUndoHistory } from "../hooks/useUndoHistory"; 
 import * as THREE from "three";
@@ -1463,7 +1463,7 @@ const handleUngroup = (unionId: string) => {
   }, [handleCopy, handlePaste, handleDuplicate, editorState, deleteShape, deleteMesh, undo, redo, canUndo, canRedo, handleGroup]);
 
   // --- ACTIONS ---
-  const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon", footprintId?: string) => {
+  const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon" | "text", footprintId?: string) => {
     const base = { id: crypto.randomUUID(), name: `New ${type}`, assignedLayers: {}, };
     let newShape: FootprintShape;
 
@@ -1479,6 +1479,15 @@ const handleUngroup = (unionId: string) => {
          } as FootprintReference;
     } else if (type === "circle") {
       newShape = { ...base, type: "circle", x: "0", y: "0", diameter: "10" };
+    } else if (type === "text") {
+        newShape = { 
+            ...base, 
+            type: "text", 
+            x: "0", y: "0", angle: "0", 
+            text: "New Comment", 
+            fontSize: "5", 
+            anchor: "start" 
+        } as FootprintText;
     } else if (type === "rect") {
       newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0", cornerRadius: "0" };
     } else if (type === "wireGuide") {
@@ -1936,6 +1945,7 @@ const handleUngroup = (unionId: string) => {
         <button onClick={() => addShape("polygon")}><IconPolygon /> Polygon</button>
         <button onClick={() => addShape("line")}><IconLine /> Line</button>
         <button onClick={() => addShape("wireGuide")}><IconGuide /> Guide</button>
+        <button onClick={() => addShape("text")}><IconText /> Comment</button>
         {footprint.isBoard && <button onClick={() => addShape("boardOutline")}><IconOutline /> Outline</button>}
         
         {/* Footprint Dropdown */}

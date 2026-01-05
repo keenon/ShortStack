@@ -1,6 +1,6 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion, FootprintText } from "../types";
 import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
@@ -709,6 +709,42 @@ export const RecursiveShapeRenderer = ({
             {midButtons}
           </g>
       );
+  }
+
+  if (shape.type === "text") {
+    const txt = shape as FootprintText;
+    const x = evaluateExpression(txt.x, params);
+    const y = evaluateExpression(txt.y, params);
+    const angle = evaluateExpression(txt.angle, params);
+    const fontSize = evaluateExpression(txt.fontSize, params);
+    const lines = (txt.text || "").split('\n');
+    
+    // Use selection color if selected, otherwise default to a comment-grey
+    let fill = isSelected ? "#646cff" : "#aaa";
+    if (overrideStyle?.fill) fill = overrideStyle.fill;
+
+    return (
+        <text
+            transform={`translate(${x}, ${-y}) rotate(${-angle})`}
+            fontSize={fontSize}
+            textAnchor={txt.anchor || "start"}
+            fill={fill}
+            style={{ 
+                cursor: "pointer", 
+                userSelect: "none", 
+                fontFamily: "monospace",
+                pointerEvents: "auto" 
+            }}
+            onMouseDown={(e) => onMouseDown(e, shape.id)}
+            onDoubleClick={(e) => onDoubleClick && onDoubleClick(e, shape.id)}
+        >
+            {lines.map((line, i) => (
+                <tspan key={i} x="0" dy={i === 0 ? 0 : "1.2em"}>
+                    {line}
+                </tspan>
+            ))}
+        </text>
+    );
   }
 
   return null;

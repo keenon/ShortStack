@@ -1,7 +1,7 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
 import { Fragment, useMemo, useRef, useEffect } from "react";
-import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion } from "../types";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion, FootprintText } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints } from "../utils/footprintUtils";
 
@@ -465,6 +465,57 @@ const FootprintPropertiesPanel = ({
         </div>
     );
   }
+
+  if (shape?.type === "text") {
+    const txt = shape as FootprintText;
+    return (
+        <div className="properties-panel">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                <h3 style={{ margin: 0 }}>COMMENT Properties</h3>
+                <button onClick={onDuplicate} style={{ padding: '4px 10px', fontSize: '0.9em' }}>Duplicate</button>
+            </div>
+
+            <div className="prop-group">
+                <label>Text Note</label>
+                <textarea 
+                    value={txt.text}
+                    onChange={(e) => updateShape(txt.id, "text", e.target.value)}
+                    rows={4}
+                    style={{
+                        width: "100%", background: "#111", border: "1px solid #444",
+                        color: "white", padding: "8px", borderRadius: "4px",
+                        fontFamily: "monospace", resize: "vertical"
+                    }}
+                />
+            </div>
+
+            <div className="prop-group">
+                <label>X Position</label>
+                <ExpressionEditor value={txt.x} onChange={(v) => updateShape(txt.id, "x", v)} params={params} />
+            </div>
+            <div className="prop-group">
+                <label>Y Position</label>
+                <ExpressionEditor value={txt.y} onChange={(v) => updateShape(txt.id, "y", v)} params={params} />
+            </div>
+            <div className="prop-group">
+                <label>Rotation</label>
+                <ExpressionEditor value={txt.angle} onChange={(v) => updateShape(txt.id, "angle", v)} params={params} />
+            </div>
+            <div className="prop-group">
+                <label>Font Size (mm)</label>
+                <ExpressionEditor value={txt.fontSize} onChange={(v) => updateShape(txt.id, "fontSize", v)} params={params} />
+            </div>
+            <div className="prop-group">
+                <label>Alignment</label>
+                <select value={txt.anchor} onChange={(e) => updateShape(txt.id, "anchor", e.target.value)}>
+                    <option value="start">Left</option>
+                    <option value="middle">Center</option>
+                    <option value="end">Right</option>
+                </select>
+            </div>
+        </div>
+    );
+}
 
   // CHECK FOR MESH SELECTION
   const mesh = footprint.meshes?.find(m => m.id === selectedId);

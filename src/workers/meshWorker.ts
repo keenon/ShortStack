@@ -255,7 +255,7 @@ function flattenShapes(
     if (depth > 10) return [];
     let result: FlatShape[] = [];
     shapes.forEach(shape => {
-        if (shape.type === "wireGuide" || shape.type === "boardOutline") return;
+        if (shape.type === "wireGuide" || shape.type === "boardOutline" || shape.type === "text") return;
         const localX = evaluate(shape.x, params);
         const localY = evaluate(shape.y, params);
         const rad = (transform.rotation * Math.PI) / 180;

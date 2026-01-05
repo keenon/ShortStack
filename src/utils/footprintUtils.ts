@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import * as math from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText } from "../types";
 
 export function modifyExpression(expression: string, delta: number): string {
   if (delta === 0) return expression;
@@ -164,7 +164,7 @@ export function getShapeAABB(
 ): Rect | null {
     const lx = (shape.type === "line") ? 0 : evaluateExpression((shape as any).x, params);
     const ly = (shape.type === "line") ? 0 : evaluateExpression((shape as any).y, params);
-    const la = (shape.type === "rect" || shape.type === "footprint" || shape.type === "union") ? evaluateExpression((shape as any).angle, params) : 0;
+    const la = (shape.type === "rect" || shape.type === "footprint" || shape.type === "union" || shape.type === "text") ? evaluateExpression((shape as any).angle, params) : 0;
 
     const rad = -pA * (Math.PI / 180);
     const cos = Math.cos(rad);
@@ -261,6 +261,44 @@ export function getShapeAABB(
             minY = Math.min(minY, fy); maxY = Math.max(maxY, fy);
         });
         return { x1: minX - 1, y1: minY - 1, x2: maxX + 1, y2: maxY + 1 };
+    }
+    if (shape.type === "text") {
+        const textShape = shape as FootprintText;
+        const fontSize = evaluateExpression(textShape.fontSize, params);
+        const content = textShape.text || "";
+        const lines = content.split('\n');
+        
+        // Approximation: 0.6em width per character, 1.2em height per line
+        const maxLineLen = Math.max(...lines.map(l => l.length), 1);
+        const width = maxLineLen * fontSize * 0.6; 
+        const height = lines.length * fontSize * 1.2;
+
+        let offsetX = 0;
+        if (textShape.anchor === "middle") offsetX = -width / 2;
+        if (textShape.anchor === "end") offsetX = -width;
+        
+        const rrad = -gA * (Math.PI / 180);
+        const rcos = Math.cos(rrad);
+        const rsin = Math.sin(rrad);
+
+        const localCorners = [
+            {x: offsetX, y: 0},
+            {x: offsetX + width, y: 0},
+            {x: offsetX + width, y: -height},
+            {x: offsetX, y: -height}
+        ];
+
+        const corners = localCorners.map(p => ({
+            x: gx + (p.x * rcos - p.y * rsin),
+            y: -gy + (p.x * rsin + p.y * rcos)
+        }));
+
+        return {
+            x1: Math.min(...corners.map(p => p.x)),
+            y1: Math.min(...corners.map(p => p.y)),
+            x2: Math.max(...corners.map(p => p.x)),
+            y2: Math.max(...corners.map(p => p.y))
+        };
     }
     return null;
 }
