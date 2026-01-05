@@ -9,6 +9,7 @@ import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconFootprint, IconMesh, IconPolygon } from "./Icons";
 import { useUndoHistory } from "../hooks/useUndoHistory"; 
+import * as THREE from "three";
 import './FootprintEditor.css';
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
@@ -1779,14 +1780,14 @@ const handleUngroup = (unionId: string) => {
         };
     });
 
-    // Gather Shapes (Recursive)
-    const shapes = collectExportShapes(
-        footprint, // Pass Current Context
-        footprint.shapes, // Pass Shapes
+    const shapes = await collectExportShapesAsync(
+        footprint, 
+        footprint.shapes, 
         allFootprints,
         params,
         layer,
-        layerThickness
+        layerThickness,
+        footprint3DRef.current // Pass view ref to access worker
     );
 
     // 3. Prepare STL Data if needed
@@ -2161,23 +2162,25 @@ const handleUngroup = (unionId: string) => {
 // ------------------------------------------------------------------
 // HELPER: Collect Export Shapes Recursively
 // ------------------------------------------------------------------
-function collectExportShapes(
+async function collectExportShapesAsync(
     contextFootprint: Footprint, 
     shapes: FootprintShape[],
     allFootprints: Footprint[],
     params: Parameter[],
     layer: StackupLayer,
     layerThickness: number,
-    transform = { x: 0, y: 0, angle: 0 }
-): any[] {
+    viewRef: Footprint3DViewHandle | null,
+    transform = { x: 0, y: 0, angle: 0 },
+    forceInclude = false
+): Promise<any[]> {
     let result: any[] = [];
 
     // Process shapes. Reverse to match visual order in export list if needed (though CSG doesn't care much for cut)
     const reversedShapes = [...shapes].reverse();
 
-    reversedShapes.forEach(shape => {
+    for (const shape of reversedShapes) {
         // SKIP WIRE GUIDES (Virtual) & BOARD OUTLINES
-        if (shape.type === "wireGuide" || shape.type === "boardOutline") return;
+        if (shape.type === "wireGuide" || shape.type === "boardOutline") continue;
 
         // 1. Calculate Local Transform
         const lx = evaluateExpression(shape.x, params);
@@ -2198,21 +2201,25 @@ function collectExportShapes(
                  const localAngle = evaluateExpression(ref.angle, params);
                  const globalAngle = transform.angle + localAngle;
                  
-                 result = result.concat(collectExportShapes(
+                 const children = await collectExportShapesAsync(
                      target, // Switch context to the referenced footprint
                      target.shapes,
                      allFootprints,
                      params,
                      layer,
                      layerThickness,
-                     { x: gx, y: gy, angle: globalAngle }
-                 ));
+                     viewRef,
+                     { x: gx, y: gy, angle: globalAngle },
+                     forceInclude // Pass down forceInclude
+                 );
+                 result = result.concat(children);
              }
         } else if (shape.type === "union") {
              const u = shape as FootprintUnion;
              const assigned = u.assignedLayers?.[layer.id];
              let overrideDepth = -1;
              let overrideRadius = 0;
+             let effectiveDepth = 0;
              
              if (assigned) {
                  if (layer.type === "Cut") {
@@ -2220,50 +2227,84 @@ function collectExportShapes(
                  } else {
                      const val = evaluateExpression(typeof assigned === 'object' ? assigned.depth : assigned, params);
                      overrideDepth = Math.max(0, val);
+                     effectiveDepth = overrideDepth;
                      if (typeof assigned === 'object') {
                          overrideRadius = evaluateExpression(assigned.endmillRadius, params);
                      }
                  }
              }
 
-             const uAngle = evaluateExpression(u.angle, params);
-             const globalAngle = transform.angle + uAngle;
-             
-             const childrenExport = collectExportShapes(
-                 contextFootprint,
-                 u.shapes,
-                 allFootprints,
-                 params,
-                 layer,
-                 layerThickness,
-                 { x: gx, y: gy, angle: globalAngle }
-             );
+             // --- NEW: SPECIAL HANDLING FOR GRADIENT UNIONS (Carved/Printed with Radius) ---
+             if (layer.type === "Carved/Printed" && overrideRadius > 0 && viewRef) {
+                 // Union -> Polygon -> Slice
+                 // We call the Worker to get the Union Outline
+                 const contourPoints = await viewRef.computeUnionOutline(
+                     u.shapes, params, contextFootprint, allFootprints, { x: gx, y: gy, rotation: transform.angle + evaluateExpression(u.angle, params) }
+                 );
 
-             if (overrideDepth >= 0) {
-                 childrenExport.forEach(child => {
-                     child.depth = overrideDepth;
-                     if (overrideRadius > 0) child.endmill_radius = overrideRadius;
-                 });
+                 // Use manual slice logic for each returned contour
+                 const sliceResult = slicePolygonContours(contourPoints, effectiveDepth, overrideRadius, 0, 0, 0); // x,y,rot already applied in worker results (0 offset)
+                 result = result.concat(sliceResult);
+
+             } else {
+                 // Standard Recursion (Flatten)
+                 const uAngle = evaluateExpression(u.angle, params);
+                 const globalAngle = transform.angle + uAngle;
+                 
+                 // FIX: Pass down forceInclude logic if THIS union is assigned
+                 const shouldForceChildren = forceInclude || !!assigned;
+
+                 const childrenExport = await collectExportShapesAsync(
+                     contextFootprint,
+                     u.shapes,
+                     allFootprints,
+                     params,
+                     layer,
+                     layerThickness,
+                     viewRef,
+                     { x: gx, y: gy, angle: globalAngle },
+                     shouldForceChildren
+                 );
+
+                 if (overrideDepth >= 0) {
+                     childrenExport.forEach(child => {
+                         child.depth = overrideDepth;
+                         if (overrideRadius > 0) child.endmill_radius = overrideRadius;
+                     });
+                 }
+                 result = result.concat(childrenExport);
              }
-             result = result.concat(childrenExport);
+
         } else {
              // Check assignment
-             if (!shape.assignedLayers || shape.assignedLayers[layer.id] === undefined) return;
+             // FIX: If forceInclude is true, we proceed even if assignment is missing
+             const explicitAssignment = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
+             
+             if (!forceInclude && !explicitAssignment) continue;
              
              // Calculate Depth
              let depth = 0;
              let endmillRadius = 0;
-             if (layer.type === "Cut") {
-                 depth = layerThickness;
-             } else {
-                 const assign = shape.assignedLayers[layer.id];
-                 const val = evaluateExpression(typeof assign === 'object' ? assign.depth : assign, params);
-                 depth = Math.max(0, val);
-                 if (typeof assign === 'object') {
-                     endmillRadius = evaluateExpression(assign.endmillRadius, params);
+             
+             if (explicitAssignment) {
+                 if (layer.type === "Cut") {
+                     depth = layerThickness;
+                 } else {
+                     const assign = shape.assignedLayers![layer.id];
+                     const val = evaluateExpression(typeof assign === 'object' ? assign.depth : assign, params);
+                     depth = Math.max(0, val);
+                     if (typeof assign === 'object') {
+                         endmillRadius = evaluateExpression(assign.endmillRadius, params);
+                     }
                  }
+             } else {
+                 // Default values if forced by parent (will likely be overwritten by parent overrideDepth)
+                 if (layer.type === "Cut") depth = layerThickness;
+                 else depth = 0; 
              }
-             if (depth <= 0.0001) return;
+
+             // If not forced and depth is zero, skip
+             if (!forceInclude && depth <= 0.0001) continue;
 
              // Prepare Export Object
              const exportObj: any = {
@@ -2350,58 +2391,104 @@ function collectExportShapes(
                     // Complex Carve: Pre-calculate slices in JS
                     const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFootprint, allFootprints, 32);
                     
-                    // Slicing parameters
-                    const safeR = Math.min(endmillRadius, depth);
-                    const steps = 8;
-                    const baseDepth = depth - safeR;
-
-                    const layers: { z: number, offset: number }[] = [];
-                    // 1. Base (Deepest flat part)
-                    if (baseDepth > 0.001) layers.push({ z: baseDepth, offset: 0 });
+                    // Transform basePoints to Global Export Frame (gx, gy, angle)
+                    // getPolyOutlinePoints returns local (relative to shape origin).
+                    // We need to apply rotation manually since getPolyOutlinePoints doesn't do it.
+                    // And add gx/gy.
                     
-                    // 2. Gradient Steps
-                    for(let i=1; i<=steps; i++) {
-                        const theta = (i / steps) * (Math.PI / 2);
-                        const z = baseDepth + Math.sin(theta) * safeR;
-                        const off = (1 - Math.cos(theta)) * safeR;
-                        layers.push({ z, offset: off });
-                    }
-
-                    // 3. Generate and Push Slices
                     const globalRad = (transform.angle * Math.PI) / 180;
                     const gCos = Math.cos(globalRad);
                     const gSin = Math.sin(globalRad);
 
-                    layers.forEach(layer => {
-                        const offsetPts = offsetPolygonContour(basePoints, layer.offset);
-                        if (offsetPts.length < 3) return;
+                    const globalBasePoints = basePoints.map(p => ({
+                        x: gx + (p.x * gCos - p.y * gSin),
+                        y: gy + (p.x * gSin + p.y * gCos)
+                    }));
 
-                        // Transform offset points to Global export coordinates
-                        const outputPoints = offsetPts.map(p => {
-                            // Re-apply rotation to these points (basePoints are relative to shape origin)
-                            const rx = p.x * gCos - p.y * gSin; 
-                            const ry = p.x * gSin + p.y * gCos;
-                            
-                            return {
-                                x: transform.x + rx,
-                                y: transform.y + ry,
-                                handle_in: undefined,
-                                handle_out: undefined
-                            };
-                        });
-
-                        result.push({
-                            shape_type: "polygon",
-                            x: gx, 
-                            y: gy,
-                            depth: layer.z,
-                            endmill_radius: 0, // Mark as pre-processed
-                            points: outputPoints
-                        });
-                    });
+                    // Helper logic extracted below...
+                    // Wait, slicePolygonContours expects contours in final space? Or applies transform?
+                    // Let's reuse the helper I will write below.
+                    // But slicePolygonContours expects a list of contours.
+                    
+                    // Convert THREE.Vector2[] to {x,y}[]
+                    const contour = globalBasePoints.map(p => ({x: p.x, y: p.y}));
+                    
+                    const slices = slicePolygonContours([contour], depth, endmillRadius, 0, 0, 0); // Already transformed
+                    result = result.concat(slices);
                 }
             }
         }
+    }
+
+    return result;
+}
+
+// Helper to Slice Polygons (Used for both Polygon Shapes and Union Outlines)
+function slicePolygonContours(
+    contours: {x:number, y:number}[][], 
+    depth: number, 
+    endmillRadius: number,
+    // Optional additional transform if points are not already global
+    tx = 0, ty = 0, rot = 0
+): any[] {
+    const result: any[] = [];
+    const rad = (rot * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    contours.forEach(contourPts => {
+        // Convert to THREE.Vector2
+        const basePoints = contourPts.map(p => new THREE.Vector2(p.x, p.y));
+        if (basePoints.length < 3) return;
+
+        // Ensure CCW Winding
+        let area = 0;
+        for (let i = 0; i < basePoints.length; i++) {
+            const j = (i + 1) % basePoints.length;
+            area += basePoints[i].x * basePoints[j].y - basePoints[j].x * basePoints[i].y;
+        }
+        if (area < 0) basePoints.reverse();
+
+        // Slicing parameters
+        const safeR = Math.min(endmillRadius, depth);
+        const steps = 8;
+        const baseDepth = depth - safeR;
+
+        const layers: { z: number, offset: number }[] = [];
+        if (baseDepth > 0.001) layers.push({ z: baseDepth, offset: 0 });
+        
+        for(let i=1; i<=steps; i++) {
+            const theta = (i / steps) * (Math.PI / 2);
+            const z = baseDepth + Math.sin(theta) * safeR;
+            const off = (1 - Math.cos(theta)) * safeR;
+            layers.push({ z, offset: off });
+        }
+
+        layers.forEach(layer => {
+            const offsetPts = offsetPolygonContour(basePoints, layer.offset);
+            if (offsetPts.length < 3) return;
+
+            const outputPoints = offsetPts.map(p => {
+                // Apply transform if needed (usually 0,0,0 if pre-transformed)
+                const rx = p.x * cos - p.y * sin; 
+                const ry = p.x * sin + p.y * cos;
+                return {
+                    x: tx + rx,
+                    y: ty + ry,
+                    handle_in: undefined,
+                    handle_out: undefined
+                };
+            });
+
+            result.push({
+                shape_type: "polygon",
+                x: 0, // Points are absolute
+                y: 0,
+                depth: layer.z,
+                endmill_radius: 0, // Mark as pre-processed
+                points: outputPoints
+            });
+        });
     });
 
     return result;

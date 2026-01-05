@@ -3,7 +3,7 @@ import { useMemo, forwardRef, useImperativeHandle, useRef, useState, useEffect, 
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edges } from "@react-three/drei";
 import * as THREE from "three";
-import { Footprint, Parameter, StackupLayer, FootprintMesh, FootprintReference, FootprintUnion, MeshAsset, FootprintBoardOutline } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintMesh, FootprintReference, FootprintUnion, MeshAsset, FootprintBoardOutline, FootprintShape } from "../types";
 import { mergeVertices } from "three-stdlib";
 import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
 
@@ -35,6 +35,7 @@ export interface Footprint3DViewHandle {
     getLayerSTL: (layerId: string) => Uint8Array | null;
     processDroppedFile: (file: File) => Promise<FootprintMesh | null>;
     convertMeshToGlb: (mesh: FootprintMesh) => Promise<FootprintMesh | null>;
+    computeUnionOutline: (shapes: FootprintShape[], params: Parameter[], contextFp: Footprint, allFootprints: Footprint[], transform: {x:number, y:number, rotation:number}) => Promise<{x:number, y:number}[][]>;
 }
 
 // ------------------------------------------------------------------
@@ -673,14 +674,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         const format = (ext === "stp" || ext === "step") ? "step" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "stl"));
         
         try {
-            const result = await callWorker("convert", {
-                buffer,
-                format,
-                fileName: file.name
-            }, (p) => {
-                 handleProgress("drop_file", p.percent, p.message);
-            });
-            
+            const result = await callWorker("convert", { buffer, format, fileName: file.name }, (p) => handleProgress("drop_file", p.percent, p.message));
             handleProgress("drop_file", 1.0, "File processed");
 
             return {
@@ -707,22 +701,13 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
             const len = binString.length;
             const bytes = new Uint8Array(len);
             for (let i = 0; i < len; i++) bytes[i] = binString.charCodeAt(i);
-            
-            const result = await callWorker("convert", {
-                buffer: bytes.buffer,
-                format: mock.format,
-                fileName: mock.name
-            });
-            
-            return {
-                ...mesh,
-                content: result.base64,
-                format: result.format
-            } as any;
-        } catch (e) {
-             console.error("Worker Healing Failed", e);
-             return null;
-        }
+            const result = await callWorker("convert", { buffer: bytes.buffer, format: mock.format, fileName: mock.name });
+            return { ...mesh, content: result.base64, format: result.format } as any;
+        } catch (e) { console.error("Worker Healing Failed", e); return null; }
+    },
+    // Compute 2D Union Outline for Export
+    computeUnionOutline: async (shapes: FootprintShape[], params: Parameter[], contextFp: Footprint, allFootprints: Footprint[], transform: {x:number, y:number, rotation:number}): Promise<{x:number, y:number}[][]> => {
+        return await callWorker("computeUnionOutline", { shapes, params, contextFp, allFootprints, transform });
     }
   }));
 

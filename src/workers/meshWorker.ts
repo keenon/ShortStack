@@ -685,9 +685,82 @@ self.onmessage = async (e: MessageEvent) => {
                 });
 
             } finally {
-                garbage.forEach(g => {
-                    try { g.delete(); } catch(e) {}
+                garbage.forEach(g => { try { g.delete(); } catch(e) {} });
+            }
+        }
+        else if (type === "computeUnionOutline") {
+            if (!manifoldModule) throw new Error("Manifold not initialized");
+            const { shapes, params, contextFp, allFootprints, transform } = payload;
+            const { CrossSection } = manifoldModule;
+            const garbage: any[] = [];
+            const collect = <T>(obj: T): T => { if(obj && (obj as any).delete) garbage.push(obj); return obj; };
+
+            try {
+                // Pass shapes directly to flatten logic
+                // We use a dummy union wrapper to reuse flattenShapes if needed, or just iterate.
+                // flattenShapes handles recursion.
+                const flatShapes = flattenShapes(contextFp, shapes, allFootprints, params, transform);
+                
+                let combinedCS: any = null;
+
+                flatShapes.forEach(item => {
+                    const s = item.shape;
+                    // Standard 2D coordinate space (x=x, y=y)
+                    // Visual/Export space: Y is up/down depending on convention, but here we just process math.
+                    
+                    let cs = null;
+                    if (s.type === "circle") {
+                        const d = evaluateExpression((s as any).diameter, params);
+                        if (d > 0) cs = collect(CrossSection.circle(d/2, 32));
+                    } else if (s.type === "rect") {
+                        const w = evaluateExpression((s as FootprintRect).width, params);
+                        const h = evaluateExpression((s as FootprintRect).height, params);
+                        const crRaw = evaluateExpression((s as FootprintRect).cornerRadius, params);
+                        const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                        if (w > 0 && h > 0) {
+                            cs = collect(CrossSection.square([w, h], true));
+                            if (cr > 0.001) cs = collect(cs.offset(-cr, "Round", 8)).offset(cr, "Round", 8);
+                        }
+                    } else if (s.type === "line") {
+                        const t = evaluateExpression((s as FootprintLine).thickness, params);
+                        const validT = t > 0 ? t : 0.01;
+                        const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT);
+                        if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape));
+                    } else if (s.type === "polygon") {
+                        const poly = s as FootprintPolygon;
+                        const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, 32);
+                        if (pts.length > 2) {
+                            cs = collect(new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd"));
+                        }
+                    }
+
+                    if (cs) {
+                        cs = collect(cs.rotate(item.rotation));
+                        // In 2D, we just use X and Y.
+                        // Wait, computeLayer used: localZ = centerZ - item.y. This was for 3D mapping where Y is Z.
+                        // Here we are purely 2D for export.
+                        // The transform passed in typically puts Y in "Visual" space (where +Y is Up).
+                        // Export expects "Math" space usually, then SVG flips it.
+                        // We just need to be consistent. 
+                        // flattenShapes returns global X and Y.
+                        cs = collect(cs.translate([item.x, item.y]));
+
+                        if (!combinedCS) combinedCS = cs;
+                        else combinedCS = collect(combinedCS.add(cs));
+                    }
                 });
+
+                let contours: {x:number, y:number}[][] = [];
+                if (combinedCS) {
+                    const polys = combinedCS.toPolygons(); // Returns [ [[x,y]...] ... ]
+                    // Convert float arrays to objects
+                    contours = polys.map((poly: number[][]) => poly.map((pt: number[]) => ({ x: pt[0], y: pt[1] })));
+                }
+
+                self.postMessage({ id, type: "success", payload: contours });
+
+            } finally {
+                garbage.forEach(g => { try { g.delete(); } catch(e) {} });
             }
         }
         
