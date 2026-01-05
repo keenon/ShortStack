@@ -739,8 +739,9 @@ export const RecursiveShapeRenderer = ({
             onDoubleClick={(e) => onDoubleClick && onDoubleClick(e, shape.id)}
         >
             {lines.map((line, i) => (
-                <tspan key={i} x="0" dy={i === 0 ? 0 : "1.2em"}>
-                    {line}
+                <tspan key={i} x="0" y={i * fontSize * 1.2} >
+                    {/* If a line is empty, render a space so the tspan maintains height */}
+                    {line || " "}
                 </tspan>
             ))}
         </text>

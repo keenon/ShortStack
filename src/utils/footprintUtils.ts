@@ -263,42 +263,47 @@ export function getShapeAABB(
         return { x1: minX - 1, y1: minY - 1, x2: maxX + 1, y2: maxY + 1 };
     }
     if (shape.type === "text") {
-        const textShape = shape as FootprintText;
-        const fontSize = evaluateExpression(textShape.fontSize, params);
-        const content = textShape.text || "";
-        const lines = content.split('\n');
-        
-        // Approximation: 0.6em width per character, 1.2em height per line
-        const maxLineLen = Math.max(...lines.map(l => l.length), 1);
-        const width = maxLineLen * fontSize * 0.6; 
-        const height = lines.length * fontSize * 1.2;
+            const textShape = shape as FootprintText;
+            const fontSize = evaluateExpression(textShape.fontSize, params);
+            const content = textShape.text || "";
+            const lines = content.split('\n');
+            
+            const maxLineLen = Math.max(...lines.map(l => l.length), 1);
+            const width = maxLineLen * fontSize * 0.6; 
+            // Calculate exact height based on the same 1.2 multiplier
+            const height = lines.length * fontSize * 1.2;
 
-        let offsetX = 0;
-        if (textShape.anchor === "middle") offsetX = -width / 2;
-        if (textShape.anchor === "end") offsetX = -width;
-        
-        const rrad = -gA * (Math.PI / 180);
-        const rcos = Math.cos(rrad);
-        const rsin = Math.sin(rrad);
+            let offsetX = 0;
+            if (textShape.anchor === "middle") offsetX = -width / 2;
+            if (textShape.anchor === "end") offsetX = -width;
+            
+            const rrad = -gA * (Math.PI / 180);
+            const rcos = Math.cos(rrad);
+            const rsin = Math.sin(rrad);
 
-        const localCorners = [
-            {x: offsetX, y: 0},
-            {x: offsetX + width, y: 0},
-            {x: offsetX + width, y: -height},
-            {x: offsetX, y: -height}
-        ];
+            // Coordinate logic: 
+            // First line baseline is at 0. 
+            // Last line baseline is at (N-1) * FS * 1.2.
+            // We offset the box slightly so 0,0 is at the top-left of the first line.
+            const localCorners = [
+                { x: offsetX, y: fontSize * 0.8 },           // Top of text
+                { x: offsetX + width, y: fontSize * 0.8 },   // Top Right
+                { x: offsetX + width, y: -height + (fontSize * 0.8) }, // Bottom Right
+                { x: offsetX, y: -height + (fontSize * 0.8) }          // Bottom Left
+            ];
 
-        const corners = localCorners.map(p => ({
-            x: gx + (p.x * rcos - p.y * rsin),
-            y: -gy + (p.x * rsin + p.y * rcos)
-        }));
+            // ... map corners as before ...
+            const corners = localCorners.map(p => ({
+                x: gx + (p.x * rcos - p.y * rsin),
+                y: -gy + (p.x * rsin + p.y * rcos) // -gy flip for visual coordinate system
+            }));
 
-        return {
-            x1: Math.min(...corners.map(p => p.x)),
-            y1: Math.min(...corners.map(p => p.y)),
-            x2: Math.max(...corners.map(p => p.x)),
-            y2: Math.max(...corners.map(p => p.y))
-        };
+            return {
+                x1: Math.min(...corners.map(p => p.x)),
+                y1: Math.min(...corners.map(p => p.y)),
+                x2: Math.max(...corners.map(p => p.x)),
+                y2: Math.max(...corners.map(p => p.y))
+            };
     }
     return null;
 }
@@ -418,7 +423,40 @@ export function isShapeInSelection(
             x: gx + (p.x * rcos - p.y * rsin), y: -gy + (p.x * rsin + p.y * rcos)
         }));
         for(let i=0; i<4; i++) segments.push({p1: pts[i], p2: pts[(i+1)%4]});
-    } else {
+    }
+    else if (shape.type === "text") {
+        const textShape = shape as FootprintText;
+        const fs = evaluateExpression(textShape.fontSize, params);
+        const lines = (textShape.text || "").split('\n');
+        const maxLineLen = Math.max(...lines.map(l => l.length), 1);
+        
+        // Matches the math used in getShapeAABB
+        const w = maxLineLen * fs * 0.6;
+        const h = lines.length * fs * 1.2;
+        
+        let offsetX = 0;
+        if (textShape.anchor === "middle") offsetX = -w / 2;
+        if (textShape.anchor === "end") offsetX = -w;
+
+        const rrad = -gA * (Math.PI / 180);
+        const rcos = Math.cos(rrad); const rsin = Math.sin(rrad);
+        
+        // Baseline adjustment to match the visual box
+        const topY = fs * 0.8;
+        
+        const pts = [
+            { x: offsetX, y: topY },           // Top Left
+            { x: offsetX + w, y: topY },       // Top Right
+            { x: offsetX + w, y: topY - h },   // Bottom Right
+            { x: offsetX, y: topY - h }        // Bottom Left
+        ].map(p => ({
+            x: gx + (p.x * rcos - p.y * rsin),
+            y: -gy + (p.x * rsin + p.y * rcos)
+        }));
+
+        for(let i=0; i<4; i++) segments.push({p1: pts[i], p2: pts[(i+1)%4]});
+    } 
+    else {
         const ptsRaw = (shape as any).points || [];
         if (ptsRaw.length < 2) return false;
         const visualPoints = ptsRaw.map((p: any) => {
