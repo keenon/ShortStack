@@ -6,13 +6,14 @@ import * as THREE from "three";
 import { STLLoader, OBJLoader, GLTFLoader } from "three-stdlib";
 import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintReference, FootprintMesh, FootprintBoardOutline, FootprintPolygon, Point, MeshAsset, FootprintUnion } from "../types";
 import { mergeVertices, mergeBufferGeometries } from "three-stdlib";
-import { evaluateExpression, resolvePoint, modifyExpression, getPolyOutlinePoints } from "../utils/footprintUtils";
-import Module from "manifold-3d";
+import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
+
+// WORKER IMPORT
+import MeshWorker from "../workers/meshWorker?worker";
+
+// WASM URLS (Passed to worker)
 // @ts-ignore
 import wasmUrl from "manifold-3d/manifold.wasm?url";
-
-// IMPORT WORKER
-import MeshWorker from "../workers/meshWorker?worker";
 // @ts-ignore
 import occtWasmUrl from "occt-import-js/dist/occt-import-js.wasm?url";
 
@@ -38,6 +39,69 @@ export interface Footprint3DViewHandle {
 }
 
 // ------------------------------------------------------------------
+// WORKER INFRASTRUCTURE
+// ------------------------------------------------------------------
+
+let sharedWorker: Worker | null = null;
+let initPromise: Promise<void> | null = null;
+const workerCallbacks = new Map<string, {resolve: (v:any)=>void, reject: (e:any)=>void, onProgress?: (p:any)=>void}>();
+
+function getWorker() {
+    if (!sharedWorker) {
+        sharedWorker = new MeshWorker();
+        sharedWorker.onmessage = (e) => {
+            const { id, type, payload, error } = e.data;
+            
+            // Handle Progress Updates (Do not resolve promise yet)
+            if (type === "progress") {
+                const cb = workerCallbacks.get(id);
+                if (cb && cb.onProgress) cb.onProgress(payload);
+                return;
+            }
+
+            if (workerCallbacks.has(id)) {
+                const cb = workerCallbacks.get(id)!;
+                if (type === "error") cb.reject(new Error(error));
+                else cb.resolve(payload);
+                workerCallbacks.delete(id);
+            }
+        };
+        
+        // Initialize Worker and store promise
+        initPromise = new Promise((resolve, reject) => {
+            const initId = crypto.randomUUID();
+            workerCallbacks.set(initId, { resolve, reject });
+            sharedWorker!.postMessage({ 
+                id: initId, 
+                type: "init", 
+                payload: { occtWasmUrl, manifoldWasmUrl: wasmUrl } 
+            });
+        });
+    }
+    return sharedWorker;
+}
+
+async function callWorker(type: string, payload: any, onProgress?: (p: any) => void): Promise<any> {
+    const worker = getWorker();
+    
+    // WAIT FOR INIT TO COMPLETE
+    if (initPromise) {
+        try {
+            await initPromise;
+        } catch (e) {
+            console.error("Worker initialization failed", e);
+            throw e;
+        }
+    }
+
+    const id = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+        workerCallbacks.set(id, { resolve, reject, onProgress });
+        worker.postMessage({ id, type, payload });
+    });
+}
+
+// ------------------------------------------------------------------
 // HELPERS
 // ------------------------------------------------------------------
 
@@ -45,1141 +109,29 @@ function evaluate(expression: string, params: Parameter[]): number {
   return evaluateExpression(expression, params);
 }
 
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-    const binary_string = window.atob(base64);
-    const len = binary_string.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-        bytes[i] = binary_string.charCodeAt(i);
-    }
-    return bytes.buffer;
-}
+const ProgressBar = ({ progress }: { progress: { active: boolean, text: string, percent: number } }) => {
+    if (!progress.active) return null;
+    return (
+        <div style={{
+            position: 'absolute', bottom: 30, left: '50%', transform: 'translateX(-50%)',
+            background: 'rgba(30, 30, 30, 0.9)', padding: '15px 20px', borderRadius: '8px', border: '1px solid #444',
+            color: 'white', display: 'flex', flexDirection: 'column', gap: '8px', width: '320px',
+            pointerEvents: 'none', zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+        }}>
+            <div style={{ fontSize: '0.85em', display: 'flex', justifyContent: 'space-between', color: '#ccc' }}>
+                <span style={{ fontWeight: 500 }}>{progress.text}</span>
+                <span style={{ fontFamily: 'monospace' }}>{Math.round(progress.percent * 100)}%</span>
+            </div>
+            <div style={{ width: '100%', height: '6px', background: '#111', borderRadius: '3px', overflow: 'hidden' }}>
+                <div style={{ width: `${Math.max(0, Math.min(100, progress.percent * 100))}%`, height: '100%', background: '#646cff', transition: 'width 0.1s linear' }} />
+            </div>
+        </div>
+    );
+};
 
 // ------------------------------------------------------------------
-// GEOMETRY GENERATION
+// COMPONENTS (LayerSolid, MeshObject)
 // ------------------------------------------------------------------
-
-/**
- * Enhanced discretization that tracks the indices of sharp corners
- */
-function getPolyOutlineWithFeatures(
-    points: Point[],
-    originX: number,
-    originY: number,
-    params: Parameter[],
-    contextFp: Footprint,
-    allFootprints: Footprint[],
-    resolution: number
-): { points: THREE.Vector2[], cornerIndices: number[] } {
-    if (points.length < 3) return { points: [], cornerIndices: [] };
-
-    const pathPoints: THREE.Vector2[] = [];
-    const cornerIndices: number[] = [];
-
-    for (let i = 0; i < points.length; i++) {
-        cornerIndices.push(pathPoints.length);
-
-        const currRaw = points[i];
-        const nextRaw = points[(i + 1) % points.length];
-
-        const curr = resolvePoint(currRaw, contextFp, allFootprints, params);
-        const next = resolvePoint(nextRaw, contextFp, allFootprints, params);
-
-        const x1 = originX + curr.x;
-        const y1 = originY + curr.y;
-        const x2 = originX + next.x;
-        const y2 = originY + next.y;
-
-        const hasCurve = (curr.handleOut || next.handleIn);
-
-        if (hasCurve) {
-            const cp1x = x1 + (curr.handleOut ? curr.handleOut.x : 0);
-            const cp1y = y1 + (curr.handleOut ? curr.handleOut.y : 0);
-            const cp2x = x2 + (next.handleIn ? next.handleIn.x : 0);
-            const cp2y = y2 + (next.handleIn ? next.handleIn.y : 0);
-
-            const curve = new THREE.CubicBezierCurve(
-                new THREE.Vector2(x1, y1),
-                new THREE.Vector2(cp1x, cp1y),
-                new THREE.Vector2(cp2x, cp2y),
-                new THREE.Vector2(x2, y2)
-            );
-
-            const sp = curve.getPoints(resolution);
-            sp.pop(); // Remove end point to avoid duplicate with next start
-            sp.forEach(p => pathPoints.push(p));
-        } else {
-            pathPoints.push(new THREE.Vector2(x1, y1));
-        }
-    }
-
-    // Ensure CCW Winding for consistent offsetting
-    let area = 0;
-    for (let i = 0; i < pathPoints.length; i++) {
-        const j = (i + 1) % pathPoints.length;
-        area += pathPoints[i].x * pathPoints[j].y - pathPoints[j].x * pathPoints[i].y;
-    }
-    if (area < 0) {
-        pathPoints.reverse();
-        // Recalculate corner indices after reversal
-        const len = pathPoints.length;
-        const reversedCorners = cornerIndices.map(idx => (len - idx) % len).sort((a,b) => a-b);
-        return { points: pathPoints, cornerIndices: reversedCorners };
-    }
-
-    return { points: pathPoints, cornerIndices };
-}
-
-function getLineOutlinePoints(
-    shape: FootprintLine, 
-    params: Parameter[], 
-    thickness: number, 
-    resolution: number,
-    contextFp: Footprint,
-    allFootprints: Footprint[]
-): THREE.Vector2[] {
-    const points = shape.points;
-    if (points.length < 2) return [];
-
-    const halfThick = thickness / 2;
-    const pathPoints: THREE.Vector2[] = [];
-
-    // 1. Generate Spine (Centerline)
-    for (let i = 0; i < points.length - 1; i++) {
-        const currRaw = points[i];
-        const nextRaw = points[i+1];
-        
-        const curr = resolvePoint(currRaw, contextFp, allFootprints, params);
-        const next = resolvePoint(nextRaw, contextFp, allFootprints, params);
-
-        const x1 = curr.x;
-        const y1 = curr.y;
-        const x2 = next.x;
-        const y2 = next.y;
-
-        const hasCurve = (curr.handleOut || next.handleIn);
-
-        if (hasCurve) {
-            const cp1x = x1 + (curr.handleOut ? curr.handleOut.x : 0);
-            const cp1y = y1 + (curr.handleOut ? curr.handleOut.y : 0);
-            const cp2x = x2 + (next.handleIn ? next.handleIn.x : 0);
-            const cp2y = y2 + (next.handleIn ? next.handleIn.y : 0);
-
-            const curve = new THREE.CubicBezierCurve(
-                new THREE.Vector2(x1, y1),
-                new THREE.Vector2(cp1x, cp1y),
-                new THREE.Vector2(cp2x, cp2y),
-                new THREE.Vector2(x2, y2)
-            );
-
-            // Fixed divisions for spine to ensure stability
-            const divisions = 24; 
-            const sp = curve.getPoints(divisions);
-            
-            // Remove first point if it duplicates the last point of previous segment
-            if (pathPoints.length > 0) sp.shift();
-            sp.forEach(p => pathPoints.push(p));
-        } else {
-            if (pathPoints.length === 0) pathPoints.push(new THREE.Vector2(x1, y1));
-            pathPoints.push(new THREE.Vector2(x2, y2));
-        }
-    }
-
-    if (pathPoints.length < 2) return [];
-
-    // 2. Calculate Offsets (Left/Right rails)
-    const leftPts: THREE.Vector2[] = [];
-    const rightPts: THREE.Vector2[] = [];
-
-    for (let i = 0; i < pathPoints.length; i++) {
-        const p = pathPoints[i];
-        let tangent: THREE.Vector2;
-        
-        if (i === 0) {
-            const next = pathPoints[i+1];
-            tangent = new THREE.Vector2().subVectors(next, p).normalize();
-        } else if (i === pathPoints.length - 1) {
-            const prev = pathPoints[i-1];
-            tangent = new THREE.Vector2().subVectors(p, prev).normalize();
-        } else {
-            const prev = pathPoints[i-1];
-            const next = pathPoints[i+1];
-            const t1 = new THREE.Vector2().subVectors(p, prev).normalize();
-            const t2 = new THREE.Vector2().subVectors(next, p).normalize();
-            tangent = new THREE.Vector2().addVectors(t1, t2).normalize();
-        }
-
-        const normal = new THREE.Vector2(-tangent.y, tangent.x);
-        leftPts.push(new THREE.Vector2(p.x + normal.x * halfThick, p.y + normal.y * halfThick));
-        rightPts.push(new THREE.Vector2(p.x - normal.x * halfThick, p.y - normal.y * halfThick));
-    }
-
-    // 3. Assemble Contour (CCW Winding)
-    const contour: THREE.Vector2[] = [];
-    const arcDivisions = Math.max(4, Math.floor(resolution / 2));
-
-    // A. Left Side (Forward)
-    for (let i = 0; i < leftPts.length; i++) {
-        contour.push(leftPts[i]);
-    }
-
-    // B. End Cap (Semi-circle)
-    {
-        const lastIdx = pathPoints.length - 1;
-        const pLast = pathPoints[lastIdx];
-        const vLast = new THREE.Vector2().subVectors(leftPts[lastIdx], pLast);
-        const startAng = Math.atan2(vLast.y, vLast.x);
-        // Arc from Left Rail end to Right Rail end
-        for (let i = 1; i <= arcDivisions; i++) {
-            const t = i / arcDivisions;
-            const ang = startAng - t * Math.PI; // 180 degree turn
-            contour.push(new THREE.Vector2(
-                pLast.x + Math.cos(ang) * halfThick,
-                pLast.y + Math.sin(ang) * halfThick
-            ));
-        }
-    }
-
-    // C. Right Side (Reverse)
-    for (let i = rightPts.length - 1; i >= 0; i--) {
-        contour.push(rightPts[i]);
-    }
-
-    // D. Start Cap (Semi-circle)
-    {
-        const pFirst = pathPoints[0];
-        const vFirst = new THREE.Vector2().subVectors(rightPts[0], pFirst);
-        const startAng = Math.atan2(vFirst.y, vFirst.x);
-        
-        // Arc from Right Rail start to Left Rail start
-        for (let i = 1; i < arcDivisions; i++) {
-            const t = i / arcDivisions;
-            const ang = startAng - t * Math.PI;
-            contour.push(new THREE.Vector2(
-                pFirst.x + Math.cos(ang) * halfThick,
-                pFirst.y + Math.sin(ang) * halfThick
-            ));
-        }
-    }
-
-    return contour;
-}
-
-function createLineShape(
-    shape: FootprintLine, 
-    params: Parameter[], 
-    contextFp: Footprint,
-    allFootprints: Footprint[],
-    thicknessOverride?: number
-): THREE.Shape | null {
-  // Use the deterministic point generator for the flat cut shape as well
-  const thickVal = thicknessOverride !== undefined ? thicknessOverride : evaluate(shape.thickness, params);
-  if (thickVal <= 0) return null;
-
-  const pts = getLineOutlinePoints(shape, params, thickVal, 12, contextFp, allFootprints);
-  if (pts.length < 3) return null;
-  
-  const s = new THREE.Shape();
-  s.moveTo(pts[0].x, pts[0].y);
-  for(let i=1; i<pts.length; i++) {
-      s.lineTo(pts[i].x, pts[i].y);
-  }
-  s.closePath();
-  return s;
-}
-
-function createBoardShape(outlineShape: FootprintBoardOutline, params: Parameter[], rootFootprint: Footprint, allFootprints: Footprint[]): THREE.Shape | null {
-    const points = outlineShape.points;
-    if (!points || points.length < 3) return null;
-    const shape = new THREE.Shape();
-
-    const originX = evaluateExpression(outlineShape.x, params);
-    const originY = evaluateExpression(outlineShape.y, params);
-
-    const p0Raw = points[0];
-    const p0 = resolvePoint(p0Raw, rootFootprint, allFootprints, params);
-    shape.moveTo(originX + p0.x, originY + p0.y);
-    
-    for(let i = 0; i < points.length; i++) {
-        const currRaw = points[i];
-        const nextRaw = points[(i + 1) % points.length];
-
-        const curr = resolvePoint(currRaw, rootFootprint, allFootprints, params);
-        const next = resolvePoint(nextRaw, rootFootprint, allFootprints, params);
-        
-        const x2 = next.x;
-        const y2 = next.y;
-
-        if (curr.handleOut || next.handleIn) {
-            const x1 = curr.x;
-            const y1 = curr.y;
-            
-            const cp1x = x1 + (curr.handleOut ? curr.handleOut.x : 0);
-            const cp1y = y1 + (curr.handleOut ? curr.handleOut.y : 0);
-            
-            const cp2x = x2 + (next.handleIn ? next.handleIn.x : 0);
-            const cp2y = y2 + (next.handleIn ? next.handleIn.y : 0);
-            
-            shape.bezierCurveTo(originX + cp1x, originY + cp1y, originX + cp2x, originY + cp2y, originX + x2, originY + y2);
-        } else {
-            shape.lineTo(originX + x2, originY + y2);
-        }
-    }
-    return shape;
-}
-
-// ------------------------------------------------------------------
-// FLATTENING LOGIC & MANIFOLD UTILS
-// ------------------------------------------------------------------
-
-interface FlatShape {
-    shape: FootprintShape;
-    x: number;
-    y: number;
-    rotation: number;
-    originalId: string;
-    contextFp: Footprint;
-    unionId?: string; // NEW: Track membership in a union group
-}
-
-function flattenShapes(
-    contextFp: Footprint,
-    shapes: FootprintShape[], 
-    allFootprints: Footprint[], 
-    params: Parameter[],
-    transform = { x: 0, y: 0, rotation: 0 },
-    depth = 0,
-    currentUnionId: string | undefined = undefined // NEW
-): FlatShape[] {
-    if (depth > 10) return [];
-
-    let result: FlatShape[] = [];
-
-    shapes.forEach(shape => {
-        if (shape.type === "wireGuide" || shape.type === "boardOutline") return;
-
-        const localX = evaluate(shape.x, params);
-        const localY = evaluate(shape.y, params);
-        
-        const rad = (transform.rotation * Math.PI) / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-
-        const globalX = transform.x + (localX * cos - localY * sin);
-        const globalY = transform.y + (localX * sin + localY * cos);
-        
-        let localRotation = 0;
-        if (shape.type === "rect" || shape.type === "footprint" || shape.type === "union") {
-            localRotation = evaluate((shape as any).angle, params);
-        }
-        const globalRotation = transform.rotation + localRotation;
-
-        if (shape.type === "footprint") {
-            const ref = shape as FootprintReference;
-            const target = allFootprints.find(f => f.id === ref.footprintId);
-            if (target) {
-                const children = flattenShapes(target, target.shapes, allFootprints, params, {
-                    x: globalX,
-                    y: globalY,
-                    rotation: globalRotation
-                }, depth + 1, currentUnionId); // Propagate current union
-                result = result.concat(children);
-            }
-        } else if (shape.type === "union") {
-            const u = shape as FootprintUnion;
-            // Use existing unionId if we are nested, otherwise use this union's ID
-            const effectiveUnionId = currentUnionId || u.id;
-            
-            const children = flattenShapes(u as unknown as Footprint, u.shapes, allFootprints, params, {
-                x: globalX,
-                y: globalY,
-                rotation: globalRotation
-            }, depth + 1, effectiveUnionId);
-
-            // Apply override logic: if Union has layer assignments, they propagate to all children
-            if (Object.keys(u.assignedLayers || {}).length > 0) {
-                children.forEach(c => {
-                    c.shape = { ...c.shape, assignedLayers: u.assignedLayers };
-                });
-            }
-            result = result.concat(children);
-        } else {
-            result.push({
-                shape: shape,
-                x: globalX,
-                y: globalY,
-                rotation: globalRotation,
-                originalId: shape.id,
-                contextFp,
-                unionId: currentUnionId
-            });
-        }
-    });
-
-    return result;
-}
-
-function shapeToManifold(wasm: any, shape: THREE.Shape, resolution = 32) {
-    let points = shape.getPoints(resolution);
-    
-    if (points.length > 1 && points[0].distanceTo(points[points.length-1]) < 0.001) {
-        points.pop();
-    }
-    
-    const contour = points.map(p => [p.x, p.y]);
-
-    const holes = shape.holes.map(h => {
-        let hPts = h.getPoints(resolution);
-        if (hPts.length > 1 && hPts[0].distanceTo(hPts[hPts.length-1]) < 0.001) {
-            hPts.pop();
-        }
-        return hPts.map(p => [p.x, p.y]);
-    });
-    
-    const contours = [contour, ...holes];
-    return new wasm.CrossSection(contours, "EvenOdd");
-}
-
-// Helper for safe modulo in JS (handles negative numbers)
-function safeMod(n: number, m: number) {
-  return ((n % m) + m) % m;
-}
-
-function generateProceduralFillet(
-    manifoldModule: any,
-    shape: FootprintShape, 
-    params: Parameter[],
-    depth: number, 
-    filletRadius: number,
-    contextFp: Footprint,
-    allFootprints: Footprint[],
-    resolution = 32,
-    overrideCS?: any
-) {
-    let minDimension = Infinity;
-    const rawVertices: number[] = [];
-    const rawIndices: number[] = [];
-
-    // Store boundary contours for validity checks in the triangulation step
-    let boundaryLoops: THREE.Vector2[][] = [];
-
-    // -----------------------------------------------------------------------
-    // NEW: Cyclic Optimal Triangulation
-    // Runs the DP Tiling algorithm multiple times to find the best "Seam".
-    // -----------------------------------------------------------------------
-    const triangulateRobust = (polyA: THREE.Vector2[], polyB: THREE.Vector2[], idxStartA: number, idxStartB: number) => {
-        const lenA = polyA.length;
-        const lenB = polyB.length;
-        if (lenA < 3 || lenB < 3) return;
-
-        // DP Table Reused to avoid allocation spam
-        const dimCol = lenB + 1;
-        const costTable = new Float32Array((lenA + 1) * dimCol);
-        const fromTable = new Int8Array((lenA + 1) * dimCol); // 1: Up, 2: Left
-        const idx = (r: number, c: number) => r * dimCol + c;
-
-        // Area Weight Constant
-        const AREA_WEIGHT = 4.0; 
-
-        const getTriArea2x = (p1: THREE.Vector2, p2: THREE.Vector2, p3: THREE.Vector2) => {
-            return Math.abs(p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
-        };
-
-        // Added 'strictMode' flag to allow fallback if geometry is impossible
-        const solveForOffset = (offsetB: number, strictMode: boolean) => {
-            costTable.fill(Infinity);
-            fromTable.fill(0);
-            costTable[0] = 0; 
-
-            for (let i = 0; i <= lenA; i++) {
-                for (let j = 0; j <= lenB; j++) {
-                    if (i === 0 && j === 0) continue;
-                    
-                    // Current vertices being considered
-                    const pA = polyA[i % lenA];
-                    const pB = polyB[(j + offsetB) % lenB]; 
-
-                    // ---------------------------------------------------------
-                    // VALIDITY CHECK: Prevent edges from crossing outside the polygon
-                    // Only run if strictMode is true
-                    // ---------------------------------------------------------
-                    if (strictMode && boundaryLoops.length > 0) {
-                        const midX = (pA.x + pB.x) * 0.5;
-                        const midY = (pA.y + pB.y) * 0.5;
-
-                        // 1. Point in Polygon Check (Midpoint)
-                        // Must handle points ON the boundary robustly (distance check)
-                        let inside = false;
-                        let onBoundary = false;
-                        
-                        for (const loop of boundaryLoops) {
-                            for (let k = 0, l = loop.length - 1; k < loop.length; l = k++) {
-                                const xi = loop[k].x, yi = loop[k].y;
-                                const xj = loop[l].x, yj = loop[l].y;
-
-                                // A. Standard Ray Casting
-                                const intersect = ((yi > midY) !== (yj > midY)) 
-                                    && (midX < (xj - xi) * (midY - yi) / (yj - yi) + xi);
-                                if (intersect) inside = !inside;
-
-                                // B. On-Segment Check (Distance Squared)
-                                // Only check if not already found on a boundary
-                                if (!onBoundary) {
-                                    const l2 = (xj - xi) ** 2 + (yj - yi) ** 2;
-                                    if (l2 > 1e-9) {
-                                        let t = ((midX - xi) * (xj - xi) + (midY - yi) * (yj - yi)) / l2;
-                                        t = Math.max(0, Math.min(1, t));
-                                        const dx = midX - (xi + t * (xj - xi));
-                                        const dy = midY - (yi + t * (yj - yi));
-                                        // 1e-6 tolerance for being "on" the wall
-                                        if ((dx*dx + dy*dy) < 1e-6) onBoundary = true;
-                                    }
-                                }
-                            }
-                        }
-
-                        // If it's on the boundary, it's valid regardless of ray cast result
-                        if (onBoundary) inside = true;
-                        
-                        if (!inside) continue; 
-
-                        // 2. Line Segment Intersection Check
-                        let intersectsBoundary = false;
-                        const minX = Math.min(pA.x, pB.x) - 0.001;
-                        const maxX = Math.max(pA.x, pB.x) + 0.001;
-                        const minY = Math.min(pA.y, pB.y) - 0.001;
-                        const maxY = Math.max(pA.y, pB.y) + 0.001;
-                        const dAx = pB.x - pA.x;
-                        const dAy = pB.y - pA.y;
-
-                        outerLoop:
-                        for (const loop of boundaryLoops) {
-                            for (let k = 0; k < loop.length; k++) {
-                                const b1 = loop[k];
-                                const b2 = loop[(k + 1) % loop.length];
-
-                                // AABB Optimization
-                                const bMinX = Math.min(b1.x, b2.x);
-                                const bMaxX = Math.max(b1.x, b2.x);
-                                if (maxX < bMinX || minX > bMaxX) continue;
-                                const bMinY = Math.min(b1.y, b2.y);
-                                const bMaxY = Math.max(b1.y, b2.y);
-                                if (maxY < bMinY || minY > bMaxY) continue;
-
-                                // Strict Intersection
-                                const dBx = b2.x - b1.x;
-                                const dBy = b2.y - b1.y;
-                                const det = dAx * dBy - dAy * dBx;
-
-                                if (det !== 0) {
-                                    const t = ((b1.x - pA.x) * dBy - (b1.y - pA.y) * dBx) / det;
-                                    const u = ((b1.x - pA.x) * dAy - (b1.y - pA.y) * dAx) / det;
-                                    // Range excludes endpoints to allow sharing vertices
-                                    if (t > 0.001 && t < 0.999 && u > 0.001 && u < 0.999) {
-                                        intersectsBoundary = true;
-                                        break outerLoop;
-                                    }
-                                }
-                            }
-                        }
-                        if (intersectsBoundary) continue;
-                    }
-
-                    const distSq = pA.distanceToSquared(pB);
-
-                    // Transition 1: Move along Poly A
-                    if (i > 0) {
-                        const c = costTable[idx(i - 1, j)];
-                        if (c !== Infinity) {
-                            const pPrevA = polyA[(i - 1) % lenA];
-                            const triArea = getTriArea2x(pPrevA, pB, pA) * 0.5;
-                            const newCost = c + distSq + (triArea * AREA_WEIGHT);
-
-                            if (newCost < costTable[idx(i, j)]) {
-                                costTable[idx(i, j)] = newCost;
-                                fromTable[idx(i, j)] = 1;
-                            }
-                        }
-                    }
-
-                    // Transition 2: Move along Poly B
-                    if (j > 0) {
-                        const c = costTable[idx(i, j - 1)];
-                        if (c !== Infinity) {
-                            const pPrevB = polyB[(j - 1 + offsetB) % lenB];
-                            const triArea = getTriArea2x(pA, pPrevB, pB) * 0.5;
-                            const newCost = c + distSq + (triArea * AREA_WEIGHT);
-                            
-                            if (newCost < costTable[idx(i, j)]) {
-                                costTable[idx(i, j)] = newCost;
-                                fromTable[idx(i, j)] = 2;
-                            }
-                        }
-                    }
-                }
-            }
-            return costTable[idx(lenA, lenB)];
-        };
-
-        const generateIndices = (offsetB: number, strictMode: boolean) => {
-            solveForOffset(offsetB, strictMode); 
-            let curI = lenA;
-            let curJ = lenB;
-            
-            // --- INFINITE LOOP PROTECTION ---
-            let safety = 0;
-            const MAX_STEPS = (lenA + lenB) * 2; 
-
-            while ((curI > 0 || curJ > 0) && safety++ < MAX_STEPS) {
-                let dir = fromTable[idx(curI, curJ)];
-                
-                // --- FALLBACK FOR BROKEN PATHS ---
-                // If strict mode blocked all paths to this cell, dir will be 0.
-                if (dir === 0) {
-                     if (curI > 0) dir = 1;
-                     else dir = 2;
-                }
-
-                const vA_curr = idxStartA + (curI % lenA);
-                const vB_curr = idxStartB + ((curJ + offsetB) % lenB);
-                
-                if (dir === 1) {
-                    const vA_prev = idxStartA + safeMod(curI - 1, lenA);
-                    rawIndices.push(vA_prev, vB_curr, vA_curr);
-                    curI--;
-                } else {
-                    const vB_prev = idxStartB + safeMod(curJ - 1 + offsetB, lenB);
-                    rawIndices.push(vA_curr, vB_prev, vB_curr);
-                    curJ--;
-                }
-            }
-
-            if (safety >= MAX_STEPS) {
-                console.warn("Triangulation emergency exit: Max steps reached.");
-            }
-        };
-
-        let bestOffset = 0;
-        let minTotalCost = Infinity;
-        let geoBestOffset = 0;
-        let minGeoDist = Infinity;
-        
-        // Find geometric best start to limit search space
-        for(let i=0; i<lenB; i++) {
-            const d = polyA[0].distanceToSquared(polyB[i]);
-            if(d < minGeoDist) { minGeoDist = d; geoBestOffset = i; }
-        }
-
-        let searchStart = 0;
-        let searchCount = lenB;
-        if (lenB > 60) {
-            searchStart = geoBestOffset - 10;
-            searchCount = 20;
-        }
-
-        // --- FIRST PASS: STRICT MODE ---
-        for (let k = 0; k < searchCount; k++) {
-            const offset = safeMod(searchStart + k, lenB);
-            const cost = solveForOffset(offset, true);
-            const pA = polyA[0];
-            const pB = polyB[offset];
-            const seamDistSq = pA.distanceToSquared(pB);
-            const totalCost = cost + seamDistSq;
-
-            if (totalCost < minTotalCost) {
-                minTotalCost = totalCost;
-                bestOffset = offset;
-            }
-        }
-
-        // --- SECOND PASS: PERMISSIVE FALLBACK ---
-        // If Strict Mode failed (Cost is Infinity), run again without checks.
-        let useStrict = true;
-        if (minTotalCost === Infinity) {
-            // DEBUG: Why did we fail?
-            console.warn(`[Fillet] Strict triangulation failed. Pts A: ${lenA}, B: ${lenB}. Fallback enabled.`);
-            
-            useStrict = false;
-            for (let k = 0; k < searchCount; k++) {
-                const offset = safeMod(searchStart + k, lenB);
-                const cost = solveForOffset(offset, false);
-                const pA = polyA[0];
-                const pB = polyB[offset];
-                const seamDistSq = pA.distanceToSquared(pB);
-                const totalCost = cost + seamDistSq;
-
-                if (totalCost < minTotalCost) {
-                    minTotalCost = totalCost;
-                    bestOffset = offset;
-                }
-            }
-        }
-
-        generateIndices(bestOffset, useStrict);
-    };
-
-    // If overrideCS provided OR shape is polygon, use the generalized Polygon logic
-    if (overrideCS || shape.type === "polygon") {
-        let baseCS;
-        let basePoints: THREE.Vector2[] = [];
-
-        if (overrideCS) {
-            baseCS = overrideCS;
-            const rawPolys = baseCS.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
-            if(rawPolys.length > 0) basePoints = rawPolys[0]; 
-            boundaryLoops = rawPolys;
-
-            let area = 0;
-            for (let i = 0; i < basePoints.length; i++) {
-                const j = (i + 1) % basePoints.length;
-                area += basePoints[i].x * basePoints[j].y - basePoints[j].x * basePoints[i].y;
-            }
-            if (area < 0) basePoints.reverse();
-
-        } else {
-            const poly = shape as FootprintPolygon;
-            const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
-
-            basePoints = baseData.points;
-            boundaryLoops = [basePoints];
-
-            let area = 0;
-            for (let i = 0; i < basePoints.length; i++) {
-                const j = (i + 1) % basePoints.length;
-                area += basePoints[i].x * basePoints[j].y - basePoints[j].x * basePoints[i].y;
-            }
-            if (area < 0) {
-                basePoints.reverse();
-            }
-
-            if (basePoints.length < 3) return null;
-            baseCS = new manifoldModule.CrossSection([basePoints.map(p => [p.x, p.y])], "EvenOdd");
-        }
-        
-        if (!basePoints || basePoints.length < 3) return null;
-
-        const steps: { z: number, offset: number }[] = [];
-        const wallBottomZ = -(depth - filletRadius);
-        steps.push({ z: 0, offset: 0 });
-        if (Math.abs(wallBottomZ) > 0.001) steps.push({ z: wallBottomZ, offset: 0 });
-        const filletSteps = 8;
-        for(let i=1; i<=filletSteps; i++) {
-            const theta = (i / filletSteps) * (Math.PI / 2);
-            steps.push({ z: wallBottomZ - Math.sin(theta) * filletRadius, offset: (1 - Math.cos(theta)) * filletRadius });
-        }
-
-        const layerData: { z: number, contours: THREE.Vector2[][], startIdx: number }[] = [];
-        let totalVerts = 0;
-        steps.forEach(step => {
-            let processedPolys: THREE.Vector2[][] = [];
-            if (step.offset > 0.001) {
-                const cs = baseCS.offset(-step.offset, "Miter", 2.0);
-                const rawPolys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
-                processedPolys = rawPolys.map((poly: any) => {
-                    const clean = [poly[0]];
-                    for(let i=1; i<poly.length; i++) {
-                        if(poly[i].distanceToSquared(clean[clean.length-1]) > 1e-9) clean.push(poly[i]);
-                    }
-                    if(clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) clean.pop();
-                    let area = 0;
-                    for (let i = 0; i < clean.length; i++) {
-                        const j = (i + 1) % clean.length;
-                        area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
-                    }
-                    if (area < 0) clean.reverse();
-                    return clean;
-                }).filter((p: any) => p.length >= 3);
-            } else {
-                processedPolys = [basePoints];
-            }
-
-            layerData.push({ z: step.z, contours: processedPolys, startIdx: totalVerts });
-            processedPolys.forEach((contour: THREE.Vector2[]) => {
-                contour.forEach(p => { rawVertices.push(p.x, step.z, -p.y); totalVerts++; });
-            });
-        });
-
-        const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
-            let offset = startIdx;
-            contours.forEach(c => {
-                const tris = THREE.ShapeUtils.triangulateShape(c, []);
-                tris.forEach(t => {
-                    if (reverse) rawIndices.push(offset + t[0], offset + t[2], offset + t[1]);
-                    else rawIndices.push(offset + t[0], offset + t[1], offset + t[2]);
-                });
-                offset += c.length;
-            });
-        };
-        // Top cap (Up-facing)
-        triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
-        // Bottom cap is handled per-island now, but the final bottom is still capped if it exists
-        triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
-
-        for(let l=0; l<layerData.length-1; l++) {
-            const up = layerData[l];
-            const low = layerData[l+1];
-            
-            // Map: Index of Up-Polygon -> Array of Indices of Low-Polygons contained within it
-            const upToLow = new Map<number, number[]>();
-            for(let i=0; i<up.contours.length; i++) upToLow.set(i, []);
-
-            // Identify containment (Parent -> Children)
-            // Since shapes shrink with offset, children are always strictly inside (or very close to) parent.
-            low.contours.forEach((lowPoly, iLow) => {
-                const lowCenter = new THREE.Vector2();
-                lowPoly.forEach(p => lowCenter.add(p));
-                lowCenter.divideScalar(lowPoly.length);
-
-                let bestUp = -1;
-                let minDist = Infinity;
-
-                // 1. Try to find strict containment or closest centroid
-                up.contours.forEach((upPoly, iUp) => {
-                    const upCenter = new THREE.Vector2();
-                    upPoly.forEach(p => upCenter.add(p));
-                    upCenter.divideScalar(upPoly.length);
-                    const d = upCenter.distanceToSquared(lowCenter);
-                    
-                    if (d < minDist) {
-                        minDist = d;
-                        bestUp = iUp;
-                    }
-                });
-
-                if (bestUp !== -1) {
-                    upToLow.get(bestUp)!.push(iLow);
-                }
-            });
-
-            // Iterate parents and handle topology transitions
-            upToLow.forEach((childIndices, iUp) => {
-                const upPoly = up.contours[iUp];
-                
-                if (childIndices.length === 1) {
-                    // --- CASE 1: 1-to-1 Topology (Use robust tiling) ---
-                    const iLow = childIndices[0];
-                    const lowPoly = low.contours[iLow];
-                    
-                    // Calculate absolute start indices in the global buffer
-                    let sA = up.startIdx; 
-                    for(let k=0; k<iUp; k++) sA += up.contours[k].length;
-                    
-                    let sB = low.startIdx; 
-                    for(let k=0; k<iLow; k++) sB += low.contours[k].length;
-                    
-                    triangulateRobust(upPoly, lowPoly, sA, sB);
-
-                } else if (childIndices.length === 0) {
-                     // --- CASE 2: Disappearing Island (Cap) ---
-                     // The shape disappears at the lower level. We must cap it at the CURRENT (Upper) level.
-                     // The normal must face DOWN (into the void being cut).
-                     
-                     let sA = up.startIdx; 
-                     for(let k=0; k<iUp; k++) sA += up.contours[k].length;
-
-                     const tris = THREE.ShapeUtils.triangulateShape(upPoly, []);
-                     tris.forEach(t => {
-                         // Reverse winding for Downward normal (since input is CCW/Up)
-                         rawIndices.push(sA + t[0], sA + t[2], sA + t[1]);
-                     });
-
-                } else {
-                    // --- CASE 3: Split into Multiple Islands (Loft with Holes) ---
-                    // Generates the web/shoulder connecting the single outer parent to multiple inner children.
-                    
-                    const holes = childIndices.map(i => low.contours[i]);
-                    // ShapeUtils expects holes to be opposite winding (CW). Our polys are CCW.
-                    const holesReversed = holes.map(h => [...h].reverse());
-
-                    const tris = THREE.ShapeUtils.triangulateShape(upPoly, holesReversed);
-                    
-                    let sA = up.startIdx; 
-                    for(let k=0; k<iUp; k++) sA += up.contours[k].length;
-                    
-                    tris.forEach(t => {
-                        // Map local triangulation indices back to global buffer
-                        // Indices < upPoly.length belong to the Parent (Up layer)
-                        // Indices >= upPoly.length belong to Children (Low layer)
-                        const resolve = (localIdx: number) => {
-                            if (localIdx < upPoly.length) {
-                                return sA + localIdx;
-                            } else {
-                                let rem = localIdx - upPoly.length;
-                                for(let c=0; c<childIndices.length; c++) {
-                                    const hLen = holes[c].length;
-                                    if (rem < hLen) {
-                                        // It's in child c
-                                        const realChildIdx = childIndices[c];
-                                        let sB = low.startIdx;
-                                        for(let k=0; k<realChildIdx; k++) sB += low.contours[k].length;
-                                        
-                                        // Because we reversed the hole for triangulation, we must invert index logic
-                                        // to match the original (CCW) points in the buffer.
-                                        // Reversed: index 0 is Original: len-1
-                                        return sB + ((hLen - 1) - rem);
-                                    }
-                                    rem -= hLen;
-                                }
-                            }
-                            return sA; // Fallback
-                        };
-                        
-                        rawIndices.push(resolve(t[0]), resolve(t[2]), resolve(t[1]));
-                    });
-                }
-            });
-        }
-    } else {
-        // ... (Primitive logic remains unchanged) ...
-        const getContour = (offset: number): THREE.Vector2[] => {
-            let rawPoints: THREE.Vector2[] = [];
-            
-            if (shape.type === "circle") {
-                const d = evaluateExpression((shape as any).diameter, params);
-                minDimension = d;
-                const r = Math.max(0.001, d/2 - offset); 
-                const segments = resolution;
-                for(let i=0; i<segments; i++) {
-                    const theta = (i / segments) * Math.PI * 2;
-                    rawPoints.push(new THREE.Vector2(Math.cos(theta) * r, Math.sin(theta) * r));
-                }
-            } 
-            else if (shape.type === "rect") {
-                const wRaw = evaluateExpression((shape as FootprintRect).width, params);
-                const hRaw = evaluateExpression((shape as FootprintRect).height, params);
-                minDimension = Math.min(wRaw, hRaw);
-                const w = Math.max(0.001, wRaw - offset * 2);
-                const h = Math.max(0.001, hRaw - offset * 2);
-                const crRaw = evaluateExpression((shape as FootprintRect).cornerRadius, params);
-                const halfW = w / 2;
-                const halfH = h / 2;
-                let cr = Math.max(0, crRaw - offset);
-                const limit = Math.min(halfW, halfH);
-                if (cr > limit) cr = limit;
-                const segCorner = 32; 
-                const quadrants = [
-                    { x: halfW - cr, y: halfH - cr, startAng: 0 },         
-                    { x: -halfW + cr, y: halfH - cr, startAng: Math.PI/2 },
-                    { x: -halfW + cr, y: -halfH + cr, startAng: Math.PI }, 
-                    { x: halfW - cr, y: -halfH + cr, startAng: 1.5*Math.PI}
-                ];
-                quadrants.forEach(q => {
-                    const startAng = q.startAng;
-                    const endAng = startAng + Math.PI/2;
-                    const p0X = q.x + cr * Math.cos(startAng);
-                    const p0Y = q.y + cr * Math.sin(startAng);
-                    const p2X = q.x + cr * Math.cos(endAng);
-                    const p2Y = q.y + cr * Math.sin(endAng);
-                    const cpX = q.x + cr * (Math.cos(startAng) + Math.cos(endAng));
-                    const cpY = q.y + cr * (Math.sin(startAng) + Math.sin(endAng));
-                    for(let i=0; i<=segCorner; i++) {
-                        const t = i / segCorner;
-                        const invT = 1 - t;
-                        const c0 = invT * invT;
-                        const c1 = 2 * invT * t;
-                        const c2 = t * t;
-                        const vx = c0 * p0X + c1 * cpX + c2 * p2X;
-                        const vy = c0 * p0Y + c1 * cpY + c2 * p2Y;
-                        rawPoints.push(new THREE.Vector2(vx, vy));
-                    }
-                });
-            }
-            else if (shape.type === "line") {
-                const t = evaluateExpression((shape as FootprintLine).thickness, params);
-                minDimension = t;
-                const effectiveT = Math.max(0.001, t - offset * 2);
-                rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, contextFp, allFootprints);
-            }
-
-            if (rawPoints.length > 0) {
-                const clean: THREE.Vector2[] = [rawPoints[0]];
-                for(let i=1; i<rawPoints.length; i++) {
-                    clean.push(rawPoints[i]);
-                }
-                let area = 0;
-                for (let i = 0; i < clean.length; i++) {
-                    const j = (i + 1) % clean.length;
-                    area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
-                }
-                if (area < 0) {
-                    clean.reverse();
-                }
-                return clean;
-            }
-            return rawPoints;
-        };
-
-        const baseProfile = getContour(0); 
-        const vertsPerLayer = baseProfile.length;
-        if (vertsPerLayer < 3) return null;
-
-        const safeR = Math.min(filletRadius, minDimension / 2 - 0.01, depth);
-        if (safeR <= 0.001) return null;
-
-        const layers: { z: number, offset: number }[] = [];
-        layers.push({ z: 0, offset: 0 });
-        const wallBottomZ = -(depth - safeR);
-        if (Math.abs(wallBottomZ) > 0.001) {
-            layers.push({ z: wallBottomZ, offset: 0 });
-        }
-        const filletSteps = 8; 
-        for(let i=1; i<=filletSteps; i++) {
-            const theta = (i / filletSteps) * (Math.PI / 2);
-            const z = wallBottomZ - Math.sin(theta) * safeR;
-            const off = (1 - Math.cos(theta)) * safeR;
-            const maxOffset = minDimension / 2 - 0.001; 
-            layers.push({ z, offset: Math.min(off, maxOffset) });
-        }
-
-        let topologyValid = true;
-        layers.forEach((layer) => {
-            const points = getContour(layer.offset);
-            if (points.length !== vertsPerLayer) topologyValid = false;
-            if (!topologyValid) return;
-            points.forEach(p => rawVertices.push(p.x, layer.z, -p.y));
-        });
-        if (!topologyValid) return null;
-
-        const getIdx = (layerIdx: number, ptIdx: number) => layerIdx * vertsPerLayer + (ptIdx % vertsPerLayer);
-        const pushTri = (i1: number, i2: number, i3: number) => rawIndices.push(i1, i2, i3);
-
-        const topFaces = THREE.ShapeUtils.triangulateShape(baseProfile, []);
-        topFaces.forEach(face => pushTri(getIdx(0, face[0]), getIdx(0, face[1]), getIdx(0, face[2])));
-
-        for(let l=0; l<layers.length-1; l++) {
-            for(let i=0; i<vertsPerLayer; i++) {
-                const curr = i;
-                const next = (i+1) % vertsPerLayer;
-                const v1 = getIdx(l, curr);
-                const v2 = getIdx(l+1, curr);
-                const v3 = getIdx(l+1, next);
-                const v4 = getIdx(l, next);
-                pushTri(v1, v2, v4); 
-                pushTri(v2, v3, v4);
-            }
-        }
-
-        const lastL = layers.length - 1;
-        const botProfile = getContour(layers[lastL].offset);
-        const botFaces = THREE.ShapeUtils.triangulateShape(botProfile, []);
-        botFaces.forEach(face => pushTri(getIdx(lastL, face[0]), getIdx(lastL, face[2]), getIdx(lastL, face[1])));
-    }
-
-    const uniqueVerts: number[] = [];
-    const vertMap = new Map<string, number>();
-    const oldToNew = new Int32Array(rawVertices.length / 3);
-    const PRECISION = 1e-5;
-    const decimalShift = 1 / PRECISION;
-
-    for(let i=0; i<rawVertices.length / 3; i++) {
-        const x = rawVertices[i*3], y = rawVertices[i*3+1], z = rawVertices[i*3+2];
-        const key = `${Math.round(x*decimalShift)}_${Math.round(y*decimalShift)}_${Math.round(z*decimalShift)}`;
-        if (vertMap.has(key)) oldToNew[i] = vertMap.get(key)!;
-        else { const newIdx = uniqueVerts.length / 3; uniqueVerts.push(x, y, z); vertMap.set(key, newIdx); oldToNew[i] = newIdx; }
-    }
-    const finalIndices: number[] = [];
-    for(let i=0; i<rawIndices.length; i+=3) {
-        const a = oldToNew[rawIndices[i]], b = oldToNew[rawIndices[i+1]], c = oldToNew[rawIndices[i+2]];
-        if (a === b || b === c || a === c) continue;
-        finalIndices.push(a, b, c);
-    }
-
-    const vertProperties = new Float32Array(uniqueVerts);
-    const triVerts = new Uint32Array(finalIndices);
-
-    try {
-        const mesh = new manifoldModule.Mesh();
-        mesh.numProp = 3;
-        mesh.vertProperties = vertProperties;
-        mesh.triVerts = triVerts;
-        return { manifold: new manifoldModule.Manifold(mesh), vertProperties, triVerts };
-    } catch (e) { 
-        console.error("Failed to create fillet manifold", e);
-        return { manifold: null, vertProperties, triVerts };
-    }
-}
-
-// ------------------------------------------------------------------
-// MESH PARSING
-// ------------------------------------------------------------------
-
-const meshGeometryCache = new Map<string, THREE.BufferGeometry>();
-
-async function loadMeshGeometry(asset: MeshAsset): Promise<THREE.BufferGeometry | null> {
-    const cacheKey = asset.id;
-    if (meshGeometryCache.has(cacheKey)) {
-        return meshGeometryCache.get(cacheKey)!.clone();
-    }
-
-    const buffer = base64ToArrayBuffer(asset.content);
-
-    try {
-        console.log(`Loading mesh asset ${asset.id} of format ${asset.format}`);
-        if (asset.format === "stl") {
-            const loader = new STLLoader();
-            const geometry = loader.parse(buffer);
-            meshGeometryCache.set(cacheKey, geometry);
-            return geometry;
-        } else if (asset.format === "obj") {
-             const text = new TextDecoder().decode(buffer);
-             const loader = new OBJLoader();
-             const group = loader.parse(text);
-             const geometries: THREE.BufferGeometry[] = [];
-             group.traverse((child) => {
-                 if ((child as THREE.Mesh).isMesh) {
-                     geometries.push((child as THREE.Mesh).geometry);
-                 }
-             });
-             if (geometries.length > 0) {
-                 const merged = mergeBufferGeometries(geometries);
-                 if (merged) {
-                    meshGeometryCache.set(cacheKey, merged);
-                 }
-                 return merged;
-             }
-        } else if (asset.format === "glb") {
-            const loader = new GLTFLoader();
-            return new Promise((resolve) => {
-                loader.parse(buffer, '', (gltf) => {
-                    const geometries: THREE.BufferGeometry[] = [];
-                    gltf.scene.traverse((child) => {
-                        if ((child as THREE.Mesh).isMesh) {
-                            geometries.push((child as THREE.Mesh).geometry);
-                        }
-                    });
-                    if (geometries.length > 0) {
-                        const merged = mergeBufferGeometries(geometries);
-                        if (merged) {
-                            meshGeometryCache.set(cacheKey, merged);
-                        }
-                        resolve(merged);
-                    } else {
-                        resolve(null);
-                    }
-                }, (err) => {
-                    console.error("GLB Parse error", err);
-                    resolve(null);
-                });
-            });
-        } else if (asset.format === "step") {
-            console.warn("Legacy STEP format found on main thread. Processing should be handled by worker.");
-            return null; // The healing effect will catch this and convert it
-        }
-    } catch (e) {
-        console.error("Failed to load mesh", e);
-    }
-    return null;
-}
-
-// ------------------------------------------------------------------
-// COMPONENTS (LayerSolid, FlatMesh, FlattenMeshes, etc.)
-// ------------------------------------------------------------------
-
-interface ExecutionItem {
-    type: "single" | "union";
-    shapes: FlatShape[];
-    unionId?: string;
-}
 
 const LayerSolid = ({
   layer,
@@ -1189,7 +141,9 @@ const LayerSolid = ({
   bottomZ,
   thickness,
   bounds,
-  manifoldModule,
+  layerIndex,
+  totalLayers,
+  onProgress,
   registerMesh
 }: {
   layer: StackupLayer;
@@ -1199,325 +153,60 @@ const LayerSolid = ({
   bottomZ: number;
   thickness: number;
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
-  manifoldModule: any;
+  layerIndex: number;
+  totalLayers: number;
+  onProgress: (p: any) => void;
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
 }) => {
-  const width = bounds.maxX - bounds.minX;
-  const depth = bounds.maxY - bounds.minY; 
-  
-  const boardShape = useMemo(() => {
-      if (!footprint.isBoard) return null;
-
-      // Resolve Assigned Board Outline
-      const assignments = footprint.boardOutlineAssignments || {};
-      const assignedId = assignments[layer.id];
-      let outlineShape = footprint.shapes.find(s => s.id === assignedId) as FootprintBoardOutline | undefined;
-
-      // Fallback: If no assignment, use the first available outline
-      if (!outlineShape) {
-          outlineShape = footprint.shapes.find(s => s.type === "boardOutline") as FootprintBoardOutline | undefined;
-      }
-
-      if (outlineShape) {
-          return createBoardShape(outlineShape, params, footprint, allFootprints);
-      }
-      return null;
-  }, [footprint, layer.id, params, allFootprints]);
-
-  const centerX = boardShape ? 0 : (bounds.minX + bounds.maxX) / 2;
-  const centerZ = boardShape ? 0 : (bounds.minY + bounds.maxY) / 2;
+  // Center X/Z logic from previous implementation
+  const isBoard = footprint.isBoard;
+  const centerX = isBoard ? 0 : (bounds.minX + bounds.maxX) / 2;
+  const centerZ = isBoard ? 0 : (bounds.minY + bounds.maxY) / 2;
   const centerY = bottomZ + thickness / 2;
-
-  const flatShapes = useMemo(() => {
-    return flattenShapes(footprint, footprint.shapes, allFootprints, params);
-  }, [footprint, allFootprints, params]);
 
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [hasError, setHasError] = useState(false);
 
   useEffect(() => {
-    if (!manifoldModule || thickness <= 0.0001) return;
+    if (thickness <= 0.0001) return;
+    
+    let cancelled = false;
     setHasError(false);
 
-    const garbage: any[] = [];
-    const collect = <T extends unknown>(obj: T): T => {
-        if (obj && typeof (obj as any).delete === 'function') {
-            garbage.push(obj);
-        }
-        return obj;
-    }
-
-    try {
-        const { Manifold, CrossSection } = manifoldModule;
-        const CSG_EPSILON = 0.001;
-
-        let base: any;
-        if (boardShape) {
-            const cs = collect(shapeToManifold(manifoldModule, boardShape));
-            const ext = collect(cs.extrude(thickness));
-            const rotated = collect(ext.rotate([-90, 0, 0]));
-            base = collect(rotated.translate([0, -thickness/2, 0]));
-        } else {
-            base = collect(Manifold.cube([width, thickness, depth], true));
-        }
-
-        const failedFillets: THREE.BufferGeometry[] = [];
-        const processedCuts: { depth: number, cs: any, id: string }[] = [];
-
-        // Pre-process grouping
-        const executionList: ExecutionItem[] = [];
-        const unionMap = new Map<string, ExecutionItem>();
+    callWorker("computeLayer", {
+        layer, 
+        footprint, 
+        allFootprints, 
+        params, 
+        bottomZ, 
+        thickness, 
+        bounds,
+        layerIndex,
+        totalLayers
+    }, (p) => {
+        if (!cancelled && onProgress) onProgress(p);
+    }).then((data) => {
+        if (cancelled) return;
         
-        // Reverse iteration to match visual order (top-down)
-        [...flatShapes].reverse().forEach(item => {
-            if (!item.shape.assignedLayers || item.shape.assignedLayers[layer.id] === undefined) return;
-            
-            if (item.unionId) {
-                if (!unionMap.has(item.unionId)) {
-                    const group: ExecutionItem = { type: "union", shapes: [], unionId: item.unionId };
-                    unionMap.set(item.unionId, group);
-                    executionList.push(group);
-                }
-                unionMap.get(item.unionId)!.shapes.push(item);
-            } else {
-                executionList.push({ type: "single", shapes: [item] });
-            }
-        });
-
-        // EXECUTE CUTS
-        executionList.forEach((exec) => {
-            // For single items, index 0 is the item. For unions, we aggregate all.
-            // We use the first item to determine parameters (depth, radius)
-            // assuming unions share properties or use parent overrides.
-            const primaryItem = exec.shapes[0];
-            const shape = primaryItem.shape;
-            
-            // 1. Determine Parameters
-            let actualDepth = thickness;
-            let endmillRadius = 0;
-
-            if (layer.type === "Cut") {
-                actualDepth = thickness; 
-            } else {
-                const assignment = shape.assignedLayers![layer.id];
-                const valExpr = (typeof assignment === 'object') ? assignment.depth : (assignment as string);
-                const radiusExpr = (typeof assignment === 'object') ? assignment.endmillRadius : "0";
-
-                const val = evaluateExpression(valExpr, params);
-                endmillRadius = evaluateExpression(radiusExpr, params);
-                actualDepth = Math.max(0, Math.min(val, thickness));
-            }
-
-            let safeRadius = endmillRadius;
-            if (exec.type === "single") {
-                // Optimization: Clamp radius by primitive min dimension
-                if (shape.type === "circle") {
-                    const d = evaluateExpression((shape as any).diameter, params);
-                    safeRadius = Math.min(safeRadius, d/2 - 0.05);
-                } else if (shape.type === "rect") {
-                    const w = evaluateExpression((shape as FootprintRect).width, params);
-                    const h = evaluateExpression((shape as FootprintRect).height, params);
-                    safeRadius = Math.min(safeRadius, Math.min(w, h)/2 - 0.05);
-                } else if (shape.type === "line") {
-                    const t = evaluateExpression((shape as FootprintLine).thickness, params);
-                    safeRadius = Math.min(safeRadius, t/2 - 0.05);
-                }
-            } else {
-                // For unions, just clamp by depth as geometry is complex
-                 safeRadius = Math.min(safeRadius, actualDepth);
-            }
-            if (safeRadius < 0) safeRadius = 0;
-
-            const isPartialCut = actualDepth < thickness - CSG_EPSILON;
-            const hasRadius = safeRadius > CSG_EPSILON;
-            const shouldRound = isPartialCut && hasRadius;
-
-            // 2. Generate Combined CrossSection
-            let combinedCS: any = null;
-
-            exec.shapes.forEach(item => {
-                const s = item.shape;
-                const localX = item.x - centerX;
-                const localZ = centerZ - item.y;
-                const globalRot = item.rotation; 
-
-                // Resolve Local CS
-                let cs = null;
-                if (s.type === "circle") {
-                    const d = evaluateExpression((s as any).diameter, params);
-                    if (d > 0) cs = collect(CrossSection.circle(d/2, 32));
-                } else if (s.type === "rect") {
-                    const w = evaluateExpression((s as FootprintRect).width, params);
-                    const h = evaluateExpression((s as FootprintRect).height, params);
-                    const crRaw = evaluateExpression((s as FootprintRect).cornerRadius, params);
-                    const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
-                    
-                    if (w > 0 && h > 0) {
-                        cs = collect(CrossSection.square([w, h], true));
-                        if (cr > 0.001) cs = collect(cs.offset(-cr, "Round", 8)).offset(cr, "Round", 8);
-                    }
-                } else if (s.type === "line") {
-                    const t = evaluateExpression((s as FootprintLine).thickness, params);
-                    const validT = t > 0 ? t : 0.01;
-                    const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT);
-                    if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape));
-                } else if (s.type === "polygon") {
-                    const poly = s as FootprintPolygon;
-                    const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, 32);
-                    if (pts.length > 2) {
-                        cs = collect(new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd"));
-                    }
-                }
-
-                if (cs) {
-                    // Transform CS to Layer Space
-                    // Rotate
-                    cs = collect(cs.rotate(globalRot));
-                    // Translate (2D Y maps to 3D -Z)
-                    cs = collect(cs.translate([localX, -localZ]));
-
-                    // Accumulate
-                    if (!combinedCS) combinedCS = cs;
-                    else combinedCS = collect(combinedCS.add(cs));
-                }
-            });
-
-            if (!combinedCS) return;
-
-            // Split non-contiguous shapes (islands) into an array of CrossSections.
-            // This prevents the fillet algorithm from generating artifacts between disjoint shapes.
-            const disjointComponents = combinedCS.decompose(); 
-            
-            disjointComponents.forEach((rawComponent: any, k: number) => {
-                // Must collect componentCS so it gets cleaned up at the end
-                const componentCS = collect(rawComponent);
-
-                // 3. Check Intersection with previous cuts (Per Island)
-                let isRestorative = false;
-                for (const prev of processedCuts) {
-                    if (prev.depth > actualDepth + CSG_EPSILON) {
-                        const intersection = collect(componentCS.intersect(prev.cs));
-                        if (!intersection.isEmpty()) {
-                            isRestorative = true;
-                            break;
-                        }
-                    }
-                }
-                
-                // Track this cut
-                processedCuts.push({ 
-                    depth: actualDepth, 
-                    cs: componentCS, 
-                    id: exec.type === "union" ? `${exec.unionId}_${k}` : primaryItem.originalId 
-                });
-
-                // 4. Boolean Operations (Using Component CS)
-                const throughHeight = thickness + 0.2; 
-                
-                if (isRestorative) {
-                    const toolCutThrough = collect(collect(componentCS.extrude(throughHeight)).translate([0, 0, -throughHeight/2]));
-                    const toolAligned = collect(toolCutThrough.rotate([-90, 0, 0])); 
-                    
-                    const diff = collect(Manifold.difference(base, toolAligned));
-                    base = diff;
-
-                    let fillHeight = thickness - actualDepth;
-                    if (shouldRound) fillHeight += safeRadius;
-
-                    if (fillHeight > CSG_EPSILON) {
-                        const toolFill = collect(collect(componentCS.extrude(fillHeight)).translate([0, 0, -fillHeight/2]));
-                        const fillAligned = collect(toolFill.rotate([-90, 0, 0]));
-                        
-                        const fillY = layer.carveSide === "Top" 
-                            ? (-thickness / 2 + fillHeight / 2) 
-                            : (thickness / 2 - fillHeight / 2);
-                            
-                        const moved = collect(fillAligned.translate([0, fillY, 0]));
-                        base = collect(Manifold.union(base, moved));
-                    }
-                } else {
-                    if (!shouldRound && actualDepth > CSG_EPSILON) {
-                        const toolCut = collect(collect(componentCS.extrude(actualDepth)).translate([0, 0, -actualDepth/2]));
-                        const toolAligned = collect(toolCut.rotate([-90, 0, 0]));
-
-                        const cutY = layer.carveSide === "Top"
-                            ? (thickness / 2 - actualDepth / 2)
-                            : (-thickness / 2 + actualDepth / 2);
-
-                        const moved = collect(toolAligned.translate([0, cutY, 0]));
-                        base = collect(Manifold.difference(base, moved));
-                    }
-                }
-
-                // 5. Fillet Subtraction (Using Component CS)
-                if (shouldRound) {
-                    const result = generateProceduralFillet(
-                        manifoldModule, 
-                        shape, 
-                        params, 
-                        actualDepth,
-                        safeRadius,
-                        primaryItem.contextFp,
-                        allFootprints,
-                        32,
-                        componentCS // Use decomposed island
-                    );
-
-                    if (result && result.manifold) {
-                        const toolFillet = collect(result.manifold);
-                        let final;
-                        if (layer.carveSide === "Top") {
-                            final = collect(toolFillet.translate([0, thickness / 2, 0]));
-                        } else {
-                            const flipped = collect(toolFillet.rotate([180, 0, 0]));
-                            final = collect(flipped.translate([0, -thickness/2, 0]));
-                        }
-                        base = collect(Manifold.difference(base, final));
-                    } else if (result && result.vertProperties && result.triVerts) {
-                        const geom = new THREE.BufferGeometry();
-                        geom.setAttribute('position', new THREE.BufferAttribute(result.vertProperties, 3));
-                        geom.setIndex(new THREE.BufferAttribute(result.triVerts, 1));
-                        
-                        if (layer.carveSide === "Top") geom.translate(0, thickness / 2, 0);
-                        else { geom.rotateX(Math.PI); geom.translate(0, -thickness / 2, 0); }
-                        
-                        failedFillets.push(geom);
-                    }
-                }
-            });
-        });
-
-        if (failedFillets.length > 0) {
-            const merged = mergeBufferGeometries(failedFillets);
-            setGeometry(merged);
-            setHasError(true);
-            return;
-        }
-
-        const mesh = base.getMesh();
-        const bufferGeom = new THREE.BufferGeometry();
-        
-        if (mesh.vertProperties && mesh.triVerts) {
-             bufferGeom.setAttribute('position', new THREE.BufferAttribute(mesh.vertProperties, 3));
-             bufferGeom.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1));
-             bufferGeom.computeVertexNormals();
-             setGeometry(bufferGeom);
+        if (data.vertProperties && data.triVerts) {
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute('position', new THREE.BufferAttribute(data.vertProperties, 3));
+            geom.setIndex(new THREE.BufferAttribute(data.triVerts, 1));
+            geom.computeVertexNormals();
+            setGeometry(geom);
         } else {
-             setGeometry(null);
+            setGeometry(null);
         }
-
-    } catch (e) {
-        console.error("Manifold Error", e);
+    }).catch(e => {
+        if (cancelled) return;
+        console.error(`Layer ${layer.name} compute failed`, e);
         setHasError(true);
-    } finally {
-        garbage.forEach(g => {
-            try { g.delete(); } catch(e) {}
-        });
-    }
+    });
 
-  }, [manifoldModule, thickness, width, depth, layer, flatShapes, params, boardShape, centerX, centerZ, bounds]);
+    return () => { cancelled = true; };
+  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds, layerIndex, totalLayers]);
 
-    return (
+  return (
     <mesh 
         position={[centerX, centerY, centerZ]}
         ref={(ref) => registerMesh && registerMesh(layer.id, ref)}
@@ -1526,19 +215,18 @@ const LayerSolid = ({
     >
       <meshStandardMaterial 
           color={hasError ? "#ff6666" : layer.color} 
-          transparent={!hasError} 
+          transparent={true} 
           opacity={hasError ? 1.0 : 0.9} 
           flatShading 
           side={THREE.FrontSide} 
-          visible={true} 
           polygonOffset
           polygonOffsetFactor={1}
           polygonOffsetUnits={1}
       />
       {geometry && (
             <Edges 
-                key={geometry.uuid}      // Force remount when geometry instance changes
-                geometry={geometry}      // Explicitly pass geometry to be safe
+                key={geometry.uuid}
+                geometry={geometry}
                 threshold={15} 
                 color="#222" 
             />
@@ -1556,13 +244,13 @@ const LayerSolid = ({
   );
 };
 
-// --- MESH RENDERER ---
+// --- MESH RENDERER UTILS ---
 
 interface FlatMesh {
     mesh: FootprintMesh;
     globalTransform: THREE.Matrix4;
-    selectableId: string; // The ID to select when clicking (parent ref or self)
-    isEditable: boolean; // Only true if direct child of current footprint
+    selectableId: string;
+    isEditable: boolean;
 }
 
 function flattenMeshes(
@@ -1634,7 +322,6 @@ function flattenMeshes(
 
              const globalUMat = transform.clone().multiply(uMat);
 
-             // Recurse using the union's internal shapes
              result = result.concat(flattenMeshes(
                  u as unknown as Footprint,
                  allFootprints,
@@ -1689,21 +376,28 @@ const MeshObject = ({
         let mounted = true;
         const asset = meshAssets.find(a => a.id === mesh.meshId);
         if (asset) {
-            loadMeshGeometry(asset).then(geom => {
-                if(mounted && geom) setGeometry(geom);
-            });
+            // Load via Worker
+            callWorker("loadMesh", { content: asset.content, format: asset.format })
+                .then(data => {
+                    if (!mounted) return;
+                    const geom = new THREE.BufferGeometry();
+                    
+                    if (data.position) geom.setAttribute('position', new THREE.BufferAttribute(data.position, 3));
+                    if (data.normal) geom.setAttribute('normal', new THREE.BufferAttribute(data.normal, 3));
+                    if (data.index) geom.setIndex(new THREE.BufferAttribute(data.index, 1));
+                    
+                    if (!data.normal) geom.computeVertexNormals();
+                    
+                    setGeometry(geom);
+                })
+                .catch(err => console.error("Mesh load failed", err));
         }
         return () => { mounted = false; };
-    }, [mesh, meshAssets]);
+    }, [mesh.meshId, meshAssets]);
 
-    // 1. Calculate transforms from the matrix immediately during render
-    // This ensures we have the values ready to pass to the props
     const position = useMemo(() => new THREE.Vector3().setFromMatrixPosition(globalTransform), [globalTransform]);
     const quaternion = useMemo(() => new THREE.Quaternion().setFromRotationMatrix(globalTransform), [globalTransform]);
     const scale = useMemo(() => new THREE.Vector3().setFromMatrixScale(globalTransform), [globalTransform]);
-
-    // REMOVED: The useEffect/useLayoutEffect for syncing ghostRef. 
-    // We now handle this via props on the <object3D> below.
 
     const handleChange = () => {
         if (!ghostRef.current || !isEditable) return;
@@ -1711,7 +405,6 @@ const MeshObject = ({
         const ghostPos = ghostRef.current.position;
         const ghostRot = ghostRef.current.rotation; 
         
-        // Compare against the authoritative state
         const currentPos = new THREE.Vector3().setFromMatrixPosition(globalTransform);
         const currentRot = new THREE.Euler().setFromRotationMatrix(globalTransform);
 
@@ -1742,7 +435,6 @@ const MeshObject = ({
             <mesh 
                 ref={meshRef}
                 geometry={geometry} 
-                // Apply transforms to visible mesh
                 position={position}
                 quaternion={quaternion}
                 scale={scale}
@@ -1771,10 +463,6 @@ const MeshObject = ({
             
             {isSelected && isEditable && (
                 <>
-                    {/* 
-                       FIX: Pass props directly to initialize correctly.
-                       Use `undefined` when dragging so React doesn't overwrite the Gizmo's work.
-                    */}
                     <object3D 
                         ref={ghostRef} 
                         position={isDragging ? undefined : position}
@@ -1804,74 +492,15 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   const hasInitiallySnapped = useRef(false);
   const [firstMeshReady, setFirstMeshReady] = useState(false);
   
-  const [manifoldModule, setManifoldModule] = useState<any>(null);
+  // Progress State
+  const [progress, setProgress] = useState({ active: false, text: "", percent: 0 });
 
-  // WORKER MANAGEMENT
-  const workerRef = useRef<Worker | null>(null);
-  const workerCallbacks = useRef<Map<string, {resolve: (v:any)=>void, reject: (e:any)=>void}>>(new Map());
-
-  useEffect(() => {
-    // 1. Manifold Init
-    Module({
-        locateFile: ((path: string) => {
-            if (path.endsWith('.wasm')) {
-                return wasmUrl;
-            }
-            return path;
-        }) as any
-    }).then((m) => {
-        m.setup();
-        setManifoldModule(m);
-    });
-
-    // 2. Worker Init
-    if (!workerRef.current) {
-        const worker = new MeshWorker();
-        workerRef.current = worker;
-        
-        // NEW: Catch startup errors (like import failures)
-        worker.onerror = (err: any) => {
-            console.error("Worker Initialization Error:", err.message, err.filename, err.lineno);
-        };
-
-        worker.onmessage = (e: MessageEvent) => {
-            const { id, type, payload, error } = e.data;
-            if (workerCallbacks.current.has(id)) {
-                const cb = workerCallbacks.current.get(id)!;
-                if (type === "error") cb.reject(new Error(error));
-                else cb.resolve(payload);
-                workerCallbacks.current.delete(id);
-            }
-        };
-
-        // Send OCCT Init
-        const initId = crypto.randomUUID();
-        worker.postMessage({ 
-            id: initId, 
-            type: "init", 
-            payload: { wasmUrl: occtWasmUrl } 
-        });
-        
-        workerCallbacks.current.set(initId, { 
-            resolve: () => console.log("Mesh Worker Initialized"), 
-            reject: (e) => console.error("Mesh Worker Failed Init", e) 
-        });
-    }
-
-    return () => {
-        workerRef.current?.terminate();
-        workerRef.current = null;
-    };
+  const handleProgress = useCallback((p: any) => {
+      setProgress({ active: p.percent < 1, text: p.message, percent: p.percent });
+      if (p.percent >= 1) {
+          setTimeout(() => setProgress(prev => ({ ...prev, active: false })), 800);
+      }
   }, []);
-
-  const callWorker = async (type: string, payload: any): Promise<any> => {
-      if (!workerRef.current) throw new Error("Worker not initialized");
-      const id = crypto.randomUUID();
-      return new Promise((resolve, reject) => {
-          workerCallbacks.current.set(id, { resolve, reject });
-          workerRef.current!.postMessage({ id, type, payload });
-      });
-  };
 
   const fitToHome = useCallback(() => {
     const controls = controlsRef.current;
@@ -1956,13 +585,10 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         const ext = file.name.split('.').pop()?.toLowerCase();
         if (!ext) return null;
         
-        // Read file content as ArrayBuffer to pass to worker
         const buffer = await file.arrayBuffer();
-        
         const format = (ext === "stp" || ext === "step") ? "step" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "stl"));
         
         try {
-            // Offload to worker
             const result = await callWorker("convert", {
                 buffer,
                 format,
@@ -1973,26 +599,29 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                 id: crypto.randomUUID(),
                 name: file.name,
                 content: result.base64,
-                format: result.format, // Should be 'glb'
+                format: result.format,
                 renderingType: "solid",
                 x: "0", y: "0", z: "0",
                 rotationX: "0", rotationY: "0", rotationZ: "0"
             } as any;
         } catch (e) {
             console.error("Worker Conversion Failed", e);
-            // Alert user visually since the spinner just dies
             alert(`File processing failed: ${e instanceof Error ? e.message : String(e)}`);
             return null;
         }
     },
     convertMeshToGlb: async (mesh: FootprintMesh): Promise<FootprintMesh | null> => {
-        // mesh argument here is a mock passed by the healer with embedded content
         const mock = mesh as any;
-
         try {
-            const buffer = base64ToArrayBuffer(mock.content);
+            // Need base64ToArrayBuffer here? No, convert logic expects buffer.
+            // But content is string.
+            const binString = window.atob(mock.content);
+            const len = binString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) bytes[i] = binString.charCodeAt(i);
+            
             const result = await callWorker("convert", {
-                buffer,
+                buffer: bytes.buffer,
                 format: mock.format,
                 fileName: mock.name
             });
@@ -2064,7 +693,8 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   }, [selectedId, flattenedMeshes]);
 
   return (
-    <div style={{ width: "100%", height: "100%", background: "#111" }}>
+    <div style={{ width: "100%", height: "100%", background: "#111", position: 'relative' }}>
+      <ProgressBar progress={progress} />
       <Canvas 
         camera={{ position: [50, 50, 50], fov: 45, near: 0.1, far: 100000 }}
         frameloop={is3DActive ? "always" : "never"}
@@ -2077,7 +707,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         <group>
           {(() => {
             let currentZ = 0; 
-            return [...stackup].reverse().map((layer) => {
+            return [...stackup].reverse().map((layer, idx) => {
               const thickness = evaluateExpression(layer.thicknessExpression, params);
               
               const isVisible = visibleLayers ? visibleLayers[layer.id] !== false : true;
@@ -2092,7 +722,9 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                   bottomZ={currentZ}
                   thickness={thickness}
                   bounds={bounds}
-                  manifoldModule={manifoldModule}
+                  layerIndex={idx}
+                  totalLayers={stackup.length}
+                  onProgress={handleProgress}
                   registerMesh={(id, mesh) => { 
                       if (mesh) {
                         meshRefs.current[id] = mesh; 
