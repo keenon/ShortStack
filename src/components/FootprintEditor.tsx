@@ -2191,6 +2191,7 @@ async function collectExportShapesAsync(
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
 
+        // Global Origin of the current shape (Parent Origin + Rotated Local Offset)
         const gx = transform.x + (lx * cos - ly * sin);
         const gy = transform.y + (lx * sin + ly * cos);
 
@@ -2307,6 +2308,7 @@ async function collectExportShapesAsync(
              if (!forceInclude && depth <= 0.0001) continue;
 
              // Prepare Export Object
+             // Note: x/y here is the Shape's global origin (gx, gy).
              const exportObj: any = {
                  x: gx,
                  y: gy,
@@ -2355,8 +2357,8 @@ async function collectExportShapesAsync(
                     } : undefined;
 
                     return {
-                        x: transform.x + rx,
-                        y: transform.y + ry,
+                        x: gx + rx,
+                        y: gy + ry,
                         handle_in: rotateVec(resolved.handleIn),
                         handle_out: rotateVec(resolved.handleOut)
                     };
@@ -2380,8 +2382,8 @@ async function collectExportShapesAsync(
                             y: v.x * sin + v.y * cos
                         } : undefined;
                         return {
-                            x: transform.x + rx,
-                            y: transform.y + ry,
+                            x: gx + rx,
+                            y: gy + ry,
                             handle_in: rotateVec(resolved.handleIn),
                             handle_out: rotateVec(resolved.handleOut)
                         };
@@ -2401,15 +2403,11 @@ async function collectExportShapesAsync(
                     const gSin = Math.sin(globalRad);
 
                     const globalBasePoints = basePoints.map(p => ({
+                        // This block was already using gx/gy, which is correct
                         x: gx + (p.x * gCos - p.y * gSin),
                         y: gy + (p.x * gSin + p.y * gCos)
                     }));
 
-                    // Helper logic extracted below...
-                    // Wait, slicePolygonContours expects contours in final space? Or applies transform?
-                    // Let's reuse the helper I will write below.
-                    // But slicePolygonContours expects a list of contours.
-                    
                     // Convert THREE.Vector2[] to {x,y}[]
                     const contour = globalBasePoints.map(p => ({x: p.x, y: p.y}));
                     
