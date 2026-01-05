@@ -1075,18 +1075,22 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
   // --- UNION / UNGROUP LOGIC ---
 
 const handleGroup = () => {
-    if (selectedShapeIds.length < 2) return;
+    // 1. Identify which selected shapes are valid for unioning (primitives and other unions)
+    const selectedShapes = footprint.shapes.filter(s => selectedShapeIds.includes(s.id));
+    const unionableShapes = selectedShapes.filter(s => s.type !== "footprint" && s.type !== "wireGuide");
     
-    // 1. Gather all unique primitive shapes (flattening any selected unions)
+    // We only proceed if there are at least 2 primitives/unions to join
+    if (unionableShapes.length < 2) return;
+
+    // Track which specific IDs will be removed (only the ones going into the union)
+    const consumedIds = unionableShapes.map(s => s.id);
+
     const flattenedPrimitives: FootprintShape[] = [];
     
-    // --- NEW: Determine Layer Assignment Source ---
-    // We want the assignments from the largest union, or if none, the topmost shape in the list
+    // Determine Layer Assignment Source from unionable shapes only
     let assignmentSource: FootprintShape | null = null;
     let maxUnionArea = -1;
-
-    const selectedShapesInOrder = footprint.shapes.filter(s => selectedShapeIds.includes(s.id));
-    const selectedUnions = selectedShapesInOrder.filter(s => s.type === "union") as FootprintUnion[];
+    const selectedUnions = unionableShapes.filter(s => s.type === "union") as FootprintUnion[];
 
     if (selectedUnions.length > 0) {
         selectedUnions.forEach(u => {
@@ -1100,19 +1104,12 @@ const handleGroup = () => {
             }
         });
     }
-
-    if (!assignmentSource) {
-        // Fallback to the shape closest to the top of the shape list (index 0)
-        assignmentSource = selectedShapesInOrder[0];
-    }
+    if (!assignmentSource) assignmentSource = unionableShapes[0];
 
     const inheritedAssignments = assignmentSource ? JSON.parse(JSON.stringify(assignmentSource.assignedLayers)) : {};
-    // ----------------------------------------------
 
-    selectedShapeIds.forEach(id => {
-        const shape = footprint.shapes.find(s => s.id === id);
-        if (!shape) return;
-
+    // 2. Flatten only the unionable shapes
+    unionableShapes.forEach(shape => {
         if (shape.type === "union") {
             // "Ungroup" logic to find child positions in current footprint space
             const u = shape as FootprintUnion;
@@ -1124,6 +1121,9 @@ const handleGroup = () => {
             const sin = Math.sin(rad);
 
             u.shapes.forEach(s => {
+                // Skip recursive items nested inside existing unions
+                if (s.type === "footprint" || s.type === "wireGuide") return;
+
                 const lx = evaluateExpression((s as any).x || "0", params);
                 const ly = evaluateExpression((s as any).y || "0", params);
                 
@@ -1138,7 +1138,7 @@ const handleGroup = () => {
                     y: gy.toFixed(4).toString() 
                 };
 
-                if (s.type === "rect" || s.type === "footprint" || s.type === "union") {
+                if (s.type === "rect" || s.type === "union") {
                     const sa = evaluateExpression((s as any).angle, params);
                     newS.angle = (sa + uAngle).toFixed(4).toString();
                 }
@@ -1214,7 +1214,7 @@ const handleGroup = () => {
     if (minX === Infinity) return;
     
     const cx = (minX + maxX) / 2;
-    const cy = -((minY + maxY) / 2); // Convert Visual Y back to Math Y
+    const cy = -((minY + maxY) / 2);
     
     // 3. Create the new single-level Union Shape
     const unionId = crypto.randomUUID();
@@ -1225,41 +1225,27 @@ const handleGroup = () => {
         x: cx.toFixed(4).toString(),
         y: cy.toFixed(4).toString(),
         angle: "0",
-        assignedLayers: inheritedAssignments, // UPDATED: Now uses inherited details
-        shapes: []
+        assignedLayers: inheritedAssignments,
+        shapes: flattenedPrimitives.map(s => {
+            const dx = -cx;
+            const dy = -cy;
+            if (s.type === "line" || s.type === "polygon" || s.type === "boardOutline") {
+                const pts = (s as any).points.map((p: any) => ({
+                    ...p, x: modifyExpression(p.x, dx), y: modifyExpression(p.y, dy)
+                }));
+                return { ...s, points: pts };
+            }
+            return { ...s, x: modifyExpression((s as any).x, dx), y: modifyExpression((s as any).y, dy) };
+        })
     };
 
-    // 4. Transform primitives relative to new union center
-    newUnion.shapes = flattenedPrimitives.map(s => {
-        const dx = -cx;
-        const dy = -cy;
-        
-        if (s.type === "line" || s.type === "polygon" || s.type === "boardOutline") {
-            // These shapes have x=0, y=0 (from the flattening step above or natively)
-            // So we just translate their points relative to the new Union Center.
-            const pts = (s as any).points.map((p: any) => ({
-                ...p,
-                x: modifyExpression(p.x, dx),
-                y: modifyExpression(p.y, dy)
-            }));
-            return { ...s, points: pts };
-        }
-        
-        // Rects, Circles, Refs, etc use Origin
-        return {
-            ...s,
-            x: modifyExpression((s as any).x, dx),
-            y: modifyExpression((s as any).y, dy)
-        };
-    });
-
-    // 5. Update Footprint (Replace selection with new union)
-    const remainingShapes = footprint.shapes.filter(s => !selectedShapeIds.includes(s.id));
+    // 3. Update Footprint: Only remove consumed IDs. Footprints/Guides stay.
+    const remainingShapes = footprint.shapes.filter(s => !consumedIds.includes(s.id));
     updateHistory({
         footprint: { ...footprint, shapes: [newUnion, ...remainingShapes] },
         selectedShapeIds: [unionId]
     });
-  };
+};
 
 const handleUngroup = (unionId: string) => {
     const unionShape = footprint.shapes.find(s => s.id === unionId);
