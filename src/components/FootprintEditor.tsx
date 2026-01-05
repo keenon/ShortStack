@@ -305,7 +305,19 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const shapeDragStartPos = useRef({ x: 0, y: 0 });
   // UPDATED: Store start state for ALL selected shapes
   const shapeDragStartDataMap = useRef<Map<string, any>>(new Map());
-  const dragTargetRef = useRef<{ id: string; pointIdx?: number; handleType?: 'in' | 'out' | 'symmetric'; } | null>(null);
+
+  // UPDATED: Added DragMode and Resize specific metadata
+  type DragMode = 'move' | 'resize';
+  type ResizeHandle = 'top' | 'bottom' | 'left' | 'right' | 'ring';
+
+  const dragTargetRef = useRef<{ 
+      id: string; 
+      pointIdx?: number; 
+      handleType?: 'in' | 'out' | 'symmetric';
+      mode: DragMode;
+      resizeHandle?: ResizeHandle;
+      initialVal?: string; // Original expression for width/height/dia
+  } | null>(null);
   
   // FIX: Store the effective selection used during drag so we don't rely on stale closure state
   const dragSelectionRef = useRef<string[]>([]);
@@ -727,25 +739,13 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       }
 
       setSelectedShapeIds(effectiveSelection);
-      
-      // NEW: Trigger scroll to point properties if a specific point was clicked
-      if (pointIndex !== undefined) {
-          setScrollToPointIndex(pointIndex);
-      }
+      if (pointIndex !== undefined) setScrollToPointIndex(pointIndex);
 
       const shape = footprint.shapes.find(s => s.id === id);
       if (!shape) return;
 
       isShapeDragging.current = true;
       hasMoved.current = false;
-
-      // UPDATED: Check for Ctrl/Meta key to trigger symmetric handle creation
-      if (pointIndex !== undefined && (e.ctrlKey || e.metaKey)) {
-          dragTargetRef.current = { id, pointIdx: pointIndex, handleType: 'symmetric' };
-      } else {
-          dragTargetRef.current = { id, pointIdx: pointIndex };
-      }
-
       shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
       
       // FIX: Store effective selection in ref to be used in mouseMove
@@ -759,7 +759,59 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
               shapeDragStartDataMap.current.set(s.id, JSON.parse(JSON.stringify(s)));
           }
       });
-      
+
+      // --- HIT TESTING FOR RESIZE vs MOVE ---
+      let dragMode: DragMode = 'move';
+      let resizeHandle: ResizeHandle | undefined;
+      let initialVal: string | undefined;
+
+      // Only attempt resize if one shape is selected and we aren't clicking a point handle
+      if (pointIndex === undefined && effectiveSelection.length === 1 && wrapperRef.current) {
+          const rect = wrapperRef.current.getBoundingClientRect();
+          const scaleX = viewBoxRef.current.width / rect.width;
+          const threshold = 8 * scaleX; // 8 pixels in world units
+
+          const mWorld = getMouseWorldPos(e.clientX, e.clientY);
+          const cx = evaluateExpression((shape as any).x, params);
+          const cy = -evaluateExpression((shape as any).y, params);
+
+          if (shape.type === 'circle') {
+              const dia = evaluateExpression(shape.diameter, params);
+              const dist = Math.sqrt(Math.pow(mWorld.x - cx, 2) + Math.pow(mWorld.y - cy, 2));
+              if (Math.abs(dist - dia / 2) < threshold && (dia / 2) > threshold * 2) {
+                  dragMode = 'resize';
+                  resizeHandle = 'ring';
+                  initialVal = shape.diameter;
+              }
+          } else if (shape.type === 'rect') {
+              const w = evaluateExpression(shape.width, params);
+              const h = evaluateExpression(shape.height, params);
+              const angle = evaluateExpression(shape.angle, params);
+              const rad = (angle * Math.PI) / 180;
+              
+              // Rotate mouse into local space
+              const dx = mWorld.x - cx;
+              const dy = mWorld.y - cy;
+              const lmx = dx * Math.cos(rad) - dy * Math.sin(rad);
+              const lmy = dx * Math.sin(rad) + dy * Math.cos(rad);
+
+              const hw = w / 2; const hh = h / 2;
+              const isVertEdge = Math.abs(lmy) < (hh + threshold);
+              const isHorizEdge = Math.abs(lmx) < (hw + threshold);
+
+              if (Math.abs(lmx - hw) < threshold && isVertEdge) { dragMode = 'resize'; resizeHandle = 'right'; initialVal = shape.width; }
+              else if (Math.abs(lmx + hw) < threshold && isVertEdge) { dragMode = 'resize'; resizeHandle = 'left'; initialVal = shape.width; }
+              else if (Math.abs(lmy - hh) < threshold && isHorizEdge) { dragMode = 'resize'; resizeHandle = 'bottom'; initialVal = shape.height; }
+              else if (Math.abs(lmy + hh) < threshold && isHorizEdge) { dragMode = 'resize'; resizeHandle = 'top'; initialVal = shape.height; }
+          }
+      }
+
+      dragTargetRef.current = { 
+          id, pointIdx: pointIndex, 
+          handleType: (pointIndex !== undefined && (e.ctrlKey || e.metaKey)) ? 'symmetric' : undefined,
+          mode: dragMode, resizeHandle, initialVal 
+      };
+
       window.addEventListener('mousemove', handleShapeMouseMove);
       window.addEventListener('mouseup', handleShapeMouseUp);
   };
@@ -802,9 +854,11 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       if (Math.abs(dxPx) > 2 || Math.abs(dyPx) > 2) hasMoved.current = true;
 
       const dxWorld = dxPx * scaleX;
-      const dyWorld = -dyPx * scaleY;
+      const dyWorldMath = -dyPx * scaleY;
+      const dyWorldVis = dyPx * scaleY;
+
       const currentFP = footprintRef.current;
-      const { id: targetId, pointIdx, handleType } = dragTargetRef.current;
+      const { id: targetId, pointIdx, handleType, mode, resizeHandle, initialVal } = dragTargetRef.current;
       
       const updatedShapes = currentFP.shapes.map(s => {
           const startShape = shapeDragStartDataMap.current.get(s.id);
@@ -813,50 +867,57 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           // Only move if part of selection, OR it is the specific target shape
           // FIX: Use dragSelectionRef instead of state to avoid stale closure issues
           if (s.id === targetId || dragSelectionRef.current.includes(s.id)) {
-              
-              // Case A: Dragging a specific Point or Handle (Only affect the targetId shape)
-              if (pointIdx !== undefined && s.id === targetId) {
-                  if ((s.type === "line" || s.type === "boardOutline" || s.type === "polygon") && (startShape.type === "line" || startShape.type === "boardOutline" || startShape.type === "polygon")) {
-                      const newPoints = [...(startShape as any).points];
+              // --- RESIZE EXECUTION ---
+              if (mode === 'resize' && s.id === targetId && initialVal) {
+                  const cx = evaluateExpression(startShape.x, params);
+                  const cy = -evaluateExpression(startShape.y, params);
+                  const angle = evaluateExpression((startShape as any).angle || "0", params);
+                  const rad = (angle * Math.PI) / 180;
 
-                      if (handleType === 'symmetric') {
-                          newPoints[pointIdx] = {
-                              ...newPoints[pointIdx],
-                              handleOut: { x: parseFloat(dxWorld.toFixed(4)).toString(), y: parseFloat(dyWorld.toFixed(4)).toString() },
-                              handleIn: { x: parseFloat((-dxWorld).toFixed(4)).toString(), y: parseFloat((-dyWorld).toFixed(4)).toString() }
-                          };
-                      } else if (handleType) {
-                          const p = newPoints[pointIdx];
-                          if (p.snapTo) return s; 
-                          if (handleType === 'in' && p.handleIn) {
-                              newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorld) } };
-                          } else if (handleType === 'out' && p.handleOut) {
-                              newPoints[pointIdx] = { ...p, handleOut: { x: modifyExpression(p.handleOut.x, dxWorld), y: modifyExpression(p.handleOut.y, dyWorld) } };
-                          }
+                  if (s.type === 'circle') {
+                      const m = getMouseWorldPos(e.clientX, e.clientY);
+                      const dist = Math.sqrt(Math.pow(m.x - cx, 2) + Math.pow(m.y - cy, 2));
+                      const startM = getMouseWorldPos(shapeDragStartPos.current.x, shapeDragStartPos.current.y);
+                      const startDist = Math.sqrt(Math.pow(startM.x - cx, 2) + Math.pow(startM.y - cy, 2));
+                      return { ...s, diameter: modifyExpression(initialVal, (dist - startDist) * 2) };
+                  }
+                  if (s.type === 'rect') {
+                      const ldx = dxWorld * Math.cos(rad) - dyWorldVis * Math.sin(rad);
+                      const ldy = dxWorld * Math.sin(rad) + dyWorldVis * Math.cos(rad);
+                      const startM = getMouseWorldPos(shapeDragStartPos.current.x, shapeDragStartPos.current.y);
+                      const slx = (startM.x - cx) * Math.cos(rad) - (startM.y - cy) * Math.sin(rad);
+                      const sly = (startM.x - cx) * Math.sin(rad) + (startM.y - cy) * Math.cos(rad);
+
+                      if (resizeHandle === 'left' || resizeHandle === 'right') {
+                          return { ...s, width: modifyExpression(initialVal, ldx * (slx >= 0 ? 1 : -1) * 2) };
                       } else {
-                          const p = newPoints[pointIdx];
-                          if (p.snapTo) return s; 
-                          newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) };
+                          return { ...s, height: modifyExpression(initialVal, ldy * (sly >= 0 ? 1 : -1) * 2) };
                       }
-                      return { ...s, points: newPoints };
                   }
-                  if (s.type === "wireGuide" && handleType && startShape.type === "wireGuide") {
-                       if (startShape.handle) {
-                           return { ...s, handle: { x: modifyExpression(startShape.handle.x, dxWorld), y: modifyExpression(startShape.handle.y, dyWorld) } };
-                       }
-                  }
-                  // Non-point shapes don't have point indices, so fall through to body drag
               }
 
-              // Case B: Group Body Drag (Affect all selected shapes)
-              // Only trigger if no pointIdx or if pointIdx is not on this specific shape
-              if (pointIdx === undefined || s.id !== targetId) {
-                  if (s.type === "line" || s.type === "boardOutline" || s.type === "polygon") {
-                      const newPoints = (startShape as any).points.map((p: any) => ({ ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorld) }));
-                      return { ...s, points: newPoints };
-                  } 
-                  return { ...s, x: modifyExpression(startShape.x, dxWorld), y: modifyExpression(startShape.y, dyWorld) };
+              // --- STANDARD MOVE LOGIC ---
+              if (pointIdx !== undefined && s.id === targetId) {
+                  const newPoints = [...(startShape as any).points];
+                  if (handleType === 'symmetric') {
+                      newPoints[pointIdx] = { ...newPoints[pointIdx], 
+                          handleOut: { x: dxWorld.toFixed(4), y: dyWorldMath.toFixed(4) },
+                          handleIn: { x: (-dxWorld).toFixed(4), y: (-dyWorldMath).toFixed(4) } 
+                      };
+                  } else if (handleType) {
+                      const p = newPoints[pointIdx];
+                      if (handleType === 'in' && p.handleIn) newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorldMath) } };
+                      else if (handleType === 'out' && p.handleOut) newPoints[pointIdx] = { ...p, handleOut: { x: modifyExpression(p.handleOut.x, dxWorld), y: modifyExpression(p.handleOut.y, dyWorldMath) } };
+                  } else {
+                      const p = newPoints[pointIdx];
+                      if (!p.snapTo) newPoints[pointIdx] = { ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorldMath) };
+                  }
+                  return { ...s, points: newPoints } as any;
               }
+              if (s.type === "line" || s.type === "boardOutline" || s.type === "polygon") {
+                  return { ...s, points: (startShape as any).points.map((p: any) => ({ ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorldMath) })) };
+              } 
+              return { ...s, x: modifyExpression(startShape.x, dxWorld), y: modifyExpression(startShape.y, dyWorldMath) };
           }
           return s;
       });
