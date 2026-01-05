@@ -295,6 +295,20 @@ function flattenShapes(
 
 self.onmessage = async (e: MessageEvent) => {
     const { id, type, payload } = e.data;
+
+    // Helper to send progress updates
+    const report = (msg: string, percent: number) => {
+        self.postMessage({ 
+            type: "progress", 
+            id, 
+            payload: { 
+                message: msg, 
+                percent,
+                layerIndex: payload.layerIndex // Include if present
+            } 
+        });
+    };
+
     try {
         // --- 1. INITIALIZATION ---
         if (type === "init") {
@@ -317,6 +331,9 @@ self.onmessage = async (e: MessageEvent) => {
         // --- 2. LOAD MESH (For Display) ---
         else if (type === "loadMesh") {
              const { content, format } = payload; // content is base64
+             
+             report("Parsing mesh data...", 0.1);
+
              const buffer = base64ToArrayBuffer(content);
              let geometry: THREE.BufferGeometry | null = null;
              
@@ -342,9 +359,15 @@ self.onmessage = async (e: MessageEvent) => {
                  });
              }
 
+             report("Optimizing mesh...", 0.8);
+
              if (geometry) {
                  const nonIndexed = geometry.toNonIndexed();
                  const indexed = mergeVertices(nonIndexed);
+                 
+                 // Report 1.0 just before success to ensure bar fills
+                 report("Ready", 1.0);
+
                  self.postMessage({ 
                      id, type: "success", 
                      payload: { 
@@ -366,18 +389,6 @@ self.onmessage = async (e: MessageEvent) => {
             const { Manifold, CrossSection } = manifoldModule;
             const garbage: any[] = [];
             const collect = <T>(obj: T): T => { if(obj && (obj as any).delete) garbage.push(obj); return obj; };
-
-            const report = (msg: string, percent: number) => {
-                self.postMessage({ 
-                    type: "progress", 
-                    id, 
-                    payload: { 
-                        message: msg, 
-                        percent,
-                        layerIndex
-                    } 
-                });
-            };
 
             report(`Layer ${layer.name}: Preparing geometry...`, 0);
 
@@ -456,7 +467,8 @@ self.onmessage = async (e: MessageEvent) => {
 
                 // 4. CSG Execution Loop
                 executionList.forEach((exec, idx) => {
-                    const progressPercent = (idx / executionList.length);
+                    // Update progress, leaving the last 5% for the final meshing step
+                    const progressPercent = (idx / executionList.length) * 0.95;
                     if (idx % 5 === 0) report(`Layer ${layer.name}: Processing cut ${idx+1}/${executionList.length}`, progressPercent);
                     
                     const primaryItem = exec.shapes[0];
@@ -648,9 +660,12 @@ self.onmessage = async (e: MessageEvent) => {
                     });
                 });
 
-                report(`Layer ${layer.name}: Finalizing mesh...`, 1.0);
+                report(`Layer ${layer.name}: Finalizing mesh...`, 0.95);
 
                 const mesh = base.getMesh();
+                
+                report(`Layer ${layer.name}: Complete`, 1.0);
+
                 self.postMessage({ 
                     id, type: "success", 
                     payload: { 
@@ -670,6 +685,8 @@ self.onmessage = async (e: MessageEvent) => {
         else if (type === "convert") {
             const { buffer, format, fileName } = payload;
             let geometry: THREE.BufferGeometry | null = null;
+            
+            report("Reading file...", 0.1);
 
             if (format === "stl") {
                 const loader = new STLLoader();
@@ -708,6 +725,7 @@ self.onmessage = async (e: MessageEvent) => {
             } else if (format === "glb" || format === "gltf") {
                  // Pass through if already GLB
                  const base64 = arrayBufferToBase64(buffer);
+                 report("Complete", 1.0);
                  self.postMessage({ id, type: "success", payload: { base64, format: "glb" } });
                  return;
             }
@@ -718,12 +736,15 @@ self.onmessage = async (e: MessageEvent) => {
 
             const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
             const exporter = new GLTFExporter();
+            
+            report("Converting to GLB...", 0.8);
 
             exporter.parse(
                 mesh,
                 (gltf) => {
                     if (gltf instanceof ArrayBuffer) {
                         const base64 = arrayBufferToBase64(gltf);
+                        report("Complete", 1.0);
                         self.postMessage({ id, type: "success", payload: { base64, format: "glb" } });
                     } else {
                         self.postMessage({ id, type: "error", error: "GLTF Exporter returned JSON" });

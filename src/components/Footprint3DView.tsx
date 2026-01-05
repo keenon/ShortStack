@@ -109,20 +109,24 @@ function evaluate(expression: string, params: Parameter[]): number {
 }
 
 const ProgressBar = ({ progress }: { progress: { active: boolean, text: string, percent: number } }) => {
+    // Only return null if strictly not active to allow fade out
     if (!progress.active) return null;
     return (
         <div style={{
             position: 'absolute', bottom: 30, left: '50%', transform: 'translateX(-50%)',
             background: 'rgba(30, 30, 30, 0.9)', padding: '15px 20px', borderRadius: '8px', border: '1px solid #444',
             color: 'white', display: 'flex', flexDirection: 'column', gap: '8px', width: '320px',
-            pointerEvents: 'none', zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+            pointerEvents: 'none', zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+            transition: 'opacity 0.3s', opacity: progress.active ? 1 : 0
         }}>
             <div style={{ fontSize: '0.85em', display: 'flex', justifyContent: 'space-between', color: '#ccc' }}>
-                <span style={{ fontWeight: 500 }}>{progress.text}</span>
+                <span style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '240px' }}>
+                    {progress.text}
+                </span>
                 <span style={{ fontFamily: 'monospace' }}>{Math.round(progress.percent * 100)}%</span>
             </div>
             <div style={{ width: '100%', height: '6px', background: '#111', borderRadius: '3px', overflow: 'hidden' }}>
-                <div style={{ width: `${Math.max(0, Math.min(100, progress.percent * 100))}%`, height: '100%', background: '#646cff', transition: 'width 0.1s linear' }} />
+                <div style={{ width: `${Math.max(0, Math.min(100, progress.percent * 100))}%`, height: '100%', background: '#646cff', transition: 'width 0.2s ease-out' }} />
             </div>
         </div>
     );
@@ -140,8 +144,6 @@ const LayerSolid = ({
   bottomZ,
   thickness,
   bounds,
-  layerIndex,
-  totalLayers,
   onProgress,
   registerMesh
 }: {
@@ -152,9 +154,7 @@ const LayerSolid = ({
   bottomZ: number;
   thickness: number;
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
-  layerIndex: number;
-  totalLayers: number;
-  onProgress: (p: any) => void;
+  onProgress: (id: string, percent: number, msg: string) => void;
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
 }) => {
   // Determine Center X/Z to match Worker Logic
@@ -178,10 +178,16 @@ const LayerSolid = ({
   const [hasError, setHasError] = useState(false);
 
   useEffect(() => {
-    if (thickness <= 0.0001) return;
+    if (thickness <= 0.0001) {
+        onProgress(layer.id, 1.0, `Layer ${layer.name} skipped`);
+        return;
+    }
     
     let cancelled = false;
     setHasError(false);
+
+    // Initial Progress
+    onProgress(layer.id, 0.01, `Layer ${layer.name}: Queued...`);
 
     callWorker("computeLayer", {
         layer, 
@@ -190,11 +196,11 @@ const LayerSolid = ({
         params, 
         bottomZ, 
         thickness, 
-        bounds,
-        layerIndex,
-        totalLayers
+        bounds
     }, (p) => {
-        if (!cancelled && onProgress) onProgress(p);
+        if (!cancelled && onProgress) {
+             onProgress(layer.id, p.percent, p.message);
+        }
     }).then((data) => {
         if (cancelled) return;
         
@@ -207,14 +213,18 @@ const LayerSolid = ({
         } else {
             setGeometry(null);
         }
+        // Ensure we hit 100% on success to clear the bar
+        onProgress(layer.id, 1.0, `Layer ${layer.name}: Ready`);
     }).catch(e => {
         if (cancelled) return;
         console.error(`Layer ${layer.name} compute failed`, e);
         setHasError(true);
+        // FORCE COMPLETE ON ERROR to unblock progress bar
+        onProgress(layer.id, 1.0, `Layer ${layer.name}: Error`);
     });
 
     return () => { cancelled = true; };
-  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds, layerIndex, totalLayers]);
+  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds]);
 
   return (
     <mesh 
@@ -261,6 +271,7 @@ interface FlatMesh {
     globalTransform: THREE.Matrix4;
     selectableId: string; // The ID to select when clicking (parent ref or self)
     isEditable: boolean; // Only true if direct child of current footprint
+    uniqueId: string; // Unique ID for keying and progress tracking
 }
 
 function flattenMeshes(
@@ -273,7 +284,7 @@ function flattenMeshes(
     let result: FlatMesh[] = [];
 
     if (rootFp.meshes) {
-        rootFp.meshes.forEach(m => {
+        rootFp.meshes.forEach((m, i) => {
             const x = evaluate(m.x, params);
             const y = evaluate(m.y, params);
             const z = evaluate(m.z, params);
@@ -292,7 +303,8 @@ function flattenMeshes(
                 mesh: m, 
                 globalTransform: finalMat,
                 selectableId: ancestorRefId || m.id,
-                isEditable: ancestorRefId === null
+                isEditable: ancestorRefId === null,
+                uniqueId: (ancestorRefId || rootFp.id) + "_mesh_" + m.id + "_" + i
             });
         });
     }
@@ -366,15 +378,17 @@ const MeshObject = ({
     meshAssets,
     isSelected,
     onSelect,
-    onUpdate
+    onUpdate,
+    onProgress
 }: { 
     meshData: FlatMesh, 
     meshAssets: MeshAsset[],
     isSelected: boolean,
     onSelect: () => void,
-    onUpdate: (id: string, field: string, val: any) => void
+    onUpdate: (id: string, field: string, val: any) => void,
+    onProgress: (id: string, percent: number, msg: string) => void
 }) => {
-    const { mesh, globalTransform, isEditable } = meshData;
+    const { mesh, globalTransform, isEditable, uniqueId } = meshData;
     const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
     const meshRef = useRef<THREE.Mesh>(null);
 
@@ -386,25 +400,36 @@ const MeshObject = ({
     useEffect(() => {
         let mounted = true;
         const asset = meshAssets.find(a => a.id === mesh.meshId);
+        
+        onProgress(uniqueId, 0.1, `Loading mesh ${mesh.name || 'asset'}...`);
+
         if (asset) {
             // Load via Worker
-            callWorker("loadMesh", { content: asset.content, format: asset.format })
-                .then(data => {
-                    if (!mounted) return;
-                    const geom = new THREE.BufferGeometry();
-                    
-                    if (data.position) geom.setAttribute('position', new THREE.BufferAttribute(data.position, 3));
-                    if (data.normal) geom.setAttribute('normal', new THREE.BufferAttribute(data.normal, 3));
-                    if (data.index) geom.setIndex(new THREE.BufferAttribute(data.index, 1));
-                    
-                    if (!data.normal) geom.computeVertexNormals();
-                    
-                    setGeometry(geom);
-                })
-                .catch(err => console.error("Mesh load failed", err));
+            callWorker("loadMesh", { content: asset.content, format: asset.format }, (p) => {
+                if(mounted) onProgress(uniqueId, p.percent, p.message);
+            })
+            .then(data => {
+                if (!mounted) return;
+                const geom = new THREE.BufferGeometry();
+                
+                if (data.position) geom.setAttribute('position', new THREE.BufferAttribute(data.position, 3));
+                if (data.normal) geom.setAttribute('normal', new THREE.BufferAttribute(data.normal, 3));
+                if (data.index) geom.setIndex(new THREE.BufferAttribute(data.index, 1));
+                
+                if (!data.normal) geom.computeVertexNormals();
+                
+                setGeometry(geom);
+                onProgress(uniqueId, 1.0, `Loaded ${mesh.name}`);
+            })
+            .catch(err => {
+                console.error("Mesh load failed", err);
+                onProgress(uniqueId, 1.0, "Mesh load error");
+            });
+        } else {
+             onProgress(uniqueId, 1.0, "Mesh missing");
         }
         return () => { mounted = false; };
-    }, [mesh.meshId, meshAssets]);
+    }, [mesh.meshId, meshAssets, uniqueId]);
 
     // 1. Calculate transforms from the matrix immediately during render
     const position = useMemo(() => new THREE.Vector3().setFromMatrixPosition(globalTransform), [globalTransform]);
@@ -506,18 +531,46 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   const hasInitiallySnapped = useRef(false);
   const [firstMeshReady, setFirstMeshReady] = useState(false);
   
+  // Flatten meshes once per render cycle
+  const flattenedMeshes = useMemo(() => flattenMeshes(footprint, allFootprints, params), [footprint, allFootprints, params]);
+  
   // Progress State
+  const progressStatus = useRef(new Map<string, number>());
   const [progress, setProgress] = useState({ active: false, text: "", percent: 0 });
+  const progressTimeout = useRef<number | null>(null);
 
-  const handleProgress = useCallback((p: any) => {
-      // Calculate overall progress based on layer index and task percent
-      const overall = (p.layerIndex + p.percent) / (stackup.length || 1);
+  // Unified Progress Handler
+  const handleProgress = useCallback((id: string, percent: number, message: string) => {
+      progressStatus.current.set(id, percent);
       
-      setProgress({ active: overall < 0.99, text: p.message, percent: overall });
-      if (overall >= 0.99) {
-          setTimeout(() => setProgress(prev => ({ ...prev, active: false })), 800);
+      const visibleMeshCount = flattenedMeshes.filter(m => m.mesh.renderingType !== 'hidden').length;
+      const totalTasks = stackup.length + visibleMeshCount;
+      
+      let sum = 0;
+      progressStatus.current.forEach(v => sum += v);
+      
+      // Calculate overall percent
+      const overall = sum / Math.max(1, totalTasks);
+      
+      setProgress(prev => {
+          return { active: true, text: message, percent: overall };
+      });
+
+      // Cleanup Logic
+      if (progressTimeout.current) clearTimeout(progressTimeout.current);
+      
+      if (overall >= 0.999) {
+          progressTimeout.current = window.setTimeout(() => {
+              setProgress(p => ({ ...p, active: false }));
+          }, 800);
       }
-  }, [stackup.length]);
+  }, [stackup.length, flattenedMeshes]); // Dependency on task count
+
+  // Reset progress map when structure changes significantly
+  useEffect(() => {
+      progressStatus.current.clear();
+      setProgress({ active: false, text: "", percent: 0 });
+  }, [stackup.length, flattenedMeshes.length]);
 
   const fitToHome = useCallback(() => {
     const controls = controlsRef.current;
@@ -602,6 +655,9 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         const ext = file.name.split('.').pop()?.toLowerCase();
         if (!ext) return null;
         
+        // Report Drop progress
+        handleProgress("drop_file", 0.1, "Reading file...");
+
         const buffer = await file.arrayBuffer();
         const format = (ext === "stp" || ext === "step") ? "step" : (ext === "obj" ? "obj" : (ext === "glb" || ext === "gltf" ? "glb" : "stl"));
         
@@ -610,8 +666,12 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                 buffer,
                 format,
                 fileName: file.name
+            }, (p) => {
+                 handleProgress("drop_file", p.percent, p.message);
             });
             
+            handleProgress("drop_file", 1.0, "File processed");
+
             return {
                 id: crypto.randomUUID(),
                 name: file.name,
@@ -623,6 +683,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
             } as any;
         } catch (e) {
             console.error("Worker Conversion Failed", e);
+            handleProgress("drop_file", 1.0, "File processing failed");
             alert(`File processing failed: ${e instanceof Error ? e.message : String(e)}`);
             return null;
         }
@@ -700,8 +761,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 
   }, [footprint, params, allFootprints]);
 
-  const flattenedMeshes = useMemo(() => flattenMeshes(footprint, allFootprints, params), [footprint, allFootprints, params]);
-
   const activeMeshIsEditable = useMemo(() => {
       if (!selectedId) return false;
       const flat = flattenedMeshes.find(m => m.selectableId === selectedId);
@@ -738,8 +797,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                   bottomZ={currentZ}
                   thickness={thickness}
                   bounds={bounds}
-                  layerIndex={idx}
-                  totalLayers={stackup.length}
                   onProgress={handleProgress}
                   registerMesh={(id, mesh) => { 
                       if (mesh) {
@@ -761,12 +818,13 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         <group>
             {flattenedMeshes.map((m, idx) => (
                 <MeshObject 
-                    key={m.mesh.id + idx} 
+                    key={m.uniqueId} 
                     meshData={m} 
                     meshAssets={meshAssets}
                     isSelected={selectedId === m.selectableId}
                     onSelect={() => onSelect(m.selectableId)}
                     onUpdate={onUpdateMesh}
+                    onProgress={handleProgress}
                 />
             ))}
         </group>
