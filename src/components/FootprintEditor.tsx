@@ -834,7 +834,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       if (!shape) return;
       isShapeDragging.current = true;
       hasMoved.current = false;
-      dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type };
+      dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type, mode: 'move' };
       shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
       shapeDragStartDataMap.current.clear();
       shapeDragStartDataMap.current.set(id, JSON.parse(JSON.stringify(shape)));
