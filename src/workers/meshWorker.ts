@@ -25,8 +25,8 @@ import { mergeBufferGeometries, mergeVertices } from "three-stdlib";
 // @ts-ignore
 import initOCCT from "occt-import-js";
 import Module from "manifold-3d";
-import { evaluateExpression, resolvePoint, modifyExpression, getPolyOutlinePoints } from "../utils/footprintUtils";
-import { Footprint, Parameter, StackupLayer, FootprintShape, FootprintRect, FootprintLine, FootprintPolygon, FootprintReference, FootprintUnion, Point, FootprintBoardOutline } from "../types";
+import { evaluateExpression, resolvePoint, getPolyOutlinePoints } from "../utils/footprintUtils";
+import { Footprint, Parameter, FootprintShape, FootprintRect, FootprintLine, FootprintPolygon, FootprintReference, FootprintUnion, Point, FootprintBoardOutline } from "../types";
 
 let occt: any = null;
 let manifoldModule: any = null;
@@ -317,7 +317,7 @@ self.onmessage = async (e: MessageEvent) => {
             }
             if (payload.manifoldWasmUrl && !manifoldModule) {
                 Module({
-                    locateFile: (path: string) => path.endsWith('.wasm') ? payload.manifoldWasmUrl : path
+                    locateFile: ((path: string) => path.endsWith('.wasm') ? payload.manifoldWasmUrl : path) as any
                 }).then((m) => {
                     m.setup();
                     manifoldModule = m;
@@ -330,9 +330,10 @@ self.onmessage = async (e: MessageEvent) => {
         
         // --- 2. LOAD MESH (For Display) ---
         else if (type === "loadMesh") {
-             const { content, format } = payload; // content is base64
-             
-             report("Parsing mesh data...", 0.1);
+             const { content, format, name } = payload; // content is base64
+             const meshName = name || "mesh";
+
+             report(`Loading mesh ${meshName} (1/2)...`, 0.1);
 
              const buffer = base64ToArrayBuffer(content);
              let geometry: THREE.BufferGeometry | null = null;
@@ -359,14 +360,14 @@ self.onmessage = async (e: MessageEvent) => {
                  });
              }
 
-             report("Optimizing mesh...", 0.8);
+             report(`Optimizing mesh ${meshName} (2/2)...`, 0.8);
 
              if (geometry) {
                  const nonIndexed = geometry.toNonIndexed();
                  const indexed = mergeVertices(nonIndexed);
                  
                  // Report 1.0 just before success to ensure bar fills
-                 report("Ready", 1.0);
+                 report(`Loaded ${meshName}`, 1.0);
 
                  self.postMessage({ 
                      id, type: "success", 
@@ -385,12 +386,13 @@ self.onmessage = async (e: MessageEvent) => {
         else if (type === "computeLayer") {
             if (!manifoldModule) throw new Error("Manifold not initialized");
 
-            const { layer, footprint, allFootprints, params, bottomZ, thickness, bounds, layerIndex, totalLayers } = payload;
+            const { layer, footprint, allFootprints, params, thickness, bounds, layerIndex, totalLayers } = payload;
             const { Manifold, CrossSection } = manifoldModule;
             const garbage: any[] = [];
             const collect = <T>(obj: T): T => { if(obj && (obj as any).delete) garbage.push(obj); return obj; };
 
-            report(`Layer ${layer.name}: Preparing geometry...`, 0);
+            const layerStr = `layer ${layer.name} (${layerIndex + 1}/${totalLayers})`;
+            report(`Initializing ${layerStr}...`, 0);
 
             try {
                 // --- COORDINATE SYSTEM SETUP ---
@@ -464,15 +466,17 @@ self.onmessage = async (e: MessageEvent) => {
 
                 const CSG_EPSILON = 0.001;
                 const processedCuts: { depth: number, cs: any, id: string }[] = [];
+                const totalOps = executionList.length;
 
                 // 4. CSG Execution Loop
                 executionList.forEach((exec, idx) => {
-                    // Update progress, leaving the last 5% for the final meshing step
-                    const progressPercent = (idx / executionList.length) * 0.95;
-                    if (idx % 5 === 0) report(`Layer ${layer.name}: Processing cut ${idx+1}/${executionList.length}`, progressPercent);
-                    
                     const primaryItem = exec.shapes[0];
                     const shape = primaryItem.shape;
+                    const shapeName = shape.name || (exec.type === "union" ? "Union" : "Shape");
+                    const itemStr = `${shapeName} (${idx + 1}/${totalOps})`;
+                    
+                    // Basic progress calculation
+                    const basePercent = (idx / totalOps) * 0.9;
                     
                     // Determine Parameters
                     let actualDepth = thickness;
@@ -575,6 +579,9 @@ self.onmessage = async (e: MessageEvent) => {
                     disjointComponents.forEach((rawComponent: any, k: number) => {
                         const componentCS = collect(rawComponent);
 
+                        // Report Boolean Op
+                        report(`Boolean operation for ${itemStr} on ${layerStr}...`, basePercent);
+
                         // Intersection Check
                         let isRestorative = false;
                         for (const prev of processedCuts) {
@@ -633,6 +640,9 @@ self.onmessage = async (e: MessageEvent) => {
 
                         // Fillet Subtraction
                         if (shouldRound) {
+                            // Report Fillet Op
+                            report(`Generating fillet for ${itemStr} on ${layerStr}...`, basePercent + 0.05);
+
                             const result = generateProceduralFillet(
                                 manifoldModule, 
                                 shape, 
@@ -660,7 +670,7 @@ self.onmessage = async (e: MessageEvent) => {
                     });
                 });
 
-                report(`Layer ${layer.name}: Finalizing mesh...`, 0.95);
+                report(`Finalizing mesh for ${layerStr}...`, 0.95);
 
                 const mesh = base.getMesh();
                 

@@ -115,12 +115,12 @@ const ProgressBar = ({ progress }: { progress: { active: boolean, text: string, 
         <div style={{
             position: 'absolute', bottom: 30, left: '50%', transform: 'translateX(-50%)',
             background: 'rgba(30, 30, 30, 0.9)', padding: '15px 20px', borderRadius: '8px', border: '1px solid #444',
-            color: 'white', display: 'flex', flexDirection: 'column', gap: '8px', width: '320px',
+            color: 'white', display: 'flex', flexDirection: 'column', gap: '8px', width: '420px',
             pointerEvents: 'none', zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
             transition: 'opacity 0.3s', opacity: progress.active ? 1 : 0
         }}>
             <div style={{ fontSize: '0.85em', display: 'flex', justifyContent: 'space-between', color: '#ccc' }}>
-                <span style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '240px' }}>
+                <span style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '350px' }}>
                     {progress.text}
                 </span>
                 <span style={{ fontFamily: 'monospace' }}>{Math.round(progress.percent * 100)}%</span>
@@ -144,6 +144,8 @@ const LayerSolid = ({
   bottomZ,
   thickness,
   bounds,
+  layerIndex,
+  totalLayers,
   onProgress,
   registerMesh
 }: {
@@ -154,6 +156,8 @@ const LayerSolid = ({
   bottomZ: number;
   thickness: number;
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
+  layerIndex: number;
+  totalLayers: number;
   onProgress: (id: string, percent: number, msg: string) => void;
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
 }) => {
@@ -196,7 +200,9 @@ const LayerSolid = ({
         params, 
         bottomZ, 
         thickness, 
-        bounds
+        bounds,
+        layerIndex,
+        totalLayers
     }, (p) => {
         if (!cancelled && onProgress) {
              onProgress(layer.id, p.percent, p.message);
@@ -224,7 +230,7 @@ const LayerSolid = ({
     });
 
     return () => { cancelled = true; };
-  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds]);
+  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds, layerIndex, totalLayers]);
 
   return (
     <mesh 
@@ -400,12 +406,17 @@ const MeshObject = ({
     useEffect(() => {
         let mounted = true;
         const asset = meshAssets.find(a => a.id === mesh.meshId);
+        const meshName = mesh.name || "mesh";
         
-        onProgress(uniqueId, 0.1, `Loading mesh ${mesh.name || 'asset'}...`);
+        onProgress(uniqueId, 0.1, `Loading mesh ${meshName}...`);
 
         if (asset) {
             // Load via Worker
-            callWorker("loadMesh", { content: asset.content, format: asset.format }, (p) => {
+            callWorker("loadMesh", { 
+                content: asset.content, 
+                format: asset.format, 
+                name: meshName 
+            }, (p) => {
                 if(mounted) onProgress(uniqueId, p.percent, p.message);
             })
             .then(data => {
@@ -419,7 +430,7 @@ const MeshObject = ({
                 if (!data.normal) geom.computeVertexNormals();
                 
                 setGeometry(geom);
-                onProgress(uniqueId, 1.0, `Loaded ${mesh.name}`);
+                onProgress(uniqueId, 1.0, `Loaded ${meshName}`);
             })
             .catch(err => {
                 console.error("Mesh load failed", err);
@@ -429,7 +440,7 @@ const MeshObject = ({
              onProgress(uniqueId, 1.0, "Mesh missing");
         }
         return () => { mounted = false; };
-    }, [mesh.meshId, meshAssets, uniqueId]);
+    }, [mesh.meshId, meshAssets, uniqueId, mesh.name]);
 
     // 1. Calculate transforms from the matrix immediately during render
     const position = useMemo(() => new THREE.Vector3().setFromMatrixPosition(globalTransform), [globalTransform]);
@@ -552,7 +563,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
       // Calculate overall percent
       const overall = sum / Math.max(1, totalTasks);
       
-      setProgress(prev => {
+      setProgress(() => {
           return { active: true, text: message, percent: overall };
       });
 
@@ -797,6 +808,8 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                   bottomZ={currentZ}
                   thickness={thickness}
                   bounds={bounds}
+                  layerIndex={idx}
+                  totalLayers={stackup.length}
                   onProgress={handleProgress}
                   registerMesh={(id, mesh) => { 
                       if (mesh) {
@@ -816,7 +829,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         </group>
         
         <group>
-            {flattenedMeshes.map((m, idx) => (
+            {flattenedMeshes.map((m) => (
                 <MeshObject 
                     key={m.uniqueId} 
                     meshData={m} 
