@@ -119,7 +119,9 @@ const ProgressBar = ({ progress }: { progress: { active: boolean, text: string, 
             position: 'absolute', bottom: 30, left: '50%', transform: 'translateX(-50%)',
             background: 'rgba(30, 30, 30, 0.9)', padding: '15px 20px', borderRadius: '8px', border: '1px solid #444',
             color: 'white', display: 'flex', flexDirection: 'column', gap: '8px', width: '420px',
-            pointerEvents: 'none', zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+            pointerEvents: 'none', 
+            /* Increased to 9995 to be higher than the overlay */
+            zIndex: 9995, boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
             transition: 'opacity 0.3s', opacity: progress.active ? 1 : 0
         }}>
             <div style={{ fontSize: '0.85em', display: 'flex', justifyContent: 'space-between', color: '#ccc' }}>

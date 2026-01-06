@@ -541,7 +541,7 @@
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    z-index: 9999;
+    z-index: 9990;
     backdrop-filter: blur(2px);
 }
 
