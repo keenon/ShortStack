@@ -8,6 +8,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
 
 import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline, MeshAsset } from "./types";
+import { resolveParameters } from "./utils/footprintUtils";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -163,13 +164,18 @@ function App() {
 
         // Sanitize Parameters
         const newParams: Parameter[] = rawParams.map((item: any) => {
-          if (!item.id || !item.unit) needsUpgrade = true;
+          if (!item.id || !item.unit || item.expression === undefined) needsUpgrade = true;
           return {
             ...item,
             id: item.id || crypto.randomUUID(),
+            expression: item.expression || String(item.value || 0), // Default expression to value if missing
+            value: item.value || 0,
             unit: item.unit || "mm",
           };
         });
+
+        // Ensure values are fresh based on expressions (resolves stale values from legacy files)
+        const resolvedParams = resolveParameters(newParams);
 
         // Sanitize Stackup
         const newStackup: StackupLayer[] = rawStackup.map((layer: any, index: number) => {
@@ -309,7 +315,7 @@ function App() {
           alert("This file was created with an older version of the editor. Some properties have been updated to the new project structure.");
         }
 
-        setParams(newParams);
+        setParams(resolvedParams);
         setStackup(newStackup);
         setFootprints(newFootprints);
         setMeshAssets(rawMeshAssets);

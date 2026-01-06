@@ -8,7 +8,8 @@ interface Props {
   onChange: (val: string) => void;
   params: Parameter[];
   placeholder?: string;
-  hasError?: boolean; // Kept for backward compatibility or external errors, though internal logic takes precedence for display
+  hasError?: boolean; 
+  forbiddenKeys?: string[]; // NEW: Keys that are not allowed in this expression
 }
 
 export default function ExpressionEditor({
@@ -17,6 +18,7 @@ export default function ExpressionEditor({
   params,
   placeholder,
   hasError: externalError,
+  forbiddenKeys = [],
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -28,12 +30,36 @@ export default function ExpressionEditor({
   const [evalResult, setEvalResult] = useState<number | null>(null);
   const [evalError, setEvalError] = useState<string | null>(null);
 
+  // Helper: Extract variables used in the expression
+  function getUsedVariables(expr: string): string[] {
+      try {
+          const node = math.parse(expr);
+          const used = new Set<string>();
+          node.traverse((n: any) => {
+              if (n.isSymbolNode) used.add(n.name);
+          });
+          return Array.from(used);
+      } catch (e) {
+          return [];
+      }
+  }
+
   // Evaluate whenever value or params change
   useEffect(() => {
     if (!value || !value.trim()) {
       setEvalResult(null);
       setEvalError(null);
       return;
+    }
+
+    // 1. Check for Forbidden Cycles
+    const usedVars = getUsedVariables(value);
+    const cycleDetected = usedVars.some(v => forbiddenKeys.includes(v));
+    
+    if (cycleDetected) {
+        setEvalResult(null);
+        setEvalError("Cycle Detected");
+        return;
     }
 
     try {
@@ -62,9 +88,9 @@ export default function ExpressionEditor({
       setEvalError(null);
     } catch (err: any) {
       setEvalResult(null);
-      setEvalError("Invalid"); // Keep error message short
+      setEvalError("Invalid"); 
     }
-  }, [value, params]);
+  }, [value, params, forbiddenKeys]);
 
   // Measure text width to position the dropdown
   function getCursorPixelPosition(textBeforeCursor: string): number {
@@ -102,7 +128,7 @@ export default function ExpressionEditor({
       const search = match.word.toLowerCase();
       // Filter params that start with or contain the search term
       const matches = params.filter((p) =>
-        p.key.toLowerCase().includes(search)
+        p.key.toLowerCase().includes(search) && !forbiddenKeys.includes(p.key)
       );
 
       if (matches.length > 0) {
@@ -189,8 +215,8 @@ export default function ExpressionEditor({
         />
         {/* Result Badge */}
         {value && value.trim() && (
-            <div className={`expression-result-badge ${evalError ? "error" : "success"}`}>
-                {evalError ? "!" : `= ${evalResult?.toFixed(2)}`}
+            <div className={`expression-result-badge ${evalError ? "error" : "success"}`} title={evalError || ""}>
+                {evalError ? (evalError === "Cycle Detected" ? "Loop" : "!") : `= ${evalResult?.toFixed(2)}`}
             </div>
         )}
       </div>
@@ -212,7 +238,7 @@ export default function ExpressionEditor({
             >
               <span className="var-key">{item.key}</span>
               <span className="var-value">
-                 = {item.value} <small>{item.unit}</small>
+                 = {item.value.toFixed(2)} <small>{item.unit}</small>
               </span>
             </li>
           ))}

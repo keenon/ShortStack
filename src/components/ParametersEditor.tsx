@@ -2,6 +2,8 @@
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import { Parameter } from "../types";
+import { resolveParameters, dependsOn } from "../utils/footprintUtils";
+import ExpressionEditor from "./ExpressionEditor";
 
 interface Props {
   params: Parameter[];
@@ -15,10 +17,12 @@ export default function ParametersEditor({ params, setParams }: Props) {
     const newParam: Parameter = {
       id: crypto.randomUUID(),
       key: "New_Parameter", // defaulted to underscore style
+      expression: "0",
       value: 0,
       unit: "mm", // Default unit
     };
-    setParams([...params, newParam]);
+    // Recalculate immediately (though new param "0" won't affect others yet)
+    setParams(resolveParameters([...params, newParam]));
   }
 
   // ACTION: Update a specific row
@@ -27,16 +31,23 @@ export default function ParametersEditor({ params, setParams }: Props) {
     field: keyof Parameter,
     newValue: string | number
   ) {
-    setParams((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, [field]: newValue } : item
-      )
+    const updatedParams = params.map((item) =>
+      item.id === id ? { ...item, [field]: newValue } : item
     );
+    
+    // If expression or unit changed, re-resolve all dependencies
+    if (field === "expression" || field === "unit") {
+        setParams(resolveParameters(updatedParams));
+    } else {
+        setParams(updatedParams);
+    }
   }
 
   // ACTION: Delete a row
   function deleteRow(id: string) {
-    setParams((prev) => prev.filter((item) => item.id !== id));
+    const updated = params.filter((item) => item.id !== id);
+    // Resolve to ensure any dependents become error/0
+    setParams(resolveParameters(updated));
   }
 
   // ACTION: Import CSV
@@ -69,38 +80,35 @@ export default function ParametersEditor({ params, setParams }: Props) {
         if (name.toLowerCase() === "name") return;
 
         const unitRaw = cols[1].trim().toLowerCase();
-        const valueRaw = cols[3].trim(); // Value column is index 3
+        // Use Expression column if available, else Value
+        const exprRaw = cols[2] && cols[2].trim() ? cols[2].trim() : cols[3].trim(); 
         
-        const val = parseFloat(valueRaw);
-        if (isNaN(val)) return;
-
         // Sanitize Key to be a valid variable name
         const cleanKey = name.replace(/[^a-zA-Z0-9_]/g, "_");
         
         newItems.push({
             id: crypto.randomUUID(),
             key: cleanKey,
-            value: val,
+            expression: exprRaw,
+            value: 0, // Will be resolved
             unit: unitRaw === "in" ? "in" : "mm"
         });
       });
 
       if (newItems.length > 0) {
           // Merge strategy: Update existing keys, append new ones
-          setParams(prev => {
-              const next = [...prev];
-              newItems.forEach(item => {
-                  const idx = next.findIndex(p => p.key === item.key);
-                  if (idx !== -1) {
-                      // Update existing
-                      next[idx] = { ...next[idx], value: item.value, unit: item.unit };
-                  } else {
-                      // Append new
-                      next.push(item);
-                  }
-              });
-              return next;
+          const next = [...params];
+          newItems.forEach(item => {
+              const idx = next.findIndex(p => p.key === item.key);
+              if (idx !== -1) {
+                  // Update existing
+                  next[idx] = { ...next[idx], expression: item.expression, unit: item.unit };
+              } else {
+                  // Append new
+                  next.push(item);
+              }
           });
+          setParams(resolveParameters(next));
       }
 
     } catch (e) {
@@ -124,8 +132,8 @@ export default function ParametersEditor({ params, setParams }: Props) {
         
         // Generate Rows
         params.forEach(p => {
-            // Reconstruct a simple expression string (e.g., "10 mm")
-            const expr = `${p.value} ${p.unit}`;
+            // Expression is now the source of truth
+            const expr = p.expression;
             // Format value to 2 decimal places if it's a float, or keep integer string
             const valStr = Number.isInteger(p.value) ? p.value.toFixed(2) : p.value.toString();
             
@@ -155,13 +163,25 @@ export default function ParametersEditor({ params, setParams }: Props) {
         <thead>
           <tr>
             <th>Key</th>
-            <th>Value</th>
+            <th style={{ width: "40%" }}>Expression</th>
+            <th style={{ width: "20%" }}>Resolved Value</th>
             <th style={{ width: "100px" }}>Unit</th>
             <th style={{ width: "50px" }}>Action</th>
           </tr>
         </thead>
         <tbody>
-          {params.map((item) => (
+          {params.map((item) => {
+            // Calculate forbidden keys for this parameter (itself + anything that depends on it)
+            // If P depends on item.key, then item.key cannot depend on P (Cycle).
+            // Forbidden = { item.key } + { P | dependsOn(P.key, item.key) }
+            // dependsOn(source, target) returns true if source->target path exists.
+            // If we are editing item.key, we want to forbid adding P if P->item.key exists.
+            
+            const forbiddenKeys = params
+                .filter(p => p.id === item.id || dependsOn(p.key, item.key, params))
+                .map(p => p.key);
+
+            return (
             <tr key={item.id}>
               <td>
                 <input
@@ -174,13 +194,18 @@ export default function ParametersEditor({ params, setParams }: Props) {
                 />
               </td>
               <td>
-                <input
-                  type="number"
-                  value={item.value}
-                  onChange={(e) =>
-                    updateRow(item.id, "value", Number(e.target.value))
-                  }
+                <ExpressionEditor
+                    value={item.expression}
+                    onChange={(val) => updateRow(item.id, "expression", val)}
+                    params={params}
+                    placeholder="e.g. 10 or Length / 2"
+                    forbiddenKeys={forbiddenKeys}
                 />
+              </td>
+              <td>
+                <span className="math-result">
+                    {item.value.toFixed(4)}
+                </span>
               </td>
               <td>
                 <select
@@ -197,7 +222,8 @@ export default function ParametersEditor({ params, setParams }: Props) {
                 </button>
               </td>
             </tr>
-          ))}
+          );
+          })}
         </tbody>
       </table>
 

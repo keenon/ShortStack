@@ -96,6 +96,142 @@ export function evaluateExpression(expression: string | LayerAssignment | undefi
   }
 }
 
+// --- PARAMETER RESOLUTION & CYCLE DETECTION ---
+
+// Helper to extract dependencies from an expression string
+export function getDependencies(expression: string): string[] {
+    if (!expression || !expression.trim()) return [];
+    try {
+        const node = math.parse(expression);
+        const deps = new Set<string>();
+        node.traverse((n: any) => {
+            if (n.isSymbolNode) {
+                deps.add(n.name);
+            }
+        });
+        return Array.from(deps);
+    } catch (e) {
+        return [];
+    }
+}
+
+// Check if source depends on target (source -> ... -> target)
+// Returns true if a path exists from sourceKey to targetKey
+export function dependsOn(sourceKey: string, targetKey: string, params: Parameter[]): boolean {
+    if (sourceKey === targetKey) return true;
+    
+    // BFS
+    const visited = new Set<string>();
+    const stack = [sourceKey];
+    
+    const paramMap = new Map<string, Parameter>();
+    params.forEach(p => paramMap.set(p.key, p));
+
+    while(stack.length > 0) {
+        const current = stack.pop()!;
+        if (current === targetKey) return true;
+        
+        if (visited.has(current)) continue;
+        visited.add(current);
+        
+        const p = paramMap.get(current);
+        if (!p) continue;
+        
+        const deps = getDependencies(p.expression);
+        deps.forEach(d => stack.push(d));
+    }
+    return false;
+}
+
+// Solve all parameters in topological order
+export function resolveParameters(params: Parameter[]): Parameter[] {
+    // 1. Build Graph
+    const graph = new Map<string, string[]>();
+    const paramMap = new Map<string, Parameter>();
+    
+    params.forEach(p => {
+        paramMap.set(p.key, p);
+        graph.set(p.key, getDependencies(p.expression));
+    });
+    
+    // 2. Topological Sort
+    const sorted: string[] = [];
+    const visited = new Set<string>();
+    const temp = new Set<string>();
+    
+    const visit = (node: string) => {
+        if (temp.has(node)) return; // Cycle detected (ignore this branch)
+        if (visited.has(node)) return;
+        
+        temp.add(node);
+        const deps = graph.get(node) || [];
+        deps.forEach(d => {
+            if (paramMap.has(d)) visit(d);
+        });
+        temp.delete(node);
+        visited.add(node);
+        sorted.push(node);
+    }
+    
+    params.forEach(p => {
+        if (!visited.has(p.key)) visit(p.key);
+    });
+    
+    // 3. Evaluate in Order
+    const resolvedParams = params.map(p => ({...p})); // Clone
+    const resolvedMap = new Map<string, Parameter>();
+    resolvedParams.forEach(p => resolvedMap.set(p.key, p));
+    
+    // Evaluation Scope (Always in mm)
+    const scope: Record<string, number> = {};
+    
+    sorted.forEach(key => {
+        const p = resolvedMap.get(key);
+        if (!p) return;
+        
+        try {
+            const result = math.evaluate(p.expression, scope);
+            let val = 0;
+            
+            // Handle mathjs types (Number or Unit)
+            // Strategy: Convert everything to Base Unit (mm) for the Scope.
+            // Convert to Target Unit for the stored Value.
+            
+            if (typeof result === 'number') {
+                // Heuristic: If it's a raw number with no symbols in expr, assume it is already in Target Unit.
+                // If it involves variables (which are in mm), assume result is in mm.
+                const hasSymbols = getDependencies(p.expression).length > 0;
+                
+                if (!hasSymbols) {
+                    // Constant: "10" -> 10 [Target Unit]
+                    // Scope: 10 * conversion
+                    p.value = result;
+                    scope[p.key] = p.unit === 'in' ? result * 25.4 : result;
+                } else {
+                    // Calculated: "A + 10" -> Result assumed MM
+                    // Value: Result / conversion
+                    const valInMm = result;
+                    p.value = p.unit === 'in' ? valInMm / 25.4 : valInMm;
+                    scope[p.key] = valInMm;
+                }
+            } else if (result && typeof result.toNumber === 'function') {
+                // It's a Unit (e.g. "1 inch")
+                const valInMm = result.toNumber('mm');
+                p.value = p.unit === 'in' ? valInMm / 25.4 : valInMm;
+                scope[p.key] = valInMm;
+            } else {
+                p.value = 0;
+                scope[p.key] = 0;
+            }
+        } catch (e) {
+            p.value = 0;
+            scope[p.key] = 0;
+        }
+    });
+    
+    return resolvedParams;
+}
+
 export function interpolateColor(hex: string, ratio: number): string {
   const r = Math.max(0, Math.min(1, ratio));
   // If full depth, plain black
