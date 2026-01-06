@@ -686,7 +686,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     if (maxDim > 0.001) {
         // In R3F canvas, one unit = one pixel if zoom=1? No.
         // A rough heuristic for fitting:
-        const containerHeight = ref && 'current' in ref ? 500 : 500; // Arbitrary fallback
+        // const containerHeight = ref && 'current' in ref ? 500 : 500; // Arbitrary fallback
         // Better: let the user adjust, just provide a sane start.
         // A zoom of 10 usually fits a ~50-100mm object nicely.
         // zoom = ScaleFactor / maxDim.
