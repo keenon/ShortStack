@@ -191,7 +191,6 @@ export function resolveParameters(params: Parameter[]): Parameter[] {
         
         try {
             const result = math.evaluate(p.expression, scope);
-            let val = 0;
             
             // Handle mathjs types (Number or Unit)
             // Strategy: Convert everything to Base Unit (mm) for the Scope.
