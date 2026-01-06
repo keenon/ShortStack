@@ -396,14 +396,16 @@ const MeshObject = ({
     isSelected,
     onSelect,
     onUpdate,
-    onProgress
+    onProgress,
+    registerAsset
 }: { 
     meshData: FlatMesh, 
     meshAssets: MeshAsset[],
     isSelected: boolean,
     onSelect: () => void,
     onUpdate: (id: string, field: string, val: any) => void,
-    onProgress: (id: string, percent: number, msg: string) => void
+    onProgress: (id: string, percent: number, msg: string) => void,
+    registerAsset: (mesh: THREE.Mesh | null) => void
 }) => {
     const { mesh, globalTransform, isEditable, uniqueId } = meshData;
     const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
@@ -493,7 +495,11 @@ const MeshObject = ({
     return (
         <>
             <mesh 
-                ref={meshRef}
+                ref={(ref) => {
+                    // @ts-ignore
+                    meshRef.current = ref;
+                    registerAsset(ref);
+                }}
                 geometry={geometry} 
                 // Apply transforms to visible mesh
                 position={position}
@@ -550,7 +556,9 @@ const MeshObject = ({
 const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
-  const hasInitiallySnapped = useRef(false);
+  const assetRefs = useRef<Record<string, THREE.Mesh>>({});
+  const hasInitiallyFramed = useRef(false);
+  const [loadedLayerIds, setLoadedLayerIds] = useState<Set<string>>(new Set());
   const [firstMeshReady, setFirstMeshReady] = useState(false);
   
   // High Res State
@@ -564,6 +572,15 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 
   const flattenedMeshes = useMemo(() => flattenMeshes(footprint, allFootprints, params), [footprint, allFootprints, params]);
   
+  // Calculate expected layer count for auto-framing
+  const expectedLayerCount = useMemo(() => {
+    return stackup.filter(l => {
+      const isVisible = visibleLayers ? visibleLayers[l.id] !== false : true;
+      const thickness = evaluateExpression(l.thicknessExpression, params);
+      return isVisible && thickness > 0.0001;
+    }).length;
+  }, [stackup, visibleLayers, params]);
+
   // Progress State
   const progressStatus = useRef(new Map<string, number>());
   const [progress, setProgress] = useState({ active: false, text: "", percent: 0 });
@@ -598,6 +615,12 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 
   // Completion Handler for LayerSolids
   const handleLayerLoad = useCallback((layerId: string) => {
+      setLoadedLayerIds(prev => {
+          const next = new Set(prev);
+          next.add(layerId);
+          return next;
+      });
+
       if (pendingLayers.current.has(layerId)) {
           pendingLayers.current.delete(layerId);
           // If all pending layers are done, resolve the promise
@@ -620,20 +643,27 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 
     const camera = controls.object as THREE.PerspectiveCamera;
     const box = new THREE.Box3();
-    let hasMeshes = false;
+    let hasContent = false;
 
+    // 1. Include Stackup Layers
     Object.values(meshRefs.current).forEach((mesh) => {
         if (mesh && mesh.geometry) {
             mesh.updateMatrixWorld();
-            const meshBox = new THREE.Box3().setFromObject(mesh);
-            if (!meshBox.isEmpty()) {
-                box.union(meshBox);
-                hasMeshes = true;
-            }
+            box.expandByObject(mesh);
+            hasContent = true;
         }
     });
 
-    if (!hasMeshes) {
+    // 2. Include Mesh Assets
+    Object.values(assetRefs.current).forEach((mesh) => {
+        if (mesh && mesh.geometry) {
+            mesh.updateMatrixWorld();
+            box.expandByObject(mesh);
+            hasContent = true;
+        }
+    });
+
+    if (!hasContent) {
         camera.position.set(50, 50, 50);
         controls.target.set(0, 0, 0);
         controls.update();
@@ -651,22 +681,32 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     const fovH = 2 * Math.atan(Math.tan(fov / 2) * aspect);
     const effectiveFOV = Math.min(fov, fovH);
     
-    let distance = maxDim / (2 * Math.tan(effectiveFOV / 2));
-    distance *= 1.3;
+    let distance = (maxDim / 2) / Math.tan(effectiveFOV / 2);
+    distance *= 1.3; // Add 30% padding
 
-    const direction = new THREE.Vector3(1, 1, 1).normalize();
+    const direction = new THREE.Vector3(1, 0.8, 1).normalize();
     camera.position.copy(center).add(direction.multiplyScalar(distance));
     
     controls.target.copy(center);
     controls.update();
   }, []);
 
+  // Trigger initial framing when loaded counts match
   useEffect(() => {
-    if (firstMeshReady && !hasInitiallySnapped.current && is3DActive) {
-        fitToHome();
-        hasInitiallySnapped.current = true;
+    if (is3DActive && !hasInitiallyFramed.current && loadedLayerIds.size >= expectedLayerCount && expectedLayerCount > 0) {
+        const timer = setTimeout(() => {
+            fitToHome();
+            hasInitiallyFramed.current = true;
+        }, 100);
+        return () => clearTimeout(timer);
     }
-  }, [firstMeshReady, is3DActive, fitToHome]);
+  }, [is3DActive, loadedLayerIds.size, expectedLayerCount, fitToHome]);
+
+  // Reset state on footprint switch
+  useEffect(() => {
+    hasInitiallyFramed.current = false;
+    setLoadedLayerIds(new Set());
+  }, [footprint.id]);
 
   useImperativeHandle(ref, () => ({
     resetCamera: fitToHome,
@@ -898,6 +938,10 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                     onSelect={() => onSelect(m.selectableId)}
                     onUpdate={onUpdateMesh}
                     onProgress={handleProgress}
+                    registerAsset={(mesh) => {
+                        if (mesh) assetRefs.current[m.uniqueId] = mesh;
+                        else delete assetRefs.current[m.uniqueId];
+                    }}
                 />
             ))}
         </group>
