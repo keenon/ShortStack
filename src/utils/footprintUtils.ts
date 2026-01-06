@@ -1057,3 +1057,45 @@ export function rotatePoint(
         y: center.y + (dx * sin + dy * cos)
     };
 }
+
+/**
+ * Calculates the bounding box of the entire footprint in Visual Coordinates.
+ */
+export function getFootprintAABB(
+    footprint: Footprint,
+    params: Parameter[],
+    allFootprints: Footprint[]
+): Rect | null {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    let found = false;
+
+    // 1. Process Shapes
+    footprint.shapes.forEach(shape => {
+        // Skip virtual guides for framing
+        if (shape.type === "wireGuide") return;
+        // Skip board outlines if the footprint isn't acting as a board
+        if (shape.type === "boardOutline" && !footprint.isBoard) return;
+
+        const aabb = getShapeAABB(shape, params, footprint, allFootprints);
+        if (aabb) {
+            found = true;
+            minX = Math.min(minX, aabb.x1, aabb.x2);
+            maxX = Math.max(maxX, aabb.x1, aabb.x2);
+            minY = Math.min(minY, aabb.y1, aabb.y2);
+            maxY = Math.max(maxY, aabb.y1, aabb.y2);
+        }
+    });
+
+    // 2. Process Mesh Origins (at least ensure their 2D anchor is in frame)
+    (footprint.meshes || []).forEach(m => {
+        found = true;
+        const mx = evaluateExpression(m.x, params);
+        const my = -evaluateExpression(m.y, params); // Inverted for visual
+        minX = Math.min(minX, mx); maxX = Math.max(maxX, mx);
+        minY = Math.min(minY, my); maxY = Math.max(maxY, my);
+    });
+
+    if (!found) return null;
+
+    return { x1: minX, y1: minY, x2: maxX, y2: maxY };
+}

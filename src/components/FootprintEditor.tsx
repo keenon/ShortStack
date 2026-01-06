@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
@@ -1879,17 +1879,74 @@ const handleUngroup = (unionId: string) => {
 
   const updateFootprintName = (name: string) => { updateFootprintField("name", name); };
   const toggleLayerVisibility = (id: string) => { setLayerVisibility(prev => ({ ...prev, [id]: prev[id] === undefined ? false : !prev[id] })); };
-  const handleHomeClick = () => {
-    if (viewMode === "2D") {
-        if (!wrapperRef.current) { setViewBox({ x: -50, y: -50, width: 100, height: 100 }); return; }
-        const { width, height } = wrapperRef.current.getBoundingClientRect();
-        const ratio = height / width; 
-        const newWidth = 100;
-        setViewBox({ x: -newWidth / 2, y: -(newWidth * ratio) / 2, width: newWidth, height: newWidth * ratio });
-    } else {
-        footprint3DRef.current?.resetCamera();
-    }
-  };
+
+    // Helper function to fit view to content
+    const fitViewToContent = useCallback(() => {
+        if (!wrapperRef.current) return;
+
+        // 1. Calculate the bounding box of the CAD objects
+        const totalAABB = getFootprintAABB(footprint, params, allFootprints);
+        
+        // 2. Get container dimensions
+        const { width: containerW, height: containerH } = wrapperRef.current.getBoundingClientRect();
+        if (containerW === 0 || containerH === 0) return;
+
+        const containerAspect = containerW / containerH;
+
+        let targetX, targetY, targetW, targetH;
+        const PADDING_FACTOR = 1.2; // Add 20% padding
+
+        if (!totalAABB) {
+            // Fallback if footprint is empty
+            targetW = 100;
+            targetH = 100 / containerAspect;
+            targetX = -targetW / 2;
+            targetY = -targetH / 2;
+        } else {
+            const bbW = Math.abs(totalAABB.x2 - totalAABB.x1);
+            const bbH = Math.abs(totalAABB.y2 - totalAABB.y1);
+            const bbCenterX = (totalAABB.x1 + totalAABB.x2) / 2;
+            const bbCenterY = (totalAABB.y1 + totalAABB.y2) / 2;
+
+            // Apply padding
+            const paddedW = (bbW === 0 ? 10 : bbW) * PADDING_FACTOR;
+            const paddedH = (bbH === 0 ? 10 : bbH) * PADDING_FACTOR;
+
+            // Fit the box to the container aspect ratio
+            if (paddedW / paddedH > containerAspect) {
+                // Box is wider than container
+                targetW = paddedW;
+                targetH = paddedW / containerAspect;
+            } else {
+                // Box is taller than container
+                targetH = paddedH;
+                targetW = paddedH * containerAspect;
+            }
+
+            targetX = bbCenterX - targetW / 2;
+            targetY = bbCenterY - targetH / 2;
+        }
+
+        setViewBox({ x: targetX, y: targetY, width: targetW, height: targetH });
+    }, [footprint, params, allFootprints]);
+
+    // Trigger fit on first mount (2D mode)
+    useEffect(() => {
+        // Small delay to ensure container dimensions are calculated by the browser
+        const timer = setTimeout(() => {
+            fitViewToContent();
+        }, 50);
+        return () => clearTimeout(timer);
+    }, []); // Empty dependency ensures it only runs on component mount
+
+    // Update handleHomeClick to use the new logic
+    const handleHomeClick = () => {
+        if (viewMode === "2D") {
+            fitViewToContent();
+        } else {
+            footprint3DRef.current?.resetCamera();
+        }
+    };
 
   const handleExport = async (layerId: string, format: "SVG" | "DXF" | "STL") => {
     const layer = stackup.find(l => l.id === layerId);
