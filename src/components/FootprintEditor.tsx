@@ -926,6 +926,20 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
               // --- UPDATED POINT MOVE LOGIC WITH SOFT SNAP ---
               if (pointIdx !== undefined && s.id === targetId) {
+                  // Handle Wire Guide direction handle specifically
+                  if (startShape.type === "wireGuide") {
+                      if (startShape.handle) {
+                          return {
+                              ...s,
+                              handle: {
+                                  x: modifyExpression(startShape.handle.x, dxWorld),
+                                  y: modifyExpression(startShape.handle.y, dyWorldMath)
+                              }
+                          };
+                      }
+                      return s;
+                  }
+
                   const newPoints = [...(startShape as any).points];
                   const startPt = startShape.points[pointIdx];
 
