@@ -555,8 +555,8 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   
   // High Res State
   const [isHighRes, setIsHighRes] = useState(false);
-  // Resolution Values: Low = 12, High = 64
-  const resolution = isHighRes ? 64 : 12;
+  // Resolution Values: Low = 24, High = 48
+  const resolution = isHighRes ? 48 : 24;
 
   // Track pending layers for "ensureHighRes"
   const pendingLayers = useRef<Set<string>>(new Set());

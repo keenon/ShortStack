@@ -1163,10 +1163,10 @@ function generateProceduralFillet(
             searchCount = 20;
         }
 
-        // --- FIRST PASS: STRICT MODE ---
+        // --- FIRST PASS: FAST (NON-STRICT) ---
         for (let k = 0; k < searchCount; k++) {
             const offset = safeMod(searchStart + k, lenB);
-            const cost = solveForOffset(offset, true);
+            const cost = solveForOffset(offset, false);
             const pA = polyA[0];
             const pB = polyB[offset];
             const seamDistSq = pA.distanceToSquared(pB);
@@ -1178,30 +1178,72 @@ function generateProceduralFillet(
             }
         }
 
-        // --- SECOND PASS: PERMISSIVE FALLBACK ---
-        // If Strict Mode failed (Cost is Infinity), run again without checks.
-        let useStrict = true;
-        if (minTotalCost === Infinity) {
-            // DEBUG: Why did we fail?
-            console.warn(`[Fillet] Strict triangulation failed. Pts A: ${lenA}, B: ${lenB}. Fallback enabled.`);
-            
-            useStrict = false;
-            for (let k = 0; k < searchCount; k++) {
-                const offset = safeMod(searchStart + k, lenB);
-                const cost = solveForOffset(offset, false);
-                const pA = polyA[0];
-                const pB = polyB[offset];
-                const seamDistSq = pA.distanceToSquared(pB);
-                const totalCost = cost + seamDistSq;
+        const prevCount = rawIndices.length;
+        generateIndices(bestOffset, false);
 
-                if (totalCost < minTotalCost) {
-                    minTotalCost = totalCost;
-                    bestOffset = offset;
+        // --- VALIDATION ---
+        let isValid = true;
+        if (boundaryLoops.length > 0) {
+            for (let i = prevCount; i < rawIndices.length; i += 3) {
+                const getPt = (idx: number) => (idx >= idxStartB) ? polyB[idx - idxStartB] : polyA[idx - idxStartA];
+                const p1 = getPt(rawIndices[i]), p2 = getPt(rawIndices[i+1]), p3 = getPt(rawIndices[i+2]);
+                
+                const checkEdge = (ia: number, ib: number, pa: THREE.Vector2, pb: THREE.Vector2) => {
+                    if ((ia < idxStartB && ib >= idxStartB) || (ib < idxStartB && ia >= idxStartB)) {
+                        const midX = (pa.x + pb.x) * 0.5, midY = (pa.y + pb.y) * 0.5;
+                        let inside = false, onBoundary = false;
+                        for (const loop of boundaryLoops) {
+                            for (let k = 0, l = loop.length - 1; k < loop.length; l = k++) {
+                                const xi = loop[k].x, yi = loop[k].y, xj = loop[l].x, yj = loop[l].y;
+                                if (((yi > midY) !== (yj > midY)) && (midX < (xj - xi) * (midY - yi) / (yj - yi) + xi)) inside = !inside;
+                                const l2 = (xj - xi) ** 2 + (yj - yi) ** 2;
+                                if (l2 > 1e-9) {
+                                    let t = Math.max(0, Math.min(1, ((midX - xi) * (xj - xi) + (midY - yi) * (yj - yi)) / l2));
+                                    if (((midX - (xi + t * (xj - xi)))**2 + (midY - (yi + t * (yj - yi)))**2) < 1e-6) onBoundary = true;
+                                }
+                            }
+                        }
+                        if (!onBoundary && !inside) return false;
+                        const dAx = pb.x - pa.x, dAy = pb.y - pa.y;
+                        for (const loop of boundaryLoops) {
+                            for (let k = 0; k < loop.length; k++) {
+                                const b1 = loop[k], b2 = loop[(k+1)%loop.length];
+                                const dBx = b2.x-b1.x, dBy = b2.y-b1.y, det = dAx*dBy - dAy*dBx;
+                                if (det !== 0) {
+                                    const t = ((b1.x-pa.x)*dBy - (b1.y-pa.y)*dBx)/det, u = ((b1.x-pa.x)*dAy - (b1.y-pa.y)*dAx)/det;
+                                    if (t > 0.001 && t < 0.999 && u > 0.001 && u < 0.999) return false;
+                                }
+                            }
+                        }
+                    }
+                    return true;
+                };
+                if (!checkEdge(rawIndices[i], rawIndices[i+1], p1, p2) || !checkEdge(rawIndices[i+1], rawIndices[i+2], p2, p3) || !checkEdge(rawIndices[i+2], rawIndices[i], p3, p1)) {
+                    isValid = false; break;
                 }
             }
         }
 
-        generateIndices(bestOffset, useStrict);
+        if (!isValid) {
+            console.warn(`[Fillet] Fast triangulation failed for polygon with ${lenA} vs ${lenB} vertices. Retrying with intersection checks.`);
+            rawIndices.length = prevCount; // Clear bad indices
+            
+            minTotalCost = Infinity;
+            for (let k = 0; k < searchCount; k++) {
+                const offset = safeMod(searchStart + k, lenB);
+                const cost = solveForOffset(offset, true);
+                const seamDistSq = polyA[0].distanceToSquared(polyB[offset]);
+                const totalCost = cost + seamDistSq;
+                if (totalCost < minTotalCost) { minTotalCost = totalCost; bestOffset = offset; }
+            }
+
+            if (minTotalCost === Infinity) {
+                console.warn("[Fillet] Strict triangulation failed. Fallback enabled.");
+                generateIndices(bestOffset, false);
+            } else {
+                generateIndices(bestOffset, true);
+            }
+        }
     };
 
     // If overrideCS provided OR shape is polygon, use the generalized Polygon logic
