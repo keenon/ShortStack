@@ -743,6 +743,9 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
   };
 
   const handleShapeMouseDown = (e: React.MouseEvent, id: string, pointIndex?: number) => {
+      // Only allow Left Click (0) for shape interaction.
+      // This allows Right Click (2) and Middle Click (1) to bubble up to camera panning.
+      if (e.button !== 0) return;
       // Pass through if Alt is held to allow Global Rotation
       if (e.altKey) return; 
 
@@ -845,6 +848,10 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
   };
 
   const handleHandleMouseDown = (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => {
+      // Only allow Left Click (0) for shape interaction.
+      // This allows Right Click (2) and Middle Click (1) to bubble up to camera panning.
+      if (e.button !== 0) return;
+
       // Pass through if Alt is held to allow Global Rotation
       if (e.altKey) return; 
 
