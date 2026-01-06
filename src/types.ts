@@ -32,6 +32,7 @@ export interface BaseShape {
   id: string;
   type: ShapeType;
   name: string;
+  locked?: boolean; // Lock flag
   // assignedLayers maps LayerID -> { depth, endmillRadius }
   // We include 'string' in the type for backward compatibility during load, 
   // but it is normalized to LayerAssignment in the app.

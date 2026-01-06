@@ -140,6 +140,19 @@ export const RecursiveShapeRenderer = ({
   strokeScale?: number;
   overrideStyle?: { fill?: string, stroke?: string, strokeWidth?: number } | null;
 }) => {
+  // Define locked state visuals
+  const isLocked = !!shape.locked;
+  
+  // Color Logic: 
+  // If Selected AND Locked -> Red (#ff4d4d)
+  // If Selected AND Unlocked -> Blue (#646cff)
+  // If Unselected -> Default/Gray
+  const selectionColor = isLocked ? "#ff4d4d" : "#646cff";
+  
+  // If locked, we generally don't want to show handles (points, resize rings) 
+  // because they imply editability.
+  const showHandles = isSelected && !isLocked && !onlyHandles; 
+
   // --- BOARD OUTLINE RENDERER ---
   if (shape.type === "boardOutline") {
       return (
@@ -169,7 +182,7 @@ export const RecursiveShapeRenderer = ({
     const y = evaluateExpression(wg.y, params);
 
     // Aesthetic: Subtle gray normally, bright purple when selected
-    const stroke = isSelected ? "#646cff" : "#666";
+    const stroke = isSelected ? selectionColor : "#666";
     const opacity = isSelected ? 1 : 0.6;
     const crossSize = handleRadius * 1.5;
 
@@ -177,7 +190,7 @@ export const RecursiveShapeRenderer = ({
     
     // Main marker: Minimalist crosshair
     elements.push(
-      <g key="marker" style={{ cursor: "pointer", opacity }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
+      <g key="marker" style={{ cursor: isLocked ? "not-allowed" : "pointer", opacity }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
         <line x1={x - crossSize} y1={-y} x2={x + crossSize} y2={-y} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" />
         <line x1={x} y1={-(y - crossSize)} x2={x} y2={-(y + crossSize)} stroke={stroke} strokeWidth={1} vectorEffect="non-scaling-stroke" />
         <circle cx={x} cy={-y} r={handleRadius * 0.3} fill={stroke} vectorEffect="non-scaling-stroke" />
@@ -201,7 +214,7 @@ export const RecursiveShapeRenderer = ({
         const a2x = hx - arrowLen * Math.cos(angle + Math.PI / 6);
         const a2y = hy - arrowLen * Math.sin(angle + Math.PI / 6);
 
-        const arrowColor = isSelected ? "#00ffff" : "#00aaaa";
+        const arrowColor = isSelected ? (isLocked ? "#ffaaaa" : "#00ffff") : "#00aaaa";
 
         elements.push(
             <g key="direction" style={{ pointerEvents: 'auto' }}>
@@ -209,8 +222,8 @@ export const RecursiveShapeRenderer = ({
                 <line 
                     x1={x} y1={-y} x2={hx} y2={hy} 
                     stroke="transparent" strokeWidth={10} vectorEffect="non-scaling-stroke" 
-                    style={{ cursor: isSelected ? 'crosshair' : 'pointer' }}
-                    onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'out'); }} 
+                    style={{ cursor: isLocked ? 'not-allowed' : (isSelected ? 'crosshair' : 'pointer') }}
+                    onMouseDown={(e) => { e.stopPropagation(); if(!isLocked) onHandleDown(e, shape.id, 0, 'out'); }} 
                 />
 
                 {/* 2. Visual Dashed Line */}
@@ -224,7 +237,7 @@ export const RecursiveShapeRenderer = ({
                 <path d={`M ${hx} ${hy} L ${a1x} ${a1y} L ${a2x} ${a2y} Z`} fill={arrowColor} stroke="none" vectorEffect="non-scaling-stroke" style={{ pointerEvents: 'none' }} />
                 
                 {/* 4. Interactive Handle Dot */}
-                {isSelected && (
+                {isSelected && !isLocked && (
                     <circle cx={hx} cy={hy} r={handleRadius * 0.8} fill={arrowColor} stroke="#fff" strokeWidth={1} vectorEffect="non-scaling-stroke" style={{ cursor: 'crosshair' }}
                         onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, 0, 'out'); }} />
                 )}
@@ -249,7 +262,7 @@ export const RecursiveShapeRenderer = ({
 
       // Styles for the container of the footprint ref
       const containerStyle: React.CSSProperties = {
-          cursor: "pointer",
+          cursor: isLocked ? "not-allowed" : "pointer",
           opacity: isSelected ? 1 : (isParentSelected ? 1 : 0.9)
       };
 
@@ -279,7 +292,7 @@ export const RecursiveShapeRenderer = ({
             style={containerStyle}
           >
               {/* Optional: Selection Indicator for the Group */}
-              {isSelected && <circle cx={0} cy={0} r={handleRadius} fill="#646cff" vectorEffect="non-scaling-stroke"/>}
+              {isSelected && <circle cx={0} cy={0} r={handleRadius} fill={selectionColor} vectorEffect="non-scaling-stroke"/>}
               
               {/* Render Children */}
               {/* Reverse to maintain Top-First visual order (SVG draws painter's algo, last is top) */}
@@ -320,21 +333,24 @@ export const RecursiveShapeRenderer = ({
       const angle = evaluateExpression(u.angle, params);
 
       // Determine Colors for the Union silhouette
-      let strokeColor = isSelected ? "#646cff" : "#888";
+      let strokeColor = isSelected ? selectionColor : "#888";
       const assigned = u.assignedLayers || {};
       const highestLayer = stackup.find(l => assigned[l.id] !== undefined && layerVisibility[l.id] !== false);
-      if (highestLayer) { strokeColor = highestLayer.color; }
+      if (highestLayer) { 
+          strokeColor = highestLayer.color;
+          if (isSelected) strokeColor = selectionColor; 
+      }
 
       const filterId = `union-filter-${u.id}`;
       // Calculate dilate radius: visually ~1.5px
       const dilateRadius = strokeScale * 1.5 * (isSelected ? 2 : 1);
-      let defaultFill = isSelected ? "rgb(100, 108, 255)" : "rgb(255, 255, 255)";
+      let defaultFill = isSelected ? (isLocked ? "rgb(255, 77, 77)" : "rgb(100, 108, 255)") : "rgb(255, 255, 255)";
 
       return (
           <g 
             transform={`translate(${x}, ${-y}) rotate(${-angle})`}
             onMouseDown={(e) => onMouseDown(e, shape.id)}
-            style={{ cursor: "pointer", opacity: isSelected ? 1 : 0.9 }}
+            style={{ cursor: isLocked ? "not-allowed" : "pointer", opacity: isSelected ? 1 : 0.9 }}
           >
               {/* defs for boolean visual union effect */}
               <defs>
@@ -347,7 +363,7 @@ export const RecursiveShapeRenderer = ({
               </defs>
 
               {isSelected && !onlyHandles && (
-                  <circle cx={0} cy={0} r={handleRadius} fill="#646cff" vectorEffect="non-scaling-stroke"/>
+                  <circle cx={0} cy={0} r={handleRadius} fill={selectionColor} vectorEffect="non-scaling-stroke"/>
               )}
               
               {!onlyHandles && (
@@ -408,8 +424,8 @@ export const RecursiveShapeRenderer = ({
   if (onlyHandles && shape.type !== "line" && shape.type !== "polygon") return null;
   
   // Default styles (unassigned)
-  let fill = isSelected ? "rgba(100, 108, 255, 0.1)" : "rgba(255, 255, 255, 0.05)";
-  let stroke = isSelected ? "#646cff" : "#888";
+  let fill = isSelected ? (isLocked ? "rgba(255, 77, 77, 0.1)" : "rgba(100, 108, 255, 0.1)") : "rgba(255, 255, 255, 0.05)";
+  let stroke = isSelected ? selectionColor : "#888";
   let strokeWidth = isSelected ? 2 : 1;
   const vectorEffect = "non-scaling-stroke";
 
@@ -420,6 +436,7 @@ export const RecursiveShapeRenderer = ({
   if (highestLayer) {
       stroke = highestLayer.color;
       strokeWidth = isSelected ? 2 : 1;
+      if (isSelected) stroke = selectionColor;
 
       // UPDATED: Standardized transparent fill using hexToRgba
       fill = hexToRgba(highestLayer.color, 0.2);
@@ -445,7 +462,10 @@ export const RecursiveShapeRenderer = ({
     stroke,
     strokeWidth,
     vectorEffect,
-    style: { cursor: overrideStyle ? "inherit" : "pointer" },
+    style: { 
+        cursor: overrideStyle ? "inherit" : (isLocked ? "not-allowed" : "pointer"),
+        strokeDasharray: (isSelected && isLocked) ? "4, 2" : "none" 
+    },
   };
 
   if (shape.type === "circle") {
@@ -518,7 +538,7 @@ export const RecursiveShapeRenderer = ({
           d += " Z";
       }
 
-      const handles = (isSelected && !overrideStyle) ? pts.map((pt, idx) => {
+      const handles = (showHandles && !overrideStyle) ? pts.map((pt, idx) => {
           const elements = [];
           const isHovered = hoveredPointIndex === idx;
           const anchorColor = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
@@ -554,7 +574,7 @@ export const RecursiveShapeRenderer = ({
           return elements;
       }) : null;
 
-      const midButtons = (isSelected && !overrideStyle) ? midPoints.map(m => {
+      const midButtons = (showHandles && !overrideStyle) ? midPoints.map(m => {
           const isHovered = hoveredMidpointIndex === m.index;
           const bgFill = isHovered ? "#ffaa00" : "#333";
           const strokeColor = isHovered ? "#fff" : "#666";
@@ -622,7 +642,7 @@ export const RecursiveShapeRenderer = ({
         // 2. Generate Outline Path for Visuals
         const outlineD = generateLineOutlinePath(pts, thickness);
 
-      const handles = (isSelected && !overrideStyle) ? pts.map((pt, idx) => {
+      const handles = (showHandles && !overrideStyle) ? pts.map((pt, idx) => {
           const elements = [];
           const isHovered = hoveredPointIndex === idx;
           const anchorFill = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
@@ -669,7 +689,7 @@ export const RecursiveShapeRenderer = ({
           return elements;
       }) : null;
 
-      const midButtons = (isSelected && !overrideStyle) ? midPoints.map(m => {
+      const midButtons = (showHandles && !overrideStyle) ? midPoints.map(m => {
           const isHovered = hoveredMidpointIndex === m.index;
           const bgFill = isHovered ? "#ffaa00" : "#333";
           const strokeColor = isHovered ? "#fff" : "#666";
@@ -720,7 +740,7 @@ export const RecursiveShapeRenderer = ({
     const lines = (txt.text || "").split('\n');
     
     // Use selection color if selected, otherwise default to a comment-grey
-    let fill = isSelected ? "#646cff" : "#aaa";
+    let fill = isSelected ? selectionColor : "#aaa";
     if (overrideStyle?.fill) fill = overrideStyle.fill;
 
     return (
@@ -730,7 +750,7 @@ export const RecursiveShapeRenderer = ({
             textAnchor={txt.anchor || "start"}
             fill={fill}
             style={{ 
-                cursor: "pointer", 
+                cursor: isLocked ? "not-allowed" : "pointer", 
                 userSelect: "none", 
                 fontFamily: "monospace",
                 pointerEvents: "auto" 
@@ -783,11 +803,13 @@ export const BoardOutlineRenderer = ({
   onAddMidpoint?: (shapeId: string, index: number) => void;
   onlyHandles?: boolean;
 }) => {
+    const isLocked = !!shape.locked;
     const points = shape.points;
-    const stroke = isSelected ? "#646cff" : "#555";
-    // UPDATED: Thinner outlines (1px/2px)
+    // Color logic
+    const selectionColor = isLocked ? "#ff4d4d" : "#646cff";
+    const stroke = isSelected ? selectionColor : "#555";
     const strokeWidth = isSelected ? 2 : 1; 
-    const strokeDasharray = isSelected ? "0" : "5,5";
+    const strokeDasharray = isSelected ? (isLocked ? "4,2" : "0") : "5,5";
 
     const originX = evaluateExpression(shape.x, params);
     const originY = evaluateExpression(shape.y, params);
@@ -829,7 +851,10 @@ export const BoardOutlineRenderer = ({
         d += " Z";
     }
 
-    const handles = isSelected ? pts.map((pt, idx) => {
+    // Handles logic: show only if selected AND unlocked
+    const showHandles = isSelected && !isLocked;
+
+    const handles = showHandles ? pts.map((pt, idx) => {
         const elements = [];
         const isHovered = hoveredPointIndex === idx;
         const anchorColor = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
@@ -869,7 +894,7 @@ export const BoardOutlineRenderer = ({
         return elements;
     }) : null;
 
-    const midButtons = isSelected ? midPoints.map(m => {
+    const midButtons = showHandles ? midPoints.map(m => {
         const isHovered = hoveredMidpointIndex === m.index;
         const bgFill = isHovered ? "#ffaa00" : "#333";
         const strokeColor = isHovered ? "#fff" : "#666";
@@ -898,7 +923,7 @@ export const BoardOutlineRenderer = ({
 
     return (
         <g>
-            <path d={d} fill="none" stroke="transparent" strokeWidth={10} vectorEffect="non-scaling-stroke" style={{ cursor: "pointer" }}
+            <path d={d} fill="none" stroke="transparent" strokeWidth={10} vectorEffect="non-scaling-stroke" style={{ cursor: isLocked ? "not-allowed" : "pointer" }}
                 onMouseDown={(e) => onMouseDown(e, shape.id)} />
             <path d={d} fill="none" stroke={stroke} strokeWidth={strokeWidth} strokeDasharray={strokeDasharray} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "none" }} />
             {handles}

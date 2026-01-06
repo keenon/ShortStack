@@ -63,6 +63,21 @@ const FootprintPropertiesPanel = ({
     }
   }, [scrollToPointIndex]);
 
+  // NEW: Helper to render the Lock Toggle
+  const renderLockToggle = (targetId: string, currentLocked: boolean | undefined) => (
+      <div style={{ marginBottom: '10px', padding: '8px', background: '#2a2a2a', borderRadius: '4px', border: '1px solid #444', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <label className="checkbox-label" style={{color: currentLocked ? '#ff4d4d' : '#ccc', fontWeight: currentLocked ? 'bold' : 'normal'}}>
+              <input 
+                  type="checkbox" 
+                  checked={!!currentLocked} 
+                  onChange={(e) => updateShape(targetId, "locked", e.target.checked)} 
+              />
+              {currentLocked ? "🔒 Locked" : "🔓 Unlocked"}
+          </label>
+          {currentLocked && <small style={{color: '#666', fontSize:'0.8em'}}>Selection only</small>}
+      </div>
+  );
+
   if (selectedShapeIds.length > 1) {
     return (
         <div className="properties-panel">
@@ -210,6 +225,9 @@ const FootprintPropertiesPanel = ({
       return (
           <div className="properties-panel">
             <h3>Board Outline Properties</h3>
+            
+            {/* Lock Toggle */}
+            {renderLockToggle(shape.id, shape.locked)}
 
             {/* Exclusive Layer Selection */}
             <div className="prop-section">
@@ -354,6 +372,9 @@ const FootprintPropertiesPanel = ({
                 </button>
             </div>
 
+            {/* Lock Toggle */}
+            {renderLockToggle(shape.id, shape.locked)}
+
             {/* Layer Assignment Section */}
             <div className="prop-section">
                 <h4>Layers</h4>
@@ -474,6 +495,9 @@ const FootprintPropertiesPanel = ({
                 <h3 style={{ margin: 0 }}>COMMENT Properties</h3>
                 <button onClick={onDuplicate} style={{ padding: '4px 10px', fontSize: '0.9em' }}>Duplicate</button>
             </div>
+
+            {/* Lock Toggle */}
+            {renderLockToggle(shape.id, shape.locked)}
 
             <div className="prop-group">
                 <label>Text Note</label>
@@ -623,6 +647,7 @@ const FootprintPropertiesPanel = ({
       return (
         <div className="properties-panel">
             {header}
+            {renderLockToggle(shape.id, shape.locked)}
             <div className="prop-group">
                 <label>Name</label>
                 <input type="text" value={wg.name} onChange={(e) => updateShape(wg.id, "name", e.target.value)} />
@@ -671,6 +696,7 @@ const FootprintPropertiesPanel = ({
       return (
         <div className="properties-panel">
             {header}
+            {renderLockToggle(shape.id, shape.locked)}
             <div className="prop-group">
                 <label>Reference</label>
                 <div style={{ padding: '8px', background: '#333', borderRadius: '4px', color: '#fff', fontSize: '0.9em', border: '1px solid #444', marginBottom: '10px' }}>
@@ -717,6 +743,8 @@ const FootprintPropertiesPanel = ({
                 <h3 style={{ margin: 0 }}>UNION Properties</h3>
                 <button onClick={onDuplicate} title="Duplicate Union" style={{ padding: '4px 10px', fontSize: '0.9em' }}>Duplicate</button>
             </div>
+
+            {renderLockToggle(shape.id, shape.locked)}
 
             <div className="prop-group">
                 <button className="secondary" onClick={() => onUngroup && onUngroup(u.id)} style={{ width: '100%' }}>
@@ -802,6 +830,7 @@ const FootprintPropertiesPanel = ({
   return (
     <div className="properties-panel">
       {header}
+      {renderLockToggle(shape.id, shape.locked)}
       
       {/* Layer Assignment Section */}
       <div className="prop-section">

@@ -262,6 +262,7 @@ function App() {
               ...s,
               id: s.id || crypto.randomUUID(),
               name: s.name || "Unnamed Shape",
+              locked: !!s.locked,
               assignedLayers: assignedLayers,
               x: s.x ?? "0",
               y: s.y ?? "0",

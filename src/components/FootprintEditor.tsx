@@ -472,9 +472,20 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
     // ALT + Left Click -> ROTATION
     if (e.button === 0 && e.altKey && selectedShapeIds.length > 0) {
         e.stopPropagation(); e.preventDefault();
+
+        // NEW: Filter out locked shapes so they don't rotate
+        const rotatableIds = selectedShapeIds.filter(id => {
+            const s = footprint.shapes.find(shape => shape.id === id);
+            return s && !s.locked;
+        });
+
+        if (rotatableIds.length === 0) return; // Abort if everything selected is locked
+
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         let count = 0;
-        selectedShapeIds.forEach(id => {
+        
+        // Calculate centroid based only on rotatable shapes
+        rotatableIds.forEach(id => {
             const shape = footprint.shapes.find(s => s.id === id);
             if (shape) {
                 const aabb = getShapeAABB(shape, params, footprint, allFootprints);
@@ -490,7 +501,12 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
         const mousePos = getMouseWorldPos(e.clientX, e.clientY);
         const startAngle = Math.atan2(mousePos.y - centroid.y, mousePos.x - centroid.x);
         const snapshot = new Map<string, any>();
-        footprint.shapes.forEach(s => { if (selectedShapeIds.includes(s.id)) snapshot.set(s.id, JSON.parse(JSON.stringify(s))); });
+        
+        // Snapshot only rotatable shapes
+        footprint.shapes.forEach(s => { 
+            if (rotatableIds.includes(s.id)) snapshot.set(s.id, JSON.parse(JSON.stringify(s))); 
+        });
+        
         isRotating.current = true;
         rotationStartData.current = { center: centroid, startMouseAngle: startAngle, initialShapes: snapshot };
         setRotationGuide({ center: centroid, current: mousePos });
@@ -775,6 +791,9 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       const shape = footprint.shapes.find(s => s.id === id);
       if (!shape) return;
 
+      // NEW: Check lock state
+      if (shape.locked) return;
+
       isShapeDragging.current = true;
       hasMoved.current = false;
       shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
@@ -867,6 +886,10 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
       const shape = footprint.shapes.find(s => s.id === id);
       if (!shape) return;
+
+      // NEW: Check lock state
+      if (shape.locked) return;
+
       isShapeDragging.current = true;
       hasMoved.current = false;
       dragTargetRef.current = { id, pointIdx: pointIndex, handleType: type, mode: 'move' };
@@ -896,6 +919,9 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       const { id: targetId, pointIdx, handleType, mode, resizeHandle, initialVal } = dragTargetRef.current;
       
       const updatedShapes = currentFP.shapes.map(s => {
+          // NEW: Safety check for multi-selection dragging.
+          if (s.locked) return s;
+
           const startShape = shapeDragStartDataMap.current.get(s.id);
           if (!startShape) return s;
 
