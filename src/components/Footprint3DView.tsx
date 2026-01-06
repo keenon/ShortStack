@@ -559,7 +559,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   const assetRefs = useRef<Record<string, THREE.Mesh>>({});
   const hasInitiallyFramed = useRef(false);
   const [loadedLayerIds, setLoadedLayerIds] = useState<Set<string>>(new Set());
-  const [firstMeshReady, setFirstMeshReady] = useState(false);
   
   // High Res State
   const [isHighRes, setIsHighRes] = useState(false);
@@ -913,7 +912,6 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                   registerMesh={(id, mesh) => { 
                       if (mesh) {
                         meshRefs.current[id] = mesh; 
-                        if (mesh.geometry) setFirstMeshReady(true);
                       } else {
                         delete meshRefs.current[id]; 
                       }
