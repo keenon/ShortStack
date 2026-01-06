@@ -2096,15 +2096,55 @@ const handleUngroup = (unionId: string) => {
       }
   };
 
-  const handleBoardToggle = (checked: boolean) => {
-      updateFootprintField("isBoard", checked);
-      if (checked) {
-          const hasOutline = footprint.shapes.some(s => s.type === "boardOutline");
-          if (!hasOutline) {
-              addShape("boardOutline");
-          }
-      }
-  };
+    const handleBoardToggle = (checked: boolean) => {
+        // 1. Start with the updated flag
+        let nextFootprint = { ...footprint, isBoard: checked };
+        let nextSelection = [...selectedShapeIds];
+
+        // 2. If we are turning it ON and no outline exists, create one manually 
+        // instead of calling addShape (which would trigger a second history push)
+        if (checked) {
+            const hasOutline = footprint.shapes.some(s => s.type === "boardOutline");
+            if (!hasOutline) {
+                const centerMathX = (viewBox.x + viewBox.width / 2).toFixed(2);
+                const centerMathY = (-(viewBox.y + viewBox.height / 2)).toFixed(2);
+                
+                const newOutline: FootprintBoardOutline = {
+                    id: crypto.randomUUID(),
+                    type: "boardOutline",
+                    name: "Board Outline",
+                    x: centerMathX,
+                    y: centerMathY,
+                    assignedLayers: {},
+                    points: [
+                        { id: crypto.randomUUID(), x: "-50", y: "-50" },
+                        { id: crypto.randomUUID(), x: "50", y: "-50" },
+                        { id: crypto.randomUUID(), x: "50", y: "50" },
+                        { id: crypto.randomUUID(), x: "-50", y: "50" }
+                    ]
+                };
+
+                // Add the shape to our temporary object
+                nextFootprint.shapes = [newOutline, ...nextFootprint.shapes];
+                
+                // Auto-assign to all layers
+                const assignments = { ...footprint.boardOutlineAssignments };
+                stackup.forEach(l => {
+                    assignments[l.id] = newOutline.id;
+                });
+                nextFootprint.boardOutlineAssignments = assignments;
+
+                // Select the new outline immediately
+                nextSelection = [newOutline.id];
+            }
+        }
+
+        // 3. Push a single unified update to history
+        updateHistory({ 
+            footprint: nextFootprint, 
+            selectedShapeIds: nextSelection 
+        });
+    };
 
   const handleSelection = (id: string, multi: boolean) => {
       if (multi) {
