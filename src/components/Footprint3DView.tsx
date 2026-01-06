@@ -170,21 +170,11 @@ const LayerSolid = ({
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
   onLoad?: (id: string) => void;
 }) => {
-  // Determine Center X/Z to match Worker Logic
-  // This ensures the local geometry returned by the worker aligns with the React mesh position
-  const isBoard = footprint.isBoard;
-  
-  const assignments = footprint.boardOutlineAssignments || {};
-  const assignedId = assignments[layer.id];
-  let outlineShape = footprint.shapes.find(s => s.id === assignedId);
-  if (!outlineShape) {
-      outlineShape = footprint.shapes.find(s => s.type === "boardOutline");
-  }
-  
-  // If board + outline exists, origin is 0,0. Else, bounds center.
-  const useBoardOrigin = isBoard && !!outlineShape;
-  const centerX = useBoardOrigin ? 0 : (bounds.minX + bounds.maxX) / 2;
-  const centerZ = useBoardOrigin ? 0 : (bounds.minY + bounds.maxY) / 2;
+  // UPDATED: Origin Logic
+  // We force center to 0,0 to match the 2D View's origin (0,0).
+  // The worker will handle placing geometry relative to this 0,0.
+  const centerX = 0; 
+  const centerZ = 0;
   const centerY = bottomZ + thickness / 2;
 
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
@@ -642,7 +632,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     const controls = controlsRef.current;
     if (!controls) return;
 
-    const camera = controls.object as THREE.PerspectiveCamera;
+    const camera = controls.object as THREE.OrthographicCamera;
     const box = new THREE.Box3();
     let hasContent = false;
 
@@ -664,9 +654,17 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         }
     });
 
+    // Default Isometric Position
+    // Position at equal distance components to create typical Iso Angle
+    const ISO_DIST = 1000;
+    camera.position.set(ISO_DIST, ISO_DIST, ISO_DIST);
+    camera.lookAt(0,0,0); // Start looking at origin
+
     if (!hasContent) {
-        camera.position.set(50, 50, 50);
+        // Just focus origin if empty
         controls.target.set(0, 0, 0);
+        camera.zoom = 10;
+        camera.updateProjectionMatrix();
         controls.update();
         return;
     }
@@ -676,19 +674,28 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     const size = new THREE.Vector3();
     box.getSize(size);
 
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const fov = camera.fov * (Math.PI / 180);
-    const aspect = camera.aspect || 1;
-    const fovH = 2 * Math.atan(Math.tan(fov / 2) * aspect);
-    const effectiveFOV = Math.min(fov, fovH);
+    // Calculate Zoom for Orthographic Camera
+    // Zoom = 1 fits 2 units vertically (top=1, bottom=-1 by default in R3F?) 
+    // Actually R3F defaults vary, but typically it scales based on viewport.
+    // However, OrbitControls modifies .zoom.
+    // The view volume height is `(top - bottom) / zoom`. 
+    // We want view volume to cover `maxDim`.
     
-    let distance = (maxDim / 2) / Math.tan(effectiveFOV / 2);
-    distance *= 1.3; // Add 30% padding
+    // Approximate a reasonable zoom level:
+    const maxDim = Math.max(size.x, size.y, size.z) * 1.5; // 1.5x padding
+    if (maxDim > 0.001) {
+        // In R3F canvas, one unit = one pixel if zoom=1? No.
+        // A rough heuristic for fitting:
+        const containerHeight = ref && 'current' in ref ? 500 : 500; // Arbitrary fallback
+        // Better: let the user adjust, just provide a sane start.
+        // A zoom of 10 usually fits a ~50-100mm object nicely.
+        // zoom = ScaleFactor / maxDim.
+        // Let's try 400 / maxDim.
+        camera.zoom = 400 / maxDim;
+    }
 
-    const direction = new THREE.Vector3(1, 0.8, 1).normalize();
-    camera.position.copy(center).add(direction.multiplyScalar(distance));
-    
     controls.target.copy(center);
+    camera.updateProjectionMatrix();
     controls.update();
   }, []);
 
@@ -881,7 +888,8 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
       </div>
 
       <Canvas 
-        camera={{ position: [50, 50, 50], fov: 45, near: 0.1, far: 100000 }}
+        orthographic // UPDATED: Isometric View Mode
+        camera={{ position: [100, 100, 100], zoom: 10, near: 0.1, far: 100000 }} // UPDATED: Ortho Settings
         frameloop={is3DActive ? "always" : "never"}
         onPointerMissed={() => onSelect && onSelect("")}
       >
@@ -946,13 +954,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
             ))}
         </group>
 
-        <Grid 
-            infiniteGrid 
-            fadeDistance={200} 
-            sectionColor="#444" 
-            cellColor="#222" 
-            position={[0, 0, 0]} 
-        />
+        <Grid infiniteGrid fadeDistance={500} sectionColor="#444" cellColor="#222" position={[0, 0, 0]} />
         <OrbitControls makeDefault ref={controlsRef} />
         <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
           <GizmoViewport axisColors={['#9d4b4b', '#2f7f4f', '#3b5b9d']} labelColor="white" />

@@ -398,11 +398,18 @@ self.onmessage = async (e: MessageEvent) => {
             report(`Initializing ${layerStr}...`, 0);
 
             try {
-                // --- COORDINATE SYSTEM SETUP ---
-                // We must match the View's coordinate logic to align the generated mesh with the scene.
-                // In the View, the mesh is positioned at [centerX, centerY, centerZ].
-                // Therefore, geometry generated here must be centered around (0,0) LOCAL space.
+                // UPDATED: Origin Logic
+                // We enforce (0,0) as the global origin to match the React view.
+                const centerX = 0;
+                const centerZ = 0;
                 
+                // However, if we need to generate a stock block (no outline),
+                // we must center that block around the actual shapes (the bounds center).
+                const boundsCenterX = (bounds.minX + bounds.maxX) / 2;
+                const boundsCenterZ = (bounds.minY + bounds.maxY) / 2;
+                const width = bounds.maxX - bounds.minX;
+                const depth = bounds.maxY - bounds.minY; 
+
                 const isBoard = footprint.isBoard;
                 
                 // Resolve Assigned Board Outline to determine origin context
@@ -413,19 +420,11 @@ self.onmessage = async (e: MessageEvent) => {
                     outlineShape = footprint.shapes.find((s: any) => s.type === "boardOutline") as FootprintBoardOutline | undefined;
                 }
                 
-                // If this is a board with an outline, origin is (0,0). Otherwise, it's the bounds center.
-                const useBoardOrigin = isBoard && !!outlineShape;
-                const centerX = useBoardOrigin ? 0 : (bounds.minX + bounds.maxX) / 2;
-                const centerZ = useBoardOrigin ? 0 : (bounds.minY + bounds.maxY) / 2;
-                
-                const width = bounds.maxX - bounds.minX;
-                const depth = bounds.maxY - bounds.minY; 
-
                 // 1. Generate Base
                 let base: any;
                 let boardShape: THREE.Shape | null = null;
                 
-                if (useBoardOrigin && outlineShape) {
+                if (isBoard && outlineShape) {
                     boardShape = createBoardShape(outlineShape, params, footprint, allFootprints);
                 }
 
@@ -436,11 +435,17 @@ self.onmessage = async (e: MessageEvent) => {
                     // Board shape is already at global (0,0), so local transform is just centering Z (height)
                     base = collect(rotated.translate([0, -thickness/2, 0]));
                 } else {
-                    // Create Cube
-                    // Manifold cube(size, true) creates a cube at (0,0,0). 
-                    // Since the React Mesh is placed at (centerX, centerY, centerZ), 
-                    // a local (0,0,0) cube aligns perfectly with the bounds.
-                    base = collect(Manifold.cube([width, thickness, depth], true));
+                    // Create Default Cube Stock
+                    // Manifold.cube makes a cube at 0,0,0. 
+                    // We must translate it to the "actual" center of the design so it covers the shapes.
+                    let cube = collect(Manifold.cube([width, thickness, depth], true));
+                    // Translate to bounds center (accounting for Z flip: Z in 3D is -Y in 2D space for Manifold logic here usually)
+                    // Wait, Manifold 3D space: X=X, Y=Y, Z=Z.
+                    // React View: X=X, Y=Height, Z=Z.
+                    // Our coordinate transform below maps: Manifold X = Global X, Manifold Z = -Global Y.
+                    // So we translate the Cube X by boundsCenterX, and Cube Z by -boundsCenterZ (which is boundsCenterY in 2D).
+                    // Correct: boundsCenterZ variable holds 2D Y center. So we negate it for 3D Z.
+                    base = collect(cube.translate([boundsCenterX, 0, -boundsCenterZ]));
                 }
 
                 // Keep a reference to the un-modified base to use as a clipping mask
