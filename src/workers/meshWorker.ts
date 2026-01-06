@@ -443,6 +443,10 @@ self.onmessage = async (e: MessageEvent) => {
                     base = collect(Manifold.cube([width, thickness, depth], true));
                 }
 
+                // Keep a reference to the un-modified base to use as a clipping mask
+                // Because Manifold operations return NEW objects, this reference remains "pure"
+                const boundaryMask = base;
+
                 // 2. Flatten Shapes
                 const flatShapes = flattenShapes(footprint, footprint.shapes, allFootprints, params);
                 
@@ -673,6 +677,12 @@ self.onmessage = async (e: MessageEvent) => {
                         }
                     });
                 });
+
+                // --- FINAL CLIPPING STEP ---
+                // This ensures any "leaking" geometry from fillets or re-adds 
+                // is perfectly trimmed to the original board outline.
+                report(`Clipping to board boundary...`, 0.92);
+                base = collect(manifoldModule.Manifold.intersection(base, boundaryMask));
 
                 report(`Finalizing mesh for ${layerStr}...`, 0.95);
 
