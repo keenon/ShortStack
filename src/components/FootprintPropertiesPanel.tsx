@@ -26,6 +26,7 @@ const FootprintPropertiesPanel = ({
   onConvertShape,
   onGroup,
   onUngroup,
+  onBatchUpdate, // NEW: For mass locking
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -47,6 +48,7 @@ const FootprintPropertiesPanel = ({
   onConvertShape?: (oldId: string, newShape: FootprintShape) => void;
   onGroup?: () => void;
   onUngroup?: (id: string) => void;
+  onBatchUpdate?: (updates: {id: string, field: string, value: any}[]) => void;
 }) => {
   
   // Get available wire guides for Snapping
@@ -79,11 +81,30 @@ const FootprintPropertiesPanel = ({
   );
 
   if (selectedShapeIds.length > 1) {
+    const handleBatchLock = (locked: boolean) => {
+        if (!onBatchUpdate) return;
+        const updates = selectedShapeIds.map(id => ({
+            id,
+            field: "locked",
+            value: locked
+        }));
+        onBatchUpdate(updates);
+    };
+
     return (
         <div className="properties-panel">
             <h3>Multiple shapes selected</h3>
             <p>{selectedShapeIds.length} items</p>
             
+            <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+                <button className="secondary" style={{flex: 1, fontSize: '0.9em'}} onClick={() => handleBatchLock(true)}>
+                    🔒 Lock All
+                </button>
+                <button className="secondary" style={{flex: 1, fontSize: '0.9em'}} onClick={() => handleBatchLock(false)}>
+                    🔓 Unlock All
+                </button>
+            </div>
+
             <div className="prop-group">
                 <button onClick={onGroup} style={{ width: '100%', padding: '12px' }}>
                     Union

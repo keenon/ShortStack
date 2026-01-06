@@ -2114,6 +2114,27 @@ const handleUngroup = (unionId: string) => {
       }
   };
 
+  const handleBatchUpdate = (updates: {id: string, field: string, value: any}[]) => {
+      const updateMap = new Map<string, any>();
+      updates.forEach(u => {
+          if(!updateMap.has(u.id)) updateMap.set(u.id, {});
+          const record = updateMap.get(u.id);
+          record[u.field] = u.value;
+      });
+
+      const newShapes = footprint.shapes.map(s => {
+          if (updateMap.has(s.id)) {
+              return { ...s, ...updateMap.get(s.id) };
+          }
+          return s;
+      });
+      
+      updateHistory({ 
+          footprint: { ...footprint, shapes: newShapes }, 
+          selectedShapeIds: selectedShapeIds 
+      });
+  };
+
   return (
     <div className="footprint-editor-container">
       {/* PROCESSING OVERLAY */}
@@ -2397,6 +2418,7 @@ const handleUngroup = (unionId: string) => {
                 onConvertShape={convertShape}
                 onGroup={handleGroup}
                 onUngroup={handleUngroup}
+                onBatchUpdate={handleBatchUpdate}
               />
               {activeShape && (
                 <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>
