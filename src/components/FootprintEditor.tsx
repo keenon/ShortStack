@@ -1558,6 +1558,10 @@ const handleUngroup = (unionId: string) => {
 
   // --- ACTIONS ---
   const addShape = (type: "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon" | "text", footprintId?: string) => {
+    // Calculate the current center of the viewport in Math Space
+    const centerMathX = (viewBox.x + viewBox.width / 2).toFixed(2);
+    const centerMathY = (-(viewBox.y + viewBox.height / 2)).toFixed(2);
+
     const base = { id: crypto.randomUUID(), name: `New ${type}`, assignedLayers: {}, };
     let newShape: FootprintShape;
 
@@ -1567,31 +1571,31 @@ const handleUngroup = (unionId: string) => {
          newShape = {
              ...base,
              type: "footprint",
-             x: "0", y: "0", angle: "0",
+             x: centerMathX, y: centerMathY, angle: "0",
              footprintId,
              name: targetFp?.name || "Ref"
          } as FootprintReference;
     } else if (type === "circle") {
-      newShape = { ...base, type: "circle", x: "0", y: "0", diameter: "10" };
+      newShape = { ...base, type: "circle", x: centerMathX, y: centerMathY, diameter: "10" };
     } else if (type === "text") {
         newShape = { 
             ...base, 
             type: "text", 
-            x: "0", y: "0", angle: "0", 
+            x: centerMathX, y: centerMathY, angle: "0", 
             text: "New Comment", 
             fontSize: "5", 
             anchor: "start" 
         } as FootprintText;
     } else if (type === "rect") {
-      newShape = { ...base, type: "rect", x: "0", y: "0", width: "10", height: "10", angle: "0", cornerRadius: "0" };
+      newShape = { ...base, type: "rect", x: centerMathX, y: centerMathY, width: "10", height: "10", angle: "0", cornerRadius: "0" };
     } else if (type === "wireGuide") {
-      newShape = { ...base, type: "wireGuide", x: "0", y: "0", name: "Wire Guide" } as FootprintWireGuide;
+      newShape = { ...base, type: "wireGuide", x: centerMathX, y: centerMathY, name: "Wire Guide" } as FootprintWireGuide;
     } else if (type === "boardOutline") {
-      newShape = { ...base, type: "boardOutline", x: "0", y: "0", name: "Board Outline", points: [{ id: crypto.randomUUID(), x: "-10", y: "-10" }, { id: crypto.randomUUID(), x: "10", y: "-10" }, { id: crypto.randomUUID(), x: "10", y: "10" }, { id: crypto.randomUUID(), x: "-10", y: "10" }] } as FootprintBoardOutline;
+      newShape = { ...base, type: "boardOutline", x: centerMathX, y: centerMathY, name: "Board Outline", points: [{ id: crypto.randomUUID(), x: "-10", y: "-10" }, { id: crypto.randomUUID(), x: "10", y: "-10" }, { id: crypto.randomUUID(), x: "10", y: "10" }, { id: crypto.randomUUID(), x: "-10", y: "10" }] } as FootprintBoardOutline;
     } else if (type === "polygon") {
-      newShape = { ...base, type: "polygon", x: "0", y: "0", name: "Polygon", points: [{ id: crypto.randomUUID(), x: "0", y: "10" }, { id: crypto.randomUUID(), x: "10", y: "-10" }, { id: crypto.randomUUID(), x: "-10", y: "-10" }] } as FootprintPolygon;
+      newShape = { ...base, type: "polygon", x: centerMathX, y: centerMathY, name: "Polygon", points: [{ id: crypto.randomUUID(), x: "0", y: "10" }, { id: crypto.randomUUID(), x: "10", y: "-10" }, { id: crypto.randomUUID(), x: "-10", y: "-10" }] } as FootprintPolygon;
     } else {
-      newShape = { ...base, type: "line", thickness: "1", x: "0", y: "0", points: [{ id: crypto.randomUUID(), x: "0", y: "0" }, { id: crypto.randomUUID(), x: "10", y: "10" }] };
+      newShape = { ...base, type: "line", thickness: "1", x: "0", y: "0", points: [{ id: crypto.randomUUID(), x: centerMathX, y: centerMathY }, { id: crypto.randomUUID(), x: (parseFloat(centerMathX) + 10).toString(), y: (parseFloat(centerMathY) + 10).toString() }] };
     }
 
     // IMPROVEMENT: Always prepend new shapes to the list so they appear on top visually
