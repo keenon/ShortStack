@@ -1,9 +1,17 @@
 // src/components/ParametersEditor.tsx
+import { useState, useRef } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import { Parameter } from "../types";
 import { resolveParameters, dependsOn } from "../utils/footprintUtils";
 import ExpressionEditor from "./ExpressionEditor";
+
+// Helper Icon for the Drag Handle
+const IconGrip = ({ className }: { className?: string }) => (
+    <svg className={className} width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M9 3H11V21H9V3ZM13 3H15V21H13V3Z" />
+    </svg>
+);
 
 interface Props {
   params: Parameter[];
@@ -12,6 +20,10 @@ interface Props {
 
 export default function ParametersEditor({ params, setParams }: Props) {
   
+  // Drag State
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const dragItemIndex = useRef<number | null>(null);
+
   // ACTION: Add a new row
   function addRow() {
     const newParam: Parameter = {
@@ -149,6 +161,39 @@ export default function ParametersEditor({ params, setParams }: Props) {
     }
   }
 
+  // --- DRAG HANDLERS ---
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+      dragItemIndex.current = index;
+      e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDragOver = (e: React.DragEvent, index: number) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      if (dragOverIndex !== index) {
+          setDragOverIndex(index);
+      }
+  };
+
+  const handleDrop = (e: React.DragEvent, dropIndex: number) => {
+      e.preventDefault();
+      const dragIndex = dragItemIndex.current;
+      if (dragIndex !== null && dragIndex !== dropIndex) {
+          const newParams = [...params];
+          const [movedItem] = newParams.splice(dragIndex, 1);
+          newParams.splice(dropIndex, 0, movedItem);
+          // Preserve evaluation correctness
+          setParams(resolveParameters(newParams));
+      }
+      setDragOverIndex(null);
+      dragItemIndex.current = null;
+  };
+
+  const handleDragEnd = () => {
+      setDragOverIndex(null);
+      dragItemIndex.current = null;
+  };
+
   return (
     <div className="editor-content">
       <h2>Parameters Editor</h2>
@@ -162,6 +207,7 @@ export default function ParametersEditor({ params, setParams }: Props) {
       <table>
         <thead>
           <tr>
+            <th style={{ width: "40px" }}></th>
             <th>Key</th>
             <th style={{ width: "40%" }}>Expression</th>
             <th style={{ width: "20%" }}>Resolved Value</th>
@@ -170,7 +216,7 @@ export default function ParametersEditor({ params, setParams }: Props) {
           </tr>
         </thead>
         <tbody>
-          {params.map((item) => {
+          {params.map((item, index) => {
             // Calculate forbidden keys for this parameter (itself + anything that depends on it)
             // If P depends on item.key, then item.key cannot depend on P (Cycle).
             // Forbidden = { item.key } + { P | dependsOn(P.key, item.key) }
@@ -181,8 +227,24 @@ export default function ParametersEditor({ params, setParams }: Props) {
                 .filter(p => p.id === item.id || dependsOn(p.key, item.key, params))
                 .map(p => p.key);
 
+            const isDragTarget = dragOverIndex === index;
+
             return (
-            <tr key={item.id}>
+            <tr 
+                key={item.id}
+                draggable
+                onDragStart={(e) => handleDragStart(e, index)}
+                onDragOver={(e) => handleDragOver(e, index)}
+                onDrop={(e) => handleDrop(e, index)}
+                onDragEnd={handleDragEnd}
+                style={{
+                    borderTop: isDragTarget ? "2px solid #00ffff" : "1px solid #333", // Cyan for drag target
+                    transition: "border-top 0.1s"
+                }}
+            >
+              <td style={{ textAlign: "center", cursor: "grab", color: "#666" }}>
+                <IconGrip />
+              </td>
               <td>
                 <input
                   type="text"
