@@ -1870,6 +1870,21 @@ const handleUngroup = (unionId: string) => {
     const layer = stackup.find(l => l.id === layerId);
     if (!layer) return;
 
+    if (format === "STL") {
+        if (!footprint3DRef.current) {
+            alert("Please switch to 3D View to initialize the mesh before exporting STL.");
+            return;
+        }
+        
+        setProcessingMessage("Computing High Resolution Mesh...");
+        try {
+            await footprint3DRef.current.ensureHighRes();
+        } catch (e) {
+            console.error("High res compute failed", e);
+        }
+        setProcessingMessage(null);
+    }
+
     // 1. Open Save Dialog
     const path = await save({
         defaultPath: `${footprint.name.replace(/[^a-zA-Z0-9]/g, '_')}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_${format.toLowerCase()}.${format.toLowerCase()}`,

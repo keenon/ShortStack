@@ -36,6 +36,8 @@ export interface Footprint3DViewHandle {
     processDroppedFile: (file: File) => Promise<FootprintMesh | null>;
     convertMeshToGlb: (mesh: FootprintMesh) => Promise<FootprintMesh | null>;
     computeUnionOutline: (shapes: FootprintShape[], params: Parameter[], contextFp: Footprint, allFootprints: Footprint[], transform: {x:number, y:number, rotation:number}) => Promise<{x:number, y:number}[][]>;
+    // NEW: Method to force high resolution and wait for worker completion
+    ensureHighRes: () => Promise<void>;
 }
 
 // ------------------------------------------------------------------
@@ -147,8 +149,10 @@ const LayerSolid = ({
   bounds,
   layerIndex,
   totalLayers,
+  resolution, // NEW: Prop
   onProgress,
-  registerMesh
+  registerMesh,
+  onLoad // NEW: Completion callback
 }: {
   layer: StackupLayer;
   footprint: Footprint;
@@ -159,8 +163,10 @@ const LayerSolid = ({
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
   layerIndex: number;
   totalLayers: number;
+  resolution: number;
   onProgress: (id: string, percent: number, msg: string) => void;
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
+  onLoad?: (id: string) => void;
 }) => {
   // Determine Center X/Z to match Worker Logic
   // This ensures the local geometry returned by the worker aligns with the React mesh position
@@ -185,6 +191,7 @@ const LayerSolid = ({
   useEffect(() => {
     if (thickness <= 0.0001) {
         onProgress(layer.id, 1.0, `Layer ${layer.name} skipped`);
+        if(onLoad) onLoad(layer.id);
         return;
     }
     
@@ -203,7 +210,8 @@ const LayerSolid = ({
         thickness, 
         bounds,
         layerIndex,
-        totalLayers
+        totalLayers,
+        resolution
     }, (p) => {
         if (!cancelled && onProgress) {
              onProgress(layer.id, p.percent, p.message);
@@ -222,16 +230,18 @@ const LayerSolid = ({
         }
         // Ensure we hit 100% on success to clear the bar
         onProgress(layer.id, 1.0, `Layer ${layer.name}: Ready`);
+        if(onLoad) onLoad(layer.id);
     }).catch(e => {
         if (cancelled) return;
         console.error(`Layer ${layer.name} compute failed`, e);
         setHasError(true);
         // FORCE COMPLETE ON ERROR to unblock progress bar
         onProgress(layer.id, 1.0, `Layer ${layer.name}: Error`);
+        if(onLoad) onLoad(layer.id);
     });
 
     return () => { cancelled = true; };
-  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds, layerIndex, totalLayers]);
+  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds, layerIndex, totalLayers, resolution]);
 
   return (
     <mesh 
@@ -543,7 +553,15 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   const hasInitiallySnapped = useRef(false);
   const [firstMeshReady, setFirstMeshReady] = useState(false);
   
-  // Flatten meshes once per render cycle
+  // High Res State
+  const [isHighRes, setIsHighRes] = useState(false);
+  // Resolution Values: Low = 12, High = 64
+  const resolution = isHighRes ? 64 : 12;
+
+  // Track pending layers for "ensureHighRes"
+  const pendingLayers = useRef<Set<string>>(new Set());
+  const highResResolver = useRef<(()=>void) | null>(null);
+
   const flattenedMeshes = useMemo(() => flattenMeshes(footprint, allFootprints, params), [footprint, allFootprints, params]);
   
   // Progress State
@@ -577,6 +595,18 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
           }, 800);
       }
   }, [stackup.length, flattenedMeshes]); // Dependency on task count
+
+  // Completion Handler for LayerSolids
+  const handleLayerLoad = useCallback((layerId: string) => {
+      if (pendingLayers.current.has(layerId)) {
+          pendingLayers.current.delete(layerId);
+          // If all pending layers are done, resolve the promise
+          if (pendingLayers.current.size === 0 && highResResolver.current) {
+              highResResolver.current();
+              highResResolver.current = null;
+          }
+      }
+  }, []);
 
   // Reset progress map when structure changes significantly
   useEffect(() => {
@@ -708,6 +738,32 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     // Compute 2D Union Outline for Export
     computeUnionOutline: async (shapes: FootprintShape[], params: Parameter[], contextFp: Footprint, allFootprints: Footprint[], transform: {x:number, y:number, rotation:number}): Promise<{x:number, y:number}[][]> => {
         return await callWorker("computeUnionOutline", { shapes, params, contextFp, allFootprints, transform });
+    },
+    
+    // NEW: Method to force high resolution and wait
+    ensureHighRes: async () => {
+        if (isHighRes) return; // Already high res
+
+        // 1. Initialize tracking
+        pendingLayers.current.clear();
+        stackup.forEach(l => {
+            // Only wait for visible layers that actually generate geometry
+            const isVisible = visibleLayers ? visibleLayers[l.id] !== false : true;
+            const thickness = evaluateExpression(l.thicknessExpression, params);
+            if(isVisible && thickness > 0.0001) {
+                pendingLayers.current.add(l.id);
+            }
+        });
+
+        // 2. Trigger state update
+        setIsHighRes(true);
+
+        // 3. Wait for completion
+        if (pendingLayers.current.size === 0) return;
+        
+        return new Promise<void>((resolve) => {
+            highResResolver.current = resolve;
+        });
     }
   }));
 
@@ -766,6 +822,23 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   return (
     <div style={{ width: "100%", height: "100%", background: "#111", position: 'relative' }}>
       <ProgressBar progress={progress} />
+      
+      {/* High Resolution Checkbox Overlay */}
+      <div style={{ 
+          position: 'absolute', top: 10, left: 10, zIndex: 10, 
+          background: 'rgba(0,0,0,0.6)', padding: '6px 12px', borderRadius: '4px',
+          display: 'flex', alignItems: 'center', gap: '8px', color: '#ccc', fontSize: '0.9em'
+      }}>
+          <input 
+              type="checkbox" 
+              id="highResToggle" 
+              checked={isHighRes} 
+              onChange={(e) => setIsHighRes(e.target.checked)} 
+              style={{ cursor: 'pointer' }}
+          />
+          <label htmlFor="highResToggle" style={{ cursor: 'pointer' }}>High Resolution Mesh</label>
+      </div>
+
       <Canvas 
         camera={{ position: [50, 50, 50], fov: 45, near: 0.1, far: 100000 }}
         frameloop={is3DActive ? "always" : "never"}
@@ -795,6 +868,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                   bounds={bounds}
                   layerIndex={idx}
                   totalLayers={stackup.length}
+                  resolution={resolution} // PASS RESOLUTION
                   onProgress={handleProgress}
                   registerMesh={(id, mesh) => { 
                       if (mesh) {
@@ -804,6 +878,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                         delete meshRefs.current[id]; 
                       }
                   }}
+                  onLoad={handleLayerLoad} // COMPLETE CALLBACK
                 />
               ) : null;
 

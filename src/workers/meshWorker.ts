@@ -74,6 +74,9 @@ function getLineOutlinePoints(
     const halfThick = thickness / 2;
     const pathPoints: THREE.Vector2[] = [];
 
+    // Scale curve fidelity based on resolution
+    const curveDivisions = Math.max(4, Math.ceil(resolution / 2));
+
     for (let i = 0; i < points.length - 1; i++) {
         const currRaw = points[i];
         const nextRaw = points[i+1];
@@ -101,8 +104,7 @@ function getLineOutlinePoints(
                 new THREE.Vector2(x2, y2)
             );
 
-            const divisions = 24; 
-            const sp = curve.getPoints(divisions);
+            const sp = curve.getPoints(curveDivisions);
             if (pathPoints.length > 0) sp.shift();
             sp.forEach(p => pathPoints.push(p));
         } else {
@@ -140,7 +142,8 @@ function getLineOutlinePoints(
     }
 
     const contour: THREE.Vector2[] = [];
-    const arcDivisions = Math.max(4, Math.floor(resolution / 2));
+    // Scale arc divisions based on resolution
+    const arcDivisions = Math.max(3, Math.ceil(resolution / 4));
 
     for (let i = 0; i < leftPts.length; i++) contour.push(leftPts[i]);
 
@@ -178,10 +181,10 @@ function getLineOutlinePoints(
     return contour;
 }
 
-function createLineShape(shape: FootprintLine, params: Parameter[], contextFp: Footprint, allFootprints: Footprint[], thicknessOverride?: number): THREE.Shape | null {
+function createLineShape(shape: FootprintLine, params: Parameter[], contextFp: Footprint, allFootprints: Footprint[], thicknessOverride: number | undefined, resolution: number): THREE.Shape | null {
   const thickVal = thicknessOverride !== undefined ? thicknessOverride : evaluate(shape.thickness, params);
   if (thickVal <= 0) return null;
-  const pts = getLineOutlinePoints(shape, params, thickVal, 12, contextFp, allFootprints);
+  const pts = getLineOutlinePoints(shape, params, thickVal, resolution, contextFp, allFootprints);
   if (pts.length < 3) return null;
   const s = new THREE.Shape();
   s.moveTo(pts[0].x, pts[0].y);
@@ -386,7 +389,7 @@ self.onmessage = async (e: MessageEvent) => {
         else if (type === "computeLayer") {
             if (!manifoldModule) throw new Error("Manifold not initialized");
 
-            const { layer, footprint, allFootprints, params, thickness, bounds, layerIndex, totalLayers } = payload;
+            const { layer, footprint, allFootprints, params, thickness, bounds, layerIndex, totalLayers, resolution = 32 } = payload;
             const { Manifold, CrossSection } = manifoldModule;
             const garbage: any[] = [];
             const collect = <T>(obj: T): T => { if(obj && (obj as any).delete) garbage.push(obj); return obj; };
@@ -427,7 +430,7 @@ self.onmessage = async (e: MessageEvent) => {
                 }
 
                 if (boardShape) {
-                    const cs = collect(shapeToManifold(manifoldModule, boardShape));
+                    const cs = collect(shapeToManifold(manifoldModule, boardShape, resolution));
                     const ext = collect(cs.extrude(thickness));
                     const rotated = collect(ext.rotate([-90, 0, 0]));
                     // Board shape is already at global (0,0), so local transform is just centering Z (height)
@@ -533,7 +536,7 @@ self.onmessage = async (e: MessageEvent) => {
                         let cs = null;
                         if (s.type === "circle") {
                             const d = evaluateExpression((s as any).diameter, params);
-                            if (d > 0) cs = collect(CrossSection.circle(d/2, 32));
+                            if (d > 0) cs = collect(CrossSection.circle(d/2, resolution));
                         } else if (s.type === "rect") {
                             const w = evaluateExpression((s as FootprintRect).width, params);
                             const h = evaluateExpression((s as FootprintRect).height, params);
@@ -542,16 +545,17 @@ self.onmessage = async (e: MessageEvent) => {
                             
                             if (w > 0 && h > 0) {
                                 cs = collect(CrossSection.square([w, h], true));
-                                if (cr > 0.001) cs = collect(cs.offset(-cr, "Round", 8)).offset(cr, "Round", 8);
+                                const segments = Math.max(3, Math.ceil(resolution / 4));
+                                if (cr > 0.001) cs = collect(cs.offset(-cr, "Round", segments)).offset(cr, "Round", segments);
                             }
                         } else if (s.type === "line") {
                             const t = evaluateExpression((s as FootprintLine).thickness, params);
                             const validT = t > 0 ? t : 0.01;
-                            const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT);
-                            if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape));
+                            const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT, resolution);
+                            if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape, resolution));
                         } else if (s.type === "polygon") {
                             const poly = s as FootprintPolygon;
-                            const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, 32);
+                            const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, resolution);
                             if (pts.length > 2) {
                                 cs = collect(new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd"));
                             }
@@ -651,7 +655,7 @@ self.onmessage = async (e: MessageEvent) => {
                                 safeRadius,
                                 primaryItem.contextFp,
                                 allFootprints,
-                                32,
+                                resolution,
                                 componentCS // Use decomposed island
                             );
 
@@ -724,7 +728,7 @@ self.onmessage = async (e: MessageEvent) => {
                     } else if (s.type === "line") {
                         const t = evaluateExpression((s as FootprintLine).thickness, params);
                         const validT = t > 0 ? t : 0.01;
-                        const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT);
+                        const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT, 32);
                         if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape));
                     } else if (s.type === "polygon") {
                         const poly = s as FootprintPolygon;
@@ -866,6 +870,9 @@ function getPolyOutlineWithFeatures(
     const pathPoints: THREE.Vector2[] = [];
     const cornerIndices: number[] = [];
 
+    // Scale resolution for bezier steps
+    const curveDivisions = Math.max(4, Math.ceil(resolution / 2));
+
     for (let i = 0; i < points.length; i++) {
         cornerIndices.push(pathPoints.length);
 
@@ -895,7 +902,7 @@ function getPolyOutlineWithFeatures(
                 new THREE.Vector2(x2, y2)
             );
 
-            const sp = curve.getPoints(resolution);
+            const sp = curve.getPoints(curveDivisions);
             sp.pop(); // Remove end point to avoid duplicate with next start
             sp.forEach(p => pathPoints.push(p));
         } else {
@@ -1241,7 +1248,9 @@ function generateProceduralFillet(
         const wallBottomZ = -(depth - filletRadius);
         steps.push({ z: 0, offset: 0 });
         if (Math.abs(wallBottomZ) > 0.001) steps.push({ z: wallBottomZ, offset: 0 });
-        const filletSteps = 8;
+        
+        // Scale fillet vertical steps by resolution too (coarse preview vs fine export)
+        const filletSteps = Math.max(3, Math.ceil(resolution / 4));
         for(let i=1; i<=filletSteps; i++) {
             const theta = (i / filletSteps) * (Math.PI / 2);
             steps.push({ z: wallBottomZ - Math.sin(theta) * filletRadius, offset: (1 - Math.cos(theta)) * filletRadius });
@@ -1435,7 +1444,10 @@ function generateProceduralFillet(
                 let cr = Math.max(0, crRaw - offset);
                 const limit = Math.min(halfW, halfH);
                 if (cr > limit) cr = limit;
-                const segCorner = 32; 
+                
+                // Use resolution for corner segments
+                const segCorner = Math.max(4, Math.ceil(resolution / 4));
+                
                 const quadrants = [
                     { x: halfW - cr, y: halfH - cr, startAng: 0 },         
                     { x: -halfW + cr, y: halfH - cr, startAng: Math.PI/2 },
@@ -1501,7 +1513,10 @@ function generateProceduralFillet(
         if (Math.abs(wallBottomZ) > 0.001) {
             layers.push({ z: wallBottomZ, offset: 0 });
         }
-        const filletSteps = 8; 
+        
+        // Scale fillet vertical steps by resolution
+        const filletSteps = Math.max(3, Math.ceil(resolution / 4));
+        
         for(let i=1; i<=filletSteps; i++) {
             const theta = (i / filletSteps) * (Math.PI / 2);
             const z = wallBottomZ - Math.sin(theta) * safeR;
