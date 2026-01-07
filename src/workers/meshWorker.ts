@@ -670,8 +670,28 @@ self.onmessage = async (e: MessageEvent) => {
                                 primaryItem.contextFp,
                                 allFootprints,
                                 resolution,
-                                componentCS // Use decomposed island
+                                componentCS
                             );
+
+                            // --- DO NOT DELETE FAILURE HANDLING ---
+                            if (result && !result.manifold) {
+                                // If the tool failed to become a manifold, we send the raw tool geometry
+                                // back to the main thread immediately so the user can see what's wrong.
+                                report(`Error: Manifold failure on ${shapeName}`, 1.0);
+                                
+                                self.postMessage({ 
+                                    id, type: "success", 
+                                    payload: { 
+                                        vertProperties: result.vertProperties, 
+                                        triVerts: result.triVerts,
+                                        isFailedTool: true, // Flag for the renderer
+                                        errorShapeName: shapeName
+                                    } 
+                                });
+                                // We throw to break out of the disjointComponents loop 
+                                // and stop processing this layer further.
+                                throw new Error(`Stopped: Manifold failure on ${shapeName}`);
+                            }
 
                             if (result && result.manifold) {
                                 const toolFillet = collect(result.manifold);

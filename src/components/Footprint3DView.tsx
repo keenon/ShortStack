@@ -179,6 +179,7 @@ const LayerSolid = ({
 
   const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [hasError, setHasError] = useState(false);
+  const [isFailedTool, setIsFailedTool] = useState(false);
 
   useEffect(() => {
     if (thickness <= 0.0001) {
@@ -189,6 +190,7 @@ const LayerSolid = ({
     
     let cancelled = false;
     setHasError(false);
+    setIsFailedTool(false);
 
     // Initial Progress
     onProgress(layer.id, 0.01, `Layer ${layer.name}: Queued...`);
@@ -220,8 +222,15 @@ const LayerSolid = ({
         } else {
             setGeometry(null);
         }
+        
         // Ensure we hit 100% on success to clear the bar
-        onProgress(layer.id, 1.0, `Layer ${layer.name}: Ready`);
+        if (data.isFailedTool) {
+            setIsFailedTool(true);
+            onProgress(layer.id, 1.0, `Geometry Error: ${data.errorShapeName}`);
+        } else {
+            onProgress(layer.id, 1.0, `Layer ${layer.name}: Ready`);
+        }
+        
         if(onLoad) onLoad(layer.id);
     }).catch(e => {
         if (cancelled) return;
@@ -243,9 +252,9 @@ const LayerSolid = ({
         frustumCulled={false}
     >
       <meshStandardMaterial 
-          color={hasError ? "#ff6666" : layer.color} 
+          color={isFailedTool ? "#ff0000" : (hasError ? "#ff6666" : layer.color)} 
           transparent={true} 
-          opacity={hasError ? 1.0 : 0.9} 
+          opacity={0.9} 
           flatShading 
           side={THREE.FrontSide} 
           polygonOffset
