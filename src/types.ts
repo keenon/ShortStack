@@ -26,6 +26,7 @@ export type ShapeType = "circle" | "rect" | "line" | "footprint" | "wireGuide" |
 export interface LayerAssignment {
     depth: string;
     endmillRadius: string;
+    inputFillet?: string; // Expression for top fillet/chamfer radius
 }
 
 export interface BaseShape {

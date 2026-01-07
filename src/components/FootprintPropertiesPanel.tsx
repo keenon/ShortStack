@@ -430,6 +430,14 @@ const FootprintPropertiesPanel = ({
                                                     }} params={params} placeholder="Depth" />
                                             </div>
                                             <div style={{ flex: 1 }}>
+                                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Input Fillet</div>
+                                                <ExpressionEditor value={assignment.inputFillet || "0"} onChange={(val) => {
+                                                        const newAssignments = { ...shape.assignedLayers };
+                                                        newAssignments[layer.id] = { ...assignment, inputFillet: val };
+                                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                                    }} params={params} placeholder="0" />
+                                            </div>
+                                            <div style={{ flex: 1 }}>
                                                 <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Ball-nose Endmill Radius</div>
                                                 <ExpressionEditor value={assignment.endmillRadius} onChange={(val) => {
                                                         const newAssignments = { ...shape.assignedLayers };
@@ -805,6 +813,14 @@ const FootprintPropertiesPanel = ({
                                                     }} params={params} placeholder="Depth" />
                                             </div>
                                             <div style={{ flex: 1 }}>
+                                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Override Input Fillet</div>
+                                                <ExpressionEditor value={assignment.inputFillet || "0"} onChange={(val) => {
+                                                        const newAssignments = { ...shape.assignedLayers };
+                                                        newAssignments[layer.id] = { ...assignment, inputFillet: val };
+                                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                                    }} params={params} placeholder="0" />
+                                            </div>
+                                            <div style={{ flex: 1 }}>
                                                 <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Override Endmill Radius</div>
                                                 <ExpressionEditor value={assignment.endmillRadius} onChange={(val) => {
                                                         const newAssignments = { ...shape.assignedLayers };
@@ -885,6 +901,14 @@ const FootprintPropertiesPanel = ({
                                         newAssignments[layer.id] = { ...assignment, depth: val };
                                         updateShape(shape.id, "assignedLayers", newAssignments);
                                     }} params={params} placeholder="Depth" />
+                            </div>
+                            <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Input Fillet</div>
+                                <ExpressionEditor value={assignment.inputFillet || "0"} onChange={(val) => {
+                                        const newAssignments = { ...shape.assignedLayers };
+                                        newAssignments[layer.id] = { ...assignment, inputFillet: val };
+                                        updateShape(shape.id, "assignedLayers", newAssignments);
+                                    }} params={params} placeholder="0" />
                             </div>
                             <div style={{ flex: 1 }}>
                                 <div style={{ fontSize: '0.7em', color: '#888', marginBottom: '2px' }}>Ball-nose Endmill Radius</div>
