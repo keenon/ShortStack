@@ -14,7 +14,11 @@ import * as THREE from "three";
 import './FootprintEditor.css';
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
-let GLOBAL_CLIPBOARD: { type: "shapes" | "meshes", data: any[] } | null = null;
+let GLOBAL_CLIPBOARD: { 
+  type: "shapes" | "meshes", 
+  sourceFootprintId: string, // Added this
+  data: any[] 
+} | null = null;
 
 interface Props {
   footprint: Footprint;
@@ -1073,7 +1077,11 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
     // Check Shapes: Filter preserves the internal Z-order from footprint.shapes
     const selectedShapes = footprint.shapes.filter(s => selectedShapeIds.includes(s.id));
     if (selectedShapes.length > 0) {
-        GLOBAL_CLIPBOARD = { type: "shapes", data: JSON.parse(JSON.stringify(selectedShapes)) };
+        GLOBAL_CLIPBOARD = { 
+            type: "shapes", 
+            sourceFootprintId: footprint.id, // Store source context
+            data: JSON.parse(JSON.stringify(selectedShapes)) 
+        };
         return;
     }
 
@@ -1081,7 +1089,11 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
     if (footprint.meshes) {
         const selectedMeshes = footprint.meshes.filter(m => selectedShapeIds.includes(m.id));
         if (selectedMeshes.length > 0) {
-            GLOBAL_CLIPBOARD = { type: "meshes", data: JSON.parse(JSON.stringify(selectedMeshes)) };
+            GLOBAL_CLIPBOARD = { 
+                type: "meshes", 
+                sourceFootprintId: footprint.id, // Store source context
+                data: JSON.parse(JSON.stringify(selectedMeshes)) 
+            };
             return;
         }
     }
@@ -1089,7 +1101,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
   const handlePaste = useCallback(() => {
     if (!GLOBAL_CLIPBOARD) return;
-    const { type, data } = GLOBAL_CLIPBOARD;
+    const { type, data, sourceFootprintId } = GLOBAL_CLIPBOARD;
 
     if (!Array.isArray(data)) return;
 
@@ -1147,19 +1159,38 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
         newItems.push(newItem);
     });
 
-    // 6. Add to Footprint (Prepend to appear on top)
+    // 2. CALCULATE INSERTION INDEX
+    let insertionIndex = 0; // Default: top of the list
+    
+    if (sourceFootprintId === footprint.id) {
+        // Find the index of the "highest" (first in array) original item 
+        // that still exists in the footprint
+        const sourceIds = data.map((d: any) => d.id);
+        const foundIndex = (type === "shapes" ? footprint.shapes : (footprint.meshes || []))
+            .findIndex(item => sourceIds.includes(item.id));
+        
+        if (foundIndex !== -1) {
+            insertionIndex = foundIndex;
+        }
+    }
+
+    // 3. Insert into the array at the calculated index
     if (type === "shapes") {
+        const nextShapes = [...footprint.shapes];
+        nextShapes.splice(insertionIndex, 0, ...newItems);
         updateHistory({ 
-            footprint: { ...footprint, shapes: [...newItems, ...footprint.shapes] }, 
+            footprint: { ...footprint, shapes: nextShapes }, 
             selectedShapeIds: newIds 
         });
     } else if (type === "meshes") {
+        const nextMeshes = [...(footprint.meshes || [])];
+        nextMeshes.splice(insertionIndex, 0, ...newItems);
         updateHistory({ 
-            footprint: { ...footprint, meshes: [...newItems, ...(footprint.meshes || [])] }, 
+            footprint: { ...footprint, meshes: nextMeshes }, 
             selectedShapeIds: newIds 
         });
     }
-  }, [footprint, editorState, updateHistory]);
+  }, [footprint, updateHistory]);
 
   const handleDuplicate = useCallback(() => {
     if (selectedShapeIds.length > 0) {
