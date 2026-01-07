@@ -192,6 +192,68 @@ function App() {
         const assetMap = new Map<string, string>(); // content -> id
         rawMeshAssets.forEach(asset => assetMap.set(asset.content, asset.id));
 
+        // Recursive Helper for Shape Sanitization
+        const sanitizeShape = (s: any): FootprintShape => {
+            if (!s.id || !s.assignedLayers || s.name === undefined) needsUpgrade = true;
+            
+            // Normalize Assigned Layers
+            const rawLayers = s.assignedLayers || {};
+            const assignedLayers: Record<string, LayerAssignment> = {};
+            Object.entries(rawLayers).forEach(([k, v]) => {
+                if (typeof v === "string") {
+                    assignedLayers[k] = { depth: v, endmillRadius: "0", inputFillet: "0" };
+                    needsUpgrade = true;
+                } else {
+                    const obj = v as any;
+                    assignedLayers[k] = { 
+                        depth: obj.depth || "0", 
+                        endmillRadius: obj.endmillRadius || "0",
+                        inputFillet: obj.inputFillet || "0"
+                    };
+                }
+            });
+
+            // MIGRATION: Convert legacy Wire Guide handles to single handle
+            if (s.type === "wireGuide") {
+                const wg = s as any;
+                if (!wg.handle && (wg.handleOut || wg.handleIn)) {
+                    s.handle = wg.handleOut || { x: "5", y: "0" };
+                    delete s.handleOut;
+                    delete s.handleIn;
+                    needsUpgrade = true;
+                }
+            }
+
+            const baseShape: any = {
+              ...s,
+              id: s.id || crypto.randomUUID(),
+              name: s.name || "Unnamed Shape",
+              locked: !!s.locked,
+              assignedLayers: assignedLayers,
+              x: s.x ?? "0",
+              y: s.y ?? "0",
+            };
+
+            if (s.type === "rect") {
+              if (s.angle === undefined) { needsUpgrade = true; baseShape.angle = "0"; }
+              baseShape.width = s.width ?? "10";
+              baseShape.height = s.height ?? "10";
+              baseShape.cornerRadius = s.cornerRadius ?? "0";
+            } else if (s.type === "circle") {
+              baseShape.diameter = s.diameter ?? "10";
+            } else if (s.type === "boardOutline") {
+              baseShape.points = s.points || [];
+            } else if (s.type === "union") {
+              // RECURSION FIX: Sanitize shapes nested inside unions
+              baseShape.shapes = (s.shapes || []).map((child: any) => sanitizeShape(child));
+              if (s.angle === undefined) { needsUpgrade = true; baseShape.angle = "0"; }
+            } else if (s.type === "text") {
+              if (s.angle === undefined) { needsUpgrade = true; baseShape.angle = "0"; }
+            }
+            
+            return baseShape as FootprintShape;
+        };
+
         // Sanitize Footprints
         const newFootprints: Footprint[] = rawFootprints.map((fp: any) => {
           if (!fp.id || !fp.shapes) needsUpgrade = true;
@@ -228,57 +290,8 @@ function App() {
               });
           }
 
-          const sanitizedShapes = (processedShapes || []).map((s: any) => {
-            if (!s.id || !s.assignedLayers || s.name === undefined) needsUpgrade = true;
-            
-            // Normalize Assigned Layers
-            const rawLayers = s.assignedLayers || {};
-            const assignedLayers: Record<string, LayerAssignment> = {};
-            Object.entries(rawLayers).forEach(([k, v]) => {
-                if (typeof v === "string") {
-                    assignedLayers[k] = { depth: v, endmillRadius: "0" };
-                    needsUpgrade = true;
-                } else {
-                    const obj = v as any;
-                    assignedLayers[k] = { 
-                        depth: obj.depth || "0", 
-                        endmillRadius: obj.endmillRadius || "0" 
-                    };
-                }
-            });
-
-            // MIGRATION: Convert legacy Wire Guide handles to single handle
-            if (s.type === "wireGuide") {
-                const wg = s as any;
-                if (!wg.handle && (wg.handleOut || wg.handleIn)) {
-                    s.handle = wg.handleOut || { x: "5", y: "0" };
-                    delete s.handleOut;
-                    delete s.handleIn;
-                    needsUpgrade = true;
-                }
-            }
-
-            const baseShape = {
-              ...s,
-              id: s.id || crypto.randomUUID(),
-              name: s.name || "Unnamed Shape",
-              locked: !!s.locked,
-              assignedLayers: assignedLayers,
-              x: s.x ?? "0",
-              y: s.y ?? "0",
-            };
-            if (s.type === "rect") {
-              if (s.angle === undefined) { needsUpgrade = true; baseShape.angle = "0"; }
-              baseShape.width = s.width ?? "10";
-              baseShape.height = s.height ?? "10";
-              baseShape.cornerRadius = s.cornerRadius ?? "0";
-            } else if (s.type === "circle") {
-              baseShape.diameter = s.diameter ?? "10";
-            } else if (s.type === "boardOutline") {
-              baseShape.points = s.points || [];
-            }
-            return baseShape as FootprintShape;
-          });
+          // Apply Recursive Sanitization
+          const sanitizedShapes = (processedShapes || []).map((s: any) => sanitizeShape(s));
 
           // LEGACY MESH MIGRATION
           const processedMeshes = (fp.meshes || []).map((m: any) => {
