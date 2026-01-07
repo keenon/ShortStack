@@ -5,7 +5,7 @@ import { OrbitControls, Grid, GizmoHelper, GizmoViewport, TransformControls, Edg
 import * as THREE from "three";
 import { Footprint, Parameter, StackupLayer, FootprintMesh, FootprintReference, FootprintUnion, MeshAsset, FootprintBoardOutline, FootprintShape } from "../types";
 import { mergeVertices } from "three-stdlib";
-import { evaluateExpression, resolvePoint, modifyExpression } from "../utils/footprintUtils";
+import { evaluateExpression, resolvePoint, modifyExpression, getTransformAlongLine } from "../utils/footprintUtils";
 
 // WORKER IMPORT
 import MeshWorker from "../workers/meshWorker?worker";
@@ -350,6 +350,36 @@ function flattenMeshes(
                      ancestorRefId || ref.id
                  ));
              }
+        } else if (s.type === "line") {
+            // Handle Tie Downs on Lines
+            const line = s as any; // FootprintLine
+            if (line.tieDowns && line.tieDowns.length > 0) {
+                line.tieDowns.forEach((td: any) => {
+                    const child = allFootprints.find(f => f.id === td.footprintId);
+                    if (child) {
+                        const dist = evaluate(td.distance, params);
+                        const rotOffset = evaluate(td.angle, params);
+                        
+                        const tf = getTransformAlongLine(line, dist, params, rootFp, allFootprints);
+                        if (tf) {
+                            const finalAngle = tf.angle - 90 + rotOffset;
+                            const tdMat = new THREE.Matrix4();
+                            tdMat.makeRotationY(finalAngle * Math.PI / 180);
+                            tdMat.setPosition(tf.x, 0, -tf.y); 
+                            
+                            const globalTdMat = transform.clone().multiply(tdMat);
+                            
+                            result = result.concat(flattenMeshes(
+                                child,
+                                allFootprints,
+                                params,
+                                globalTdMat,
+                                ancestorRefId 
+                            ));
+                        }
+                    }
+                });
+            }
         } else if (s.type === "union") {
              const u = s as FootprintUnion;
              const x = evaluate(u.x, params);

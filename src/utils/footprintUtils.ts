@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import * as math from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine } from "../types";
 
 export function modifyExpression(expression: string, delta: number): string {
   if (delta === 0) return expression;
@@ -1196,6 +1196,159 @@ export function rotatePoint(
 /**
  * Calculates the bounding box of the entire footprint in Visual Coordinates.
  */
+
+// Calculate point and tangent at specific distance along a polyline/bezier path
+// Cubic Bezier Derivative (1st derivative)
+function bezierDerivative(p0: number, p1: number, p2: number, p3: number, t: number): number {
+    const mt = 1 - t;
+    return 3 * mt * mt * (p1 - p0) + 
+           6 * mt * t * (p2 - p1) + 
+           3 * t * t * (p3 - p2);
+}
+
+// Linear Interpolation for Angles (Degrees) handling wrap-around (-180 to 180)
+function lerpAngle(a: number, b: number, t: number): number {
+    const diff = b - a;
+    const wrappedDiff = ((diff + 180) % 360) - 180;
+    return a + wrappedDiff * t;
+}
+
+interface PathTransform {
+    x: number;
+    y: number;
+    angle: number; // In degrees, standard math (CCW from East)
+}
+
+// NEW: Calculate point and tangent at specific distance along a polyline/bezier path
+// Uses 1st order interpolation for angles to prevent "chunky" rotation when sliding.
+export function getTransformAlongLine(
+    shape: FootprintLine,
+    distanceParam: number,
+    params: Parameter[],
+    contextFp: Footprint,
+    allFootprints: Footprint[]
+): PathTransform | null {
+    const points = shape.points;
+    if (points.length < 2) return null;
+
+    // 1. Discretize the entire path into linear segments
+    // We store startAngle AND endAngle for interpolation
+    const segments: { 
+        x: number, y: number, 
+        dist: number, 
+        len: number,
+        angleStart: number, 
+        angleEnd: number 
+    }[] = [];
+    
+    let totalLength = 0;
+    
+    // Helper to push segment with explicit angles
+    const addSeg = (p1: {x:number, y:number}, p2: {x:number, y:number}, angStart: number, angEnd: number) => {
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const len = Math.sqrt(dx*dx + dy*dy);
+        if (len === 0) return;
+        
+        segments.push({
+            x: p1.x,
+            y: p1.y,
+            dist: totalLength,
+            len: len,
+            angleStart: angStart,
+            angleEnd: angEnd
+        });
+        totalLength += len;
+    };
+
+    const STEPS = 20; // Increase this for higher position fidelity
+
+    for(let i=0; i<points.length-1; i++) {
+        const curr = resolvePoint(points[i], contextFp, allFootprints, params);
+        const next = resolvePoint(points[i+1], contextFp, allFootprints, params);
+
+        if (curr.handleOut || next.handleIn) {
+            const p0 = curr;
+            const p3 = next;
+            const p1 = { x: p0.x + (p0.handleOut?.x||0), y: p0.y + (p0.handleOut?.y||0) };
+            const p2 = { x: p3.x + (p3.handleIn?.x||0), y: p3.y + (p3.handleIn?.y||0) };
+
+            let prevBez = p0;
+            
+            // Calculate initial tangent for t=0
+            const dx0 = bezierDerivative(p0.x, p1.x, p2.x, p3.x, 0);
+            const dy0 = bezierDerivative(p0.y, p1.y, p2.y, p3.y, 0);
+            let prevAngle = Math.atan2(dy0, dx0) * (180 / Math.PI);
+
+            for(let s=1; s<=STEPS; s++) {
+                const t = s/STEPS;
+                
+                // Position
+                const tx = bezier1D(p0.x, p1.x, p2.x, p3.x, t);
+                const ty = bezier1D(p0.y, p1.y, p2.y, p3.y, t);
+                const currentBez = { x: tx, y: ty };
+                
+                // Exact Derivative Tangent at t (End of this micro-segment)
+                const dxt = bezierDerivative(p0.x, p1.x, p2.x, p3.x, t);
+                const dyt = bezierDerivative(p0.y, p1.y, p2.y, p3.y, t);
+                
+                // Safety check for zero derivative (e.g., overlapping handles)
+                let currentAngle = prevAngle; 
+                if (Math.abs(dxt) > 1e-5 || Math.abs(dyt) > 1e-5) {
+                    currentAngle = Math.atan2(dyt, dxt) * (180 / Math.PI);
+                }
+
+                addSeg(prevBez, currentBez, prevAngle, currentAngle);
+                
+                prevBez = currentBez;
+                prevAngle = currentAngle;
+            }
+        } else {
+            // Straight line: Constant Angle
+            const dx = next.x - curr.x;
+            const dy = next.y - curr.y;
+            const ang = Math.atan2(dy, dx) * (180 / Math.PI);
+            addSeg(curr, next, ang, ang);
+        }
+    }
+
+    // 2. Clamp distance
+    const d = Math.max(0, Math.min(distanceParam, totalLength));
+
+    // 3. Find Segment
+    for(let i=segments.length-1; i>=0; i--) {
+        const seg = segments[i];
+        if (d >= seg.dist - 0.0001) { 
+            const remaining = d - seg.dist;
+            const ratio = Math.min(1, Math.max(0, remaining / seg.len));
+            
+            // Interpolate Angle (Smooth rotation)
+            const angle = lerpAngle(seg.angleStart, seg.angleEnd, ratio);
+            
+            // Interpolate Position (Linear walk along chord)
+            // We find the endpoint of the current segment to lerp position
+            let nextX, nextY;
+            if (i < segments.length - 1) {
+                nextX = segments[i+1].x;
+                nextY = segments[i+1].y;
+            } else {
+                // Fallback for the very last segment: project based on length
+                // (or just assume the segment is valid and calculate vector)
+                const rad = seg.angleEnd * (Math.PI / 180);
+                nextX = seg.x + Math.cos(rad) * seg.len;
+                nextY = seg.y + Math.sin(rad) * seg.len;
+            }
+            
+            const x = seg.x + (nextX - seg.x) * ratio;
+            const y = seg.y + (nextY - seg.y) * ratio;
+            
+            return { x, y, angle };
+        }
+    }
+
+    return null;
+}
+
 export function getFootprintAABB(
     footprint: Footprint,
     params: Parameter[],

@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
@@ -2691,9 +2691,36 @@ async function collectExportShapesAsync(
                  result.push(exportObj);
              } else if (shape.type === "line") {
                 exportObj.shape_type = "line";
-                exportObj.thickness = evaluateExpression((shape as FootprintLine).thickness, params);
-                
                 const lineShape = shape as FootprintLine;
+                exportObj.thickness = evaluateExpression(lineShape.thickness, params);
+                
+                // NEW: Export Tie Downs
+                if (lineShape.tieDowns) {
+                    for (const td of lineShape.tieDowns) {
+                        const target = allFootprints.find(f => f.id === td.footprintId);
+                        if (target) {
+                            const dist = evaluateExpression(td.distance, params);
+                            const rotOffset = evaluateExpression(td.angle, params);
+                            
+                            const tf = getTransformAlongLine(lineShape, dist, params, contextFootprint, allFootprints);
+                            if (tf) {
+                                const rx = tf.x * cos - tf.y * sin;
+                                const ry = tf.x * sin + tf.y * cos;
+                                
+                                const tdGx = gx + rx;
+                                const tdGy = gy + ry;
+                                const tdAngle = transform.angle + (tf.angle - 90 + rotOffset);
+                                
+                                const children = await collectExportShapesAsync(
+                                    target, target.shapes, allFootprints, params, layer, layerThickness, viewRef,
+                                    { x: tdGx, y: tdGy, angle: tdAngle }, forceInclude
+                                );
+                                result = result.concat(children);
+                            }
+                        }
+                    }
+                }
+
                 exportObj.points = lineShape.points.map(p => {
                     // 1. Resolve point in the context of the footprint where it resides
                     const resolved = resolvePoint(p, contextFootprint, allFootprints, params);

@@ -12,3 +12,5 @@ src-tauri/gen/
 Thumbs.db
 
 signing-certs/
+
+apply_changes.py

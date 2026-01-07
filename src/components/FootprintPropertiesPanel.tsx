@@ -1,9 +1,9 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
 import { Fragment, useMemo, useRef, useEffect } from "react";
-import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion, FootprintText } from "../types";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion, FootprintText, TieDown } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints } from "../utils/footprintUtils";
+import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints, getTransformAlongLine } from "../utils/footprintUtils";
 
 const FootprintPropertiesPanel = ({
   footprint,
@@ -57,6 +57,37 @@ const FootprintPropertiesPanel = ({
 
   // NEW: Refs for scrolling
   const rowRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  // Helper to manage Tie Downs
+  const addTieDown = (lineId: string, currentTieDowns: TieDown[] = []) => {
+      const last = currentTieDowns[currentTieDowns.length - 1];
+      let newDistExpr = "20";
+      let newFpId = allFootprints.length > 0 ? allFootprints[0].id : "";
+      let newAngle = "0";
+
+      if (last) {
+          newFpId = last.footprintId;
+          newAngle = last.angle;
+          newDistExpr = modifyExpression(last.distance, 20);
+      }
+
+      const newTD: TieDown = {
+          id: crypto.randomUUID(),
+          footprintId: newFpId,
+          distance: newDistExpr,
+          angle: newAngle
+      };
+      updateShape(lineId, "tieDowns", [...currentTieDowns, newTD]);
+  };
+
+  const updateTieDown = (lineId: string, tdId: string, field: keyof TieDown, val: string, currentTieDowns: TieDown[]) => {
+      const newArr = currentTieDowns.map(td => td.id === tdId ? { ...td, [field]: val } : td);
+      updateShape(lineId, "tieDowns", newArr);
+  };
+
+  const removeTieDown = (lineId: string, tdId: string, currentTieDowns: TieDown[]) => {
+      updateShape(lineId, "tieDowns", currentTieDowns.filter(td => td.id !== tdId));
+  };
 
   // NEW: Effect to scroll to point
   useEffect(() => {
@@ -987,6 +1018,50 @@ const FootprintPropertiesPanel = ({
             <div className="prop-group">
                 <label>Thickness</label>
                 <ExpressionEditor value={(shape as FootprintLine).thickness} onChange={(val) => updateShape(shape.id, "thickness", val)} params={params} placeholder="1" />
+            </div>
+
+            {/* NEW: Tie Downs Section */}
+            <div className="prop-section">
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'10px'}}>
+                    <h4>Wire Tie Downs</h4>
+                    <button className="secondary small-btn" style={{marginTop:0, padding:'2px 8px'}} onClick={() => addTieDown(shape.id, (shape as FootprintLine).tieDowns)}>+</button>
+                </div>
+                
+                <div className="points-list-container">
+                    {((shape as FootprintLine).tieDowns || []).map((td, idx) => (
+                        <div key={td.id} className="point-block">
+                            <div className="point-header">
+                                <span>Tie Down {idx + 1}</span>
+                                <button className="icon-btn danger" onClick={() => removeTieDown(shape.id, td.id, (shape as FootprintLine).tieDowns!)}>×</button>
+                            </div>
+                            
+                            <div className="point-row full" style={{marginBottom:'5px'}}>
+                                <select 
+                                    value={td.footprintId} 
+                                    onChange={(e) => updateTieDown(shape.id, td.id, "footprintId", e.target.value, (shape as FootprintLine).tieDowns!)}
+                                    style={{width:'100%', background:'#333', border:'1px solid #555', color:'white'}}
+                                >
+                                    <option value="" disabled>Select Footprint...</option>
+                                    {allFootprints.map(fp => (
+                                        <option key={fp.id} value={fp.id}>{fp.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div className="handle-inputs">
+                                <div className="mini-input">
+                                    <span>Dist (mm)</span>
+                                    <ExpressionEditor value={td.distance} onChange={(v) => updateTieDown(shape.id, td.id, "distance", v, (shape as FootprintLine).tieDowns!)} params={params} />
+                                </div>
+                                <div className="mini-input">
+                                    <span>Rot (deg)</span>
+                                    <ExpressionEditor value={td.angle} onChange={(v) => updateTieDown(shape.id, td.id, "angle", v, (shape as FootprintLine).tieDowns!)} params={params} />
+                                </div>
+                            </div>
+                        </div>
+                    ))}
+                    {(!(shape as FootprintLine).tieDowns || (shape as FootprintLine).tieDowns!.length === 0) && <div className="empty-hint">No tie downs added.</div>}
+                </div>
             </div>
             
             <div className="prop-group">

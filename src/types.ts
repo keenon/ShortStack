@@ -88,12 +88,20 @@ export interface Point {
   snapTo?: string; // ID path to a Wire Guide (e.g., "refId:guideId")
 }
 
+export interface TieDown {
+  id: string;
+  footprintId: string;
+  distance: string; // Expression for distance along wire
+  angle: string;    // Expression for offset rotation
+}
+
 export interface FootprintLine extends BaseShape {
   type: "line";
   x: string;
   y: string;
   thickness: string;
   points: Point[];
+  tieDowns?: TieDown[];
 }
 
 export interface FootprintReference extends BaseShape {

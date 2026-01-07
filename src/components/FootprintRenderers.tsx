@@ -1,7 +1,7 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion, FootprintText } from "../types";
-import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
+import { evaluateExpression, resolvePoint, getTransformAlongLine } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
 function bezier1D(p0: number, p1: number, p2: number, p3: number, t: number): number {
@@ -642,6 +642,50 @@ export const RecursiveShapeRenderer = ({
         // 2. Generate Outline Path for Visuals
         const outlineD = generateLineOutlinePath(pts, thickness);
 
+        // NEW: Render Tie Downs
+        const tieDownElements = ((shape as FootprintLine).tieDowns || []).map(td => {
+            const fp = allFootprints.find(f => f.id === td.footprintId);
+            if (!fp) return null;
+
+            const dist = evaluateExpression(td.distance, params);
+            const rotOffset = evaluateExpression(td.angle, params);
+
+            const transform = getTransformAlongLine(shape as FootprintLine, dist, params, rootFootprint, allFootprints);
+            if (!transform) return null;
+
+            const finalAngle = transform.angle - 90 + rotOffset;
+
+            // Mock reference shape for rendering
+            const mockRefShape: FootprintReference = {
+                id: td.id,
+                type: "footprint",
+                name: "TieDown",
+                x: transform.x.toString(),
+                y: transform.y.toString(),
+                angle: finalAngle.toString(),
+                footprintId: td.footprintId,
+                assignedLayers: {}
+            };
+
+            return (
+                <RecursiveShapeRenderer
+                    key={td.id}
+                    shape={mockRefShape}
+                    allFootprints={allFootprints}
+                    params={params}
+                    stackup={stackup}
+                    isSelected={false}
+                    isParentSelected={isSelected}
+                    onMouseDown={() => {}} 
+                    onHandleDown={() => {}}
+                    handleRadius={handleRadius}
+                    rootFootprint={rootFootprint}
+                    layerVisibility={layerVisibility}
+                    strokeScale={strokeScale}
+                />
+            );
+        });
+
       const handles = (showHandles && !overrideStyle) ? pts.map((pt, idx) => {
           const elements = [];
           const isHovered = hoveredPointIndex === idx;
@@ -725,6 +769,7 @@ export const RecursiveShapeRenderer = ({
                 vectorEffect="non-scaling-stroke"
                 style={{ ...commonProps.style, opacity: isSelected ? 1 : 0.8 }}
             />
+            {!onlyHandles && tieDownElements}
             {handles}
             {midButtons}
           </g>

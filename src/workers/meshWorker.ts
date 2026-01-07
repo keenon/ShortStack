@@ -25,7 +25,7 @@ import { mergeBufferGeometries, mergeVertices } from "three-stdlib";
 // @ts-ignore
 import initOCCT from "occt-import-js";
 import Module from "manifold-3d";
-import { evaluateExpression, resolvePoint, getPolyOutlinePoints } from "../utils/footprintUtils";
+import { evaluateExpression, resolvePoint, getPolyOutlinePoints, getTransformAlongLine } from "../utils/footprintUtils";
 import { Footprint, Parameter, FootprintShape, FootprintRect, FootprintLine, FootprintPolygon, FootprintReference, FootprintUnion, Point, FootprintBoardOutline } from "../types";
 
 let occt: any = null;
@@ -272,7 +272,50 @@ function flattenShapes(
         }
         const globalRotation = transform.rotation + localRotation;
 
-        if (shape.type === "footprint") {
+        if (shape.type === "line") {
+            const line = shape as any; // FootprintLine
+            // Push the line itself
+            result.push({ shape: shape, x: globalX, y: globalY, rotation: globalRotation, originalId: shape.id, contextFp, unionId: currentUnionId });
+
+            if (line.tieDowns) {
+                line.tieDowns.forEach((td: any) => {
+                    const target = allFootprints.find(f => f.id === td.footprintId);
+                    if (target) {
+                        const dist = evaluate(td.distance, params);
+                        const rotOffset = evaluate(td.angle, params);
+                        
+                        const tf = getTransformAlongLine(line, dist, params, contextFp, allFootprints);
+                        if (tf) {
+                            const tdLocalX = tf.x;
+                            const tdLocalY = tf.y;
+                            const tdLocalRot = tf.angle - 90 + rotOffset;
+                            
+                            const parentRad = (transform.rotation * Math.PI) / 180;
+                            const pCos = Math.cos(parentRad);
+                            const pSin = Math.sin(parentRad);
+                            
+                            const rotX = tdLocalX * pCos - tdLocalY * pSin;
+                            const rotY = tdLocalX * pSin + tdLocalY * pCos;
+                            
+                            const tdGlobalX = globalX + rotX;
+                            const tdGlobalY = globalY + rotY;
+                            const tdGlobalRot = transform.rotation + tdLocalRot;
+                            
+                            const children = flattenShapes(
+                                target, 
+                                target.shapes, 
+                                allFootprints, 
+                                params, 
+                                { x: tdGlobalX, y: tdGlobalY, rotation: tdGlobalRot }, 
+                                depth + 1, 
+                                currentUnionId 
+                            );
+                            result = result.concat(children);
+                        }
+                    }
+                });
+            }
+        } else if (shape.type === "footprint") {
             const ref = shape as FootprintReference;
             const target = allFootprints.find(f => f.id === ref.footprintId);
             if (target) {
