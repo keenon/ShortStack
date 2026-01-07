@@ -991,9 +991,6 @@ function generateProceduralTool(
     const rawVertices: number[] = [];
     const rawIndices: number[] = [];
 
-    // Store boundary contours for validity checks in the triangulation step
-    let boundaryLoops: THREE.Vector2[][] = [];
-
     // --- 1. CALCULATE VERTICAL STEPS ---
     const steps: { z: number, offset: number }[] = [];
     const arcSteps = Math.max(3, Math.ceil(resolution / 4));
@@ -1062,7 +1059,7 @@ function generateProceduralTool(
         };
 
         // Added 'strictMode' flag to allow fallback if geometry is impossible
-        const solveForOffset = (offsetB: number, strictMode: boolean) => {
+        const solveForOffset = (offsetB: number) => {
             costTable.fill(Infinity);
             fromTable.fill(0);
             costTable[0] = 0; 
@@ -1112,7 +1109,7 @@ function generateProceduralTool(
         };
 
         const generateIndices = (offsetB: number) => {
-            solveForOffset(offsetB, false); 
+            solveForOffset(offsetB); 
             let curI = lenA;
             let curJ = lenB;
             
@@ -1169,7 +1166,7 @@ function generateProceduralTool(
 
         for (let k = 0; k < searchCount; k++) {
             const offset = safeMod(searchStart + k, lenB);
-            const cost = solveForOffset(offset, false);
+            const cost = solveForOffset(offset);
             const pA = polyA[0];
             const pB = polyB[offset];
             const seamDistSq = pA.distanceToSquared(pB);
@@ -1283,18 +1280,6 @@ function generateProceduralTool(
                 baseCSforComplex = new manifoldModule.CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd");
             }
         }
-    }
-
-    if (baseCSforComplex) {
-        let boundaryCS = baseCSforComplex;
-        // Expand if needed (offset negative input)
-        if (minOffset < -0.0001) {
-            boundaryCS = baseCSforComplex.offset(-minOffset, "Round", arcSteps);
-        }
-        const rawPolys = boundaryCS.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
-        boundaryLoops = rawPolys;
-    } else {
-        boundaryLoops = [getContourFromShape(minOffset)];
     }
 
     const layerData: { z: number, contours: THREE.Vector2[][], startIdx: number }[] = [];
