@@ -1074,92 +1074,6 @@ function generateProceduralTool(
                     const pA = polyA[i % lenA];
                     const pB = polyB[(j + offsetB) % lenB]; 
 
-                    // ---------------------------------------------------------
-                    // VALIDITY CHECK: Prevent edges from crossing outside the polygon
-                    // Only run if strictMode is true
-                    // ---------------------------------------------------------
-                    if (strictMode && boundaryLoops.length > 0) {
-                        const midX = (pA.x + pB.x) * 0.5;
-                        const midY = (pA.y + pB.y) * 0.5;
-
-                        // 1. Point in Polygon Check (Midpoint)
-                        // Must handle points ON the boundary robustly (distance check)
-                        let inside = false;
-                        let onBoundary = false;
-                        
-                        for (const loop of boundaryLoops) {
-                            for (let k = 0, l = loop.length - 1; k < loop.length; l = k++) {
-                                const xi = loop[k].x, yi = loop[k].y;
-                                const xj = loop[l].x, yj = loop[l].y;
-
-                                // A. Standard Ray Casting
-                                const intersect = ((yi > midY) !== (yj > midY)) 
-                                    && (midX < (xj - xi) * (midY - yi) / (yj - yi) + xi);
-                                if (intersect) inside = !inside;
-
-                                // B. On-Segment Check (Distance Squared)
-                                // Only check if not already found on a boundary
-                                if (!onBoundary) {
-                                    const l2 = (xj - xi) ** 2 + (yj - yi) ** 2;
-                                    if (l2 > 1e-9) {
-                                        let t = ((midX - xi) * (xj - xi) + (midY - yi) * (yj - yi)) / l2;
-                                        t = Math.max(0, Math.min(1, t));
-                                        const dx = midX - (xi + t * (xj - xi));
-                                        const dy = midY - (yi + t * (yj - yi));
-                                        // 1e-6 tolerance for being "on" the wall
-                                        if ((dx*dx + dy*dy) < 1e-6) onBoundary = true;
-                                    }
-                                }
-                            }
-                        }
-
-                        // If it's on the boundary, it's valid regardless of ray cast result
-                        if (onBoundary) inside = true;
-                        
-                        if (!inside) continue; 
-
-                        // 2. Line Segment Intersection Check
-                        let intersectsBoundary = false;
-                        const minX = Math.min(pA.x, pB.x) - 0.001;
-                        const maxX = Math.max(pA.x, pB.x) + 0.001;
-                        const minY = Math.min(pA.y, pB.y) - 0.001;
-                        const maxY = Math.max(pA.y, pB.y) + 0.001;
-                        const dAx = pB.x - pA.x;
-                        const dAy = pB.y - pA.y;
-
-                        outerLoop:
-                        for (const loop of boundaryLoops) {
-                            for (let k = 0; k < loop.length; k++) {
-                                const b1 = loop[k];
-                                const b2 = loop[(k + 1) % loop.length];
-
-                                // AABB Optimization
-                                const bMinX = Math.min(b1.x, b2.x);
-                                const bMaxX = Math.max(b1.x, b2.x);
-                                if (maxX < bMinX || minX > bMaxX) continue;
-                                const bMinY = Math.min(b1.y, b2.y);
-                                const bMaxY = Math.max(b1.y, b2.y);
-                                if (maxY < bMinY || minY > bMaxY) continue;
-
-                                // Strict Intersection
-                                const dBx = b2.x - b1.x;
-                                const dBy = b2.y - b1.y;
-                                const det = dAx * dBy - dAy * dBx;
-
-                                if (det !== 0) {
-                                    const t = ((b1.x - pA.x) * dBy - (b1.y - pA.y) * dBx) / det;
-                                    const u = ((b1.x - pA.x) * dAy - (b1.y - pA.y) * dAx) / det;
-                                    // Range excludes endpoints to allow sharing vertices
-                                    if (t > 0.001 && t < 0.999 && u > 0.001 && u < 0.999) {
-                                        intersectsBoundary = true;
-                                        break outerLoop;
-                                    }
-                                }
-                            }
-                        }
-                        if (intersectsBoundary) continue;
-                    }
-
                     const distSq = pA.distanceToSquared(pB);
 
                     // Transition 1: Move along Poly A
@@ -1196,8 +1110,8 @@ function generateProceduralTool(
             return costTable[idx(lenA, lenB)];
         };
 
-        const generateIndices = (offsetB: number, strictMode: boolean) => {
-            solveForOffset(offsetB, strictMode); 
+        const generateIndices = (offsetB: number) => {
+            solveForOffset(offsetB, false); 
             let curI = lenA;
             let curJ = lenB;
             
@@ -1265,8 +1179,7 @@ function generateProceduralTool(
                 bestOffset = offset;
             }
         }
-
-        generateIndices(bestOffset, false);
+        generateIndices(bestOffset);
     };
 
     // --- 3. GENERATE CONTOURS ---
@@ -1410,9 +1323,16 @@ function generateProceduralTool(
                     const j = (i + 1) % clean.length;
                     area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
                 }
-                if (area < 0) clean.reverse();
+                
+                // Manifold generates holes with negative area. 
+                // We assume tool slices should be solid. 
+                // Discard holes or extremely small artifacts.
+                if (area < 0) return null; 
+                if (Math.abs(area) < 0.00001) return null;
+
+                // Do NOT reverse here. If it was positive (solid), keep it.
                 return clean;
-            }).filter((p: any) => p.length >= 3);
+            }).filter((p: any) => p !== null && p.length >= 3);
         } else {
             const contour = getContourFromShape(step.offset);
             if (contour.length > 0) processedPolys = [contour];
