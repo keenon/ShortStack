@@ -967,7 +967,6 @@ function generateProceduralTool(
     resolution = 32,
     overrideCS?: any
 ) {
-    let minDimension = Infinity;
     const rawVertices: number[] = [];
     const rawIndices: number[] = [];
 
@@ -1258,7 +1257,6 @@ function generateProceduralTool(
         
         if (shape.type === "circle") {
             const d = evaluateExpression((shape as any).diameter, params);
-            minDimension = d;
             // offset > 0 (shrink), offset < 0 (grow)
             const r = Math.max(0.001, d/2 - offset); 
             const segments = resolution;
@@ -1270,7 +1268,6 @@ function generateProceduralTool(
         else if (shape.type === "rect") {
             const wRaw = evaluateExpression((shape as FootprintRect).width, params);
             const hRaw = evaluateExpression((shape as FootprintRect).height, params);
-            minDimension = Math.min(wRaw, hRaw);
             
             const w = Math.max(0.001, wRaw - offset * 2);
             const h = Math.max(0.001, hRaw - offset * 2);
@@ -1314,7 +1311,6 @@ function generateProceduralTool(
         }
         else if (shape.type === "line") {
             const t = evaluateExpression((shape as FootprintLine).thickness, params);
-            minDimension = t;
             const effectiveT = Math.max(0.001, t - offset * 2);
             rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, contextFp, allFootprints);
         }
