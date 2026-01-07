@@ -528,9 +528,10 @@ self.onmessage = async (e: MessageEvent) => {
                     if (safeRadius < 0) safeRadius = 0;
                     if (inputRadius < 0) inputRadius = 0;
 
-                    const isPartialCut = actualDepth < thickness - CSG_EPSILON;
-                    const hasToolProfile = safeRadius > CSG_EPSILON || inputRadius > CSG_EPSILON;
-                    const shouldGenTool = isPartialCut && hasToolProfile;
+                    const isThroughCut = actualDepth >= thickness - CSG_EPSILON;
+                    const effectiveBottomRadius = isThroughCut ? 0 : safeRadius;
+                    const hasToolProfile = effectiveBottomRadius > CSG_EPSILON || inputRadius > CSG_EPSILON;
+                    const shouldGenTool = hasToolProfile;
 
                     // Generate Combined CrossSection
                     let combinedCS: any = null;
@@ -666,7 +667,7 @@ self.onmessage = async (e: MessageEvent) => {
                                 params, 
                                 actualDepth,
                                 inputRadius,
-                                safeRadius,
+                                effectiveBottomRadius,
                                 primaryItem.contextFp,
                                 allFootprints,
                                 resolution,
