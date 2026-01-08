@@ -66,7 +66,8 @@ function getLineOutlinePoints(
     thickness: number, 
     resolution: number,
     rootFp: Footprint,
-    allFootprints: Footprint[]
+    allFootprints: Footprint[],
+    parentTransform?: { x: number, y: number, angle: number }
 ): THREE.Vector2[] {
     const points = shape.points;
     if (points.length < 2) return [];
@@ -81,8 +82,8 @@ function getLineOutlinePoints(
         const currRaw = points[i];
         const nextRaw = points[i+1];
         
-        const curr = resolvePoint(currRaw, rootFp, allFootprints, params);
-        const next = resolvePoint(nextRaw, rootFp, allFootprints, params);
+        const curr = resolvePoint(currRaw, rootFp, allFootprints, params, parentTransform);
+        const next = resolvePoint(nextRaw, rootFp, allFootprints, params, parentTransform);
 
         const x1 = curr.x;
         const y1 = curr.y;
@@ -181,10 +182,10 @@ function getLineOutlinePoints(
     return contour;
 }
 
-function createLineShape(shape: FootprintLine, params: Parameter[], rootFp: Footprint, allFootprints: Footprint[], thicknessOverride: number | undefined, resolution: number): THREE.Shape | null {
+function createLineShape(shape: FootprintLine, params: Parameter[], rootFp: Footprint, allFootprints: Footprint[], thicknessOverride: number | undefined, resolution: number, parentTransform?: { x: number, y: number, angle: number }): THREE.Shape | null {
   const thickVal = thicknessOverride !== undefined ? thicknessOverride : evaluate(shape.thickness, params);
   if (thickVal <= 0) return null;
-  const pts = getLineOutlinePoints(shape, params, thickVal, resolution, rootFp, allFootprints);
+  const pts = getLineOutlinePoints(shape, params, thickVal, resolution, rootFp, allFootprints, parentTransform);
   if (pts.length < 3) return null;
   const s = new THREE.Shape();
   s.moveTo(pts[0].x, pts[0].y);
@@ -244,6 +245,7 @@ interface FlatShape {
     originalId: string;
     contextFp: Footprint;
     unionId?: string;
+    relativeTransform: { x: number, y: number, rotation: number };
 }
 
 function flattenShapes(
@@ -254,14 +256,14 @@ function flattenShapes(
     params: Parameter[],
     transform = { x: 0, y: 0, rotation: 0 },
     depth = 0,
-    currentUnionId: string | undefined = undefined
+    currentUnionId: string | undefined = undefined,
+    relativeTransform = { x: 0, y: 0, rotation: 0 }
 ): FlatShape[] {
     if (depth > 10) return [];
     let result: FlatShape[] = [];
     shapes.forEach(shape => {
         if (shape.type === "wireGuide" || shape.type === "boardOutline" || shape.type === "text") return;
 
-        // FIX: Force Line origin to 0,0 to match 2D renderer and Export logic
         const localX = (shape.type === "line") ? 0 : evaluate(shape.x, params);
         const localY = (shape.type === "line") ? 0 : evaluate(shape.y, params);
 
@@ -276,10 +278,21 @@ function flattenShapes(
         }
         const globalRotation = transform.rotation + localRotation;
 
+        const relRad = (relativeTransform.rotation * Math.PI) / 180;
+        const relCos = Math.cos(relRad);
+        const relSin = Math.sin(relRad);
+        const relX = relativeTransform.x + (localX * relCos - localY * relSin);
+        const relY = relativeTransform.y + (localX * relSin + localY * relCos);
+        const relRotation = relativeTransform.rotation + localRotation;
+        const currentRelTransform = { x: relX, y: relY, rotation: relRotation };
+
         if (shape.type === "line") {
             const line = shape as any; // FootprintLine
-            // Push the line itself
-            result.push({ shape: shape, x: globalX, y: globalY, rotation: globalRotation, originalId: shape.id, contextFp, unionId: currentUnionId });
+            result.push({ 
+                shape: shape, x: globalX, y: globalY, rotation: globalRotation, 
+                originalId: shape.id, contextFp, unionId: currentUnionId,
+                relativeTransform: currentRelTransform
+            });
 
             if (line.tieDowns) {
                 line.tieDowns.forEach((td: any) => {
@@ -294,17 +307,19 @@ function flattenShapes(
                             const tdLocalY = tf.y;
                             const tdLocalRot = tf.angle - 90 + rotOffset;
                             
-                            const parentRad = (transform.rotation * Math.PI) / 180;
-                            const pCos = Math.cos(parentRad);
-                            const pSin = Math.sin(parentRad);
-                            
-                            const rotX = tdLocalX * pCos - tdLocalY * pSin;
-                            const rotY = tdLocalX * pSin + tdLocalY * pCos;
-                            
+                            const rotX = tdLocalX * cos - tdLocalY * sin;
+                            const rotY = tdLocalX * sin + tdLocalY * cos;
                             const tdGlobalX = globalX + rotX;
                             const tdGlobalY = globalY + rotY;
                             const tdGlobalRot = transform.rotation + tdLocalRot;
                             
+                            const lineRelRad = (currentRelTransform.rotation * Math.PI) / 180;
+                            const lRCos = Math.cos(lineRelRad);
+                            const lRSin = Math.sin(lineRelRad);
+                            const tdRelX = currentRelTransform.x + (tdLocalX * lRCos - tdLocalY * lRSin);
+                            const tdRelY = currentRelTransform.y + (tdLocalX * lRSin + tdLocalY * lRCos);
+                            const tdRelRot = currentRelTransform.rotation + tdLocalRot;
+
                             const children = flattenShapes(
                                 target, 
                                 rootFp, 
@@ -313,7 +328,8 @@ function flattenShapes(
                                 params, 
                                 { x: tdGlobalX, y: tdGlobalY, rotation: tdGlobalRot }, 
                                 depth + 1, 
-                                currentUnionId 
+                                currentUnionId,
+                                { x: 0, y: 0, rotation: 0 }
                             );
                             result = result.concat(children);
                         }
@@ -324,19 +340,23 @@ function flattenShapes(
             const ref = shape as FootprintReference;
             const target = allFootprints.find(f => f.id === ref.footprintId);
             if (target) {
-                const children = flattenShapes(target, rootFp, target.shapes, allFootprints, params, { x: globalX, y: globalY, rotation: globalRotation }, depth + 1, currentUnionId);
+                const children = flattenShapes(target, rootFp, target.shapes, allFootprints, params, { x: globalX, y: globalY, rotation: globalRotation }, depth + 1, currentUnionId, { x: 0, y: 0, rotation: 0 });
                 result = result.concat(children);
             }
         } else if (shape.type === "union") {
             const u = shape as FootprintUnion;
             const effectiveUnionId = currentUnionId || u.id;
-            const children = flattenShapes(u as unknown as Footprint, rootFp, u.shapes, allFootprints, params, { x: globalX, y: globalY, rotation: globalRotation }, depth + 1, effectiveUnionId);
+            const children = flattenShapes(contextFp, rootFp, u.shapes, allFootprints, params, { x: globalX, y: globalY, rotation: globalRotation }, depth + 1, effectiveUnionId, currentRelTransform);
             if (Object.keys(u.assignedLayers || {}).length > 0) {
                 children.forEach(c => { c.shape = { ...c.shape, assignedLayers: u.assignedLayers }; });
             }
             result = result.concat(children);
         } else {
-            result.push({ shape: shape, x: globalX, y: globalY, rotation: globalRotation, originalId: shape.id, contextFp, unionId: currentUnionId });
+            result.push({ 
+                shape: shape, x: globalX, y: globalY, rotation: globalRotation, 
+                originalId: shape.id, contextFp, unionId: currentUnionId,
+                relativeTransform: currentRelTransform
+            });
         }
     });
     return result;
@@ -606,6 +626,8 @@ self.onmessage = async (e: MessageEvent) => {
                         const localX = item.x - centerX;
                         const localZ = centerZ - item.y; 
 
+                        const snapContextTransform = { x: item.relativeTransform.x, y: item.relativeTransform.y, angle: item.relativeTransform.rotation };
+
                         // Resolve Local CS
                         let cs = null;
                         if (s.type === "circle") {
@@ -625,11 +647,11 @@ self.onmessage = async (e: MessageEvent) => {
                         } else if (s.type === "line") {
                             const t = evaluateExpression((s as FootprintLine).thickness, params);
                             const validT = t > 0 ? t : 0.01;
-                            const lShape = createLineShape(s as FootprintLine, params, footprint, allFootprints, validT, resolution);
+                            const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT, resolution, snapContextTransform);
                             if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape, resolution));
                         } else if (s.type === "polygon") {
                             const poly = s as FootprintPolygon;
-                            const pts = getPolyOutlinePoints(poly.points, 0, 0, params, footprint, allFootprints, resolution);
+                            const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, resolution, snapContextTransform);
                             if (pts.length > 2) {
                                 cs = collect(new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd"));
                             }
@@ -764,6 +786,8 @@ self.onmessage = async (e: MessageEvent) => {
                             // Report Tool Op
                             report(`Generating tool for ${itemStr} on ${layerStr}...`, basePercent + 0.05);
 
+                            const itemTransform = { x: primaryItem.relativeTransform.x, y: primaryItem.relativeTransform.y, angle: primaryItem.relativeTransform.rotation };
+
                             const result = generateProceduralTool(
                                 manifoldModule, 
                                 shape, 
@@ -774,7 +798,8 @@ self.onmessage = async (e: MessageEvent) => {
                                 footprint,
                                 allFootprints,
                                 resolution,
-                                componentCS
+                                componentCS,
+                                itemTransform
                             );
 
                             // --- DO NOT DELETE FAILURE HANDLING ---
@@ -865,8 +890,7 @@ self.onmessage = async (e: MessageEvent) => {
 
                 flatShapes.forEach(item => {
                     const s = item.shape;
-                    // Standard 2D coordinate space (x=x, y=y)
-                    // Visual/Export space: Y is up/down depending on convention, but here we just process math.
+                    const itemTransform = { x: item.relativeTransform.x, y: item.relativeTransform.y, angle: item.relativeTransform.rotation };
                     
                     let cs = null;
                     if (s.type === "circle") {
@@ -884,11 +908,11 @@ self.onmessage = async (e: MessageEvent) => {
                     } else if (s.type === "line") {
                         const t = evaluateExpression((s as FootprintLine).thickness, params);
                         const validT = t > 0 ? t : 0.01;
-                        const lShape = createLineShape(s as FootprintLine, params, contextFp, allFootprints, validT, 32);
+                        const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT, 32, itemTransform);
                         if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape));
                     } else if (s.type === "polygon") {
                         const poly = s as FootprintPolygon;
-                        const pts = getPolyOutlinePoints(poly.points, 0, 0, params, contextFp, allFootprints, 32);
+                        const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, 32, itemTransform);
                         if (pts.length > 2) {
                             cs = collect(new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd"));
                         }
@@ -1019,7 +1043,8 @@ function getPolyOutlineWithFeatures(
     params: Parameter[],
     rootFp: Footprint,
     allFootprints: Footprint[],
-    resolution: number
+    resolution: number,
+    parentTransform?: { x: number, y: number, angle: number }
 ): { points: THREE.Vector2[], cornerIndices: number[] } {
     if (points.length < 3) return { points: [], cornerIndices: [] };
 
@@ -1035,8 +1060,8 @@ function getPolyOutlineWithFeatures(
         const currRaw = points[i];
         const nextRaw = points[(i + 1) % points.length];
 
-        const curr = resolvePoint(currRaw, rootFp, allFootprints, params);
-        const next = resolvePoint(nextRaw, rootFp, allFootprints, params);
+        const curr = resolvePoint(currRaw, rootFp, allFootprints, params, parentTransform);
+        const next = resolvePoint(nextRaw, rootFp, allFootprints, params, parentTransform);
 
         const x1 = originX + curr.x;
         const y1 = originY + curr.y;
@@ -1101,7 +1126,8 @@ function generateProceduralTool(
     rootFp: Footprint,
     allFootprints: Footprint[],
     resolution = 32,
-    overrideCS?: any
+    overrideCS?: any,
+    parentTransform?: { x: number, y: number, angle: number }
 ) {
     const rawVertices: number[] = [];
     const rawIndices: number[] = [];
@@ -1358,7 +1384,7 @@ function generateProceduralTool(
         else if (shape.type === "line") {
             const t = evaluateExpression((shape as FootprintLine).thickness, params);
             const effectiveT = Math.max(0.001, t - offset * 2);
-            rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, rootFp, allFootprints);
+            rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, rootFp, allFootprints, parentTransform);
         }
 
         if (rawPoints.length > 0) {
@@ -1389,7 +1415,7 @@ function generateProceduralTool(
             baseCSforComplex = overrideCS;
         } else {
             const poly = shape as FootprintPolygon;
-            const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, rootFp, allFootprints, resolution);
+            const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, rootFp, allFootprints, resolution, parentTransform);
             const pts = baseData.points;
             if (pts.length >= 3) {
                 baseCSforComplex = new manifoldModule.CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd");
