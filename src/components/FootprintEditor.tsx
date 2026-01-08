@@ -2113,11 +2113,15 @@ const handleUngroup = (unionId: string) => {
     const assignedOutlineId = footprint.boardOutlineAssignments?.[layerId];
     const outlineShape = footprint.shapes.find(s => s.id === assignedOutlineId) as FootprintBoardOutline | undefined;
     
+    // FIX: Retrieve Origin for Board Outline (it might not be 0,0)
+    const originX = outlineShape ? evaluateExpression(outlineShape.x, params) : 0;
+    const originY = outlineShape ? evaluateExpression(outlineShape.y, params) : 0;
+
     const outline = (outlineShape?.points || []).map(p => {
         const resolved = resolvePoint(p, footprint, allFootprints, params);
         return {
-            x: resolved.x,
-            y: resolved.y,
+            x: resolved.x + originX,
+            y: resolved.y + originY,
             handle_in: resolved.handleIn,
             handle_out: resolved.handleOut
         };
@@ -2618,8 +2622,9 @@ async function collectExportShapesAsync(
         if (shape.type === "wireGuide" || shape.type === "boardOutline") continue;
 
         // 1. Calculate Local Transform
-        const lx = evaluateExpression(shape.x, params);
-        const ly = evaluateExpression(shape.y, params);
+        // FIX: Force Line origin to 0,0. The 2D renderer uses absolute points for lines.
+        const lx = (shape.type === "line") ? 0 : evaluateExpression(shape.x, params);
+        const ly = (shape.type === "line") ? 0 : evaluateExpression(shape.y, params);
         
         // Global Position
         const rad = (transform.angle * Math.PI) / 180;

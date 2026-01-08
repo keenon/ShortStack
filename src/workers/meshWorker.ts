@@ -259,8 +259,11 @@ function flattenShapes(
     let result: FlatShape[] = [];
     shapes.forEach(shape => {
         if (shape.type === "wireGuide" || shape.type === "boardOutline" || shape.type === "text") return;
-        const localX = evaluate(shape.x, params);
-        const localY = evaluate(shape.y, params);
+
+        // FIX: Force Line origin to 0,0 to match 2D renderer and Export logic
+        const localX = (shape.type === "line") ? 0 : evaluate(shape.x, params);
+        const localY = (shape.type === "line") ? 0 : evaluate(shape.y, params);
+
         const rad = (transform.rotation * Math.PI) / 180;
         const cos = Math.cos(rad);
         const sin = Math.sin(rad);
