@@ -1,6 +1,6 @@
 [package]
 name = "shortstack"
-version = "0.3.12"
+version = "0.4.0"
 description = "ShortStack CAD"
 authors = ["you"]
 edition = "2021"
