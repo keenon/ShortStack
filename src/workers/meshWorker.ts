@@ -65,7 +65,7 @@ function getLineOutlinePoints(
     params: Parameter[], 
     thickness: number, 
     resolution: number,
-    contextFp: Footprint,
+    rootFp: Footprint,
     allFootprints: Footprint[]
 ): THREE.Vector2[] {
     const points = shape.points;
@@ -81,8 +81,8 @@ function getLineOutlinePoints(
         const currRaw = points[i];
         const nextRaw = points[i+1];
         
-        const curr = resolvePoint(currRaw, contextFp, allFootprints, params);
-        const next = resolvePoint(nextRaw, contextFp, allFootprints, params);
+        const curr = resolvePoint(currRaw, rootFp, allFootprints, params);
+        const next = resolvePoint(nextRaw, rootFp, allFootprints, params);
 
         const x1 = curr.x;
         const y1 = curr.y;
@@ -181,10 +181,10 @@ function getLineOutlinePoints(
     return contour;
 }
 
-function createLineShape(shape: FootprintLine, params: Parameter[], contextFp: Footprint, allFootprints: Footprint[], thicknessOverride: number | undefined, resolution: number): THREE.Shape | null {
+function createLineShape(shape: FootprintLine, params: Parameter[], rootFp: Footprint, allFootprints: Footprint[], thicknessOverride: number | undefined, resolution: number): THREE.Shape | null {
   const thickVal = thicknessOverride !== undefined ? thicknessOverride : evaluate(shape.thickness, params);
   if (thickVal <= 0) return null;
-  const pts = getLineOutlinePoints(shape, params, thickVal, resolution, contextFp, allFootprints);
+  const pts = getLineOutlinePoints(shape, params, thickVal, resolution, rootFp, allFootprints);
   if (pts.length < 3) return null;
   const s = new THREE.Shape();
   s.moveTo(pts[0].x, pts[0].y);
@@ -248,6 +248,7 @@ interface FlatShape {
 
 function flattenShapes(
     contextFp: Footprint,
+    rootFp: Footprint,
     shapes: FootprintShape[], 
     allFootprints: Footprint[], 
     params: Parameter[],
@@ -287,7 +288,7 @@ function flattenShapes(
                         const dist = evaluate(td.distance, params);
                         const rotOffset = evaluate(td.angle, params);
                         
-                        const tf = getTransformAlongLine(line, dist, params, contextFp, allFootprints);
+                        const tf = getTransformAlongLine(line, dist, params, rootFp, allFootprints);
                         if (tf) {
                             const tdLocalX = tf.x;
                             const tdLocalY = tf.y;
@@ -306,6 +307,7 @@ function flattenShapes(
                             
                             const children = flattenShapes(
                                 target, 
+                                rootFp, 
                                 target.shapes, 
                                 allFootprints, 
                                 params, 
@@ -322,13 +324,13 @@ function flattenShapes(
             const ref = shape as FootprintReference;
             const target = allFootprints.find(f => f.id === ref.footprintId);
             if (target) {
-                const children = flattenShapes(target, target.shapes, allFootprints, params, { x: globalX, y: globalY, rotation: globalRotation }, depth + 1, currentUnionId);
+                const children = flattenShapes(target, rootFp, target.shapes, allFootprints, params, { x: globalX, y: globalY, rotation: globalRotation }, depth + 1, currentUnionId);
                 result = result.concat(children);
             }
         } else if (shape.type === "union") {
             const u = shape as FootprintUnion;
             const effectiveUnionId = currentUnionId || u.id;
-            const children = flattenShapes(u as unknown as Footprint, u.shapes, allFootprints, params, { x: globalX, y: globalY, rotation: globalRotation }, depth + 1, effectiveUnionId);
+            const children = flattenShapes(u as unknown as Footprint, rootFp, u.shapes, allFootprints, params, { x: globalX, y: globalY, rotation: globalRotation }, depth + 1, effectiveUnionId);
             if (Object.keys(u.assignedLayers || {}).length > 0) {
                 children.forEach(c => { c.shape = { ...c.shape, assignedLayers: u.assignedLayers }; });
             }
@@ -511,7 +513,7 @@ self.onmessage = async (e: MessageEvent) => {
                 const boundaryMask = base;
 
                 // 2. Flatten Shapes
-                const flatShapes = flattenShapes(footprint, footprint.shapes, allFootprints, params);
+                const flatShapes = flattenShapes(footprint, footprint, footprint.shapes, allFootprints, params);
                 
                 // 3. Grouping Logic
                 interface ExecutionItem { type: "single" | "union"; shapes: FlatShape[]; unionId?: string; }
@@ -623,11 +625,11 @@ self.onmessage = async (e: MessageEvent) => {
                         } else if (s.type === "line") {
                             const t = evaluateExpression((s as FootprintLine).thickness, params);
                             const validT = t > 0 ? t : 0.01;
-                            const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT, resolution);
+                            const lShape = createLineShape(s as FootprintLine, params, footprint, allFootprints, validT, resolution);
                             if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape, resolution));
                         } else if (s.type === "polygon") {
                             const poly = s as FootprintPolygon;
-                            const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, resolution);
+                            const pts = getPolyOutlinePoints(poly.points, 0, 0, params, footprint, allFootprints, resolution);
                             if (pts.length > 2) {
                                 cs = collect(new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd"));
                             }
@@ -769,7 +771,7 @@ self.onmessage = async (e: MessageEvent) => {
                                 actualDepth,
                                 inputRadius,
                                 effectiveBottomRadius,
-                                primaryItem.contextFp,
+                                footprint,
                                 allFootprints,
                                 resolution,
                                 componentCS
@@ -857,7 +859,7 @@ self.onmessage = async (e: MessageEvent) => {
                 // Pass shapes directly to flatten logic
                 // We use a dummy union wrapper to reuse flattenShapes if needed, or just iterate.
                 // flattenShapes handles recursion.
-                const flatShapes = flattenShapes(contextFp, shapes, allFootprints, params, transform);
+                const flatShapes = flattenShapes(contextFp, contextFp, shapes, allFootprints, params, transform);
                 
                 let combinedCS: any = null;
 
@@ -882,11 +884,11 @@ self.onmessage = async (e: MessageEvent) => {
                     } else if (s.type === "line") {
                         const t = evaluateExpression((s as FootprintLine).thickness, params);
                         const validT = t > 0 ? t : 0.01;
-                        const lShape = createLineShape(s as FootprintLine, params, item.contextFp, allFootprints, validT, 32);
+                        const lShape = createLineShape(s as FootprintLine, params, contextFp, allFootprints, validT, 32);
                         if (lShape) cs = collect(shapeToManifold(manifoldModule, lShape));
                     } else if (s.type === "polygon") {
                         const poly = s as FootprintPolygon;
-                        const pts = getPolyOutlinePoints(poly.points, 0, 0, params, item.contextFp, allFootprints, 32);
+                        const pts = getPolyOutlinePoints(poly.points, 0, 0, params, contextFp, allFootprints, 32);
                         if (pts.length > 2) {
                             cs = collect(new CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd"));
                         }
@@ -1015,7 +1017,7 @@ function getPolyOutlineWithFeatures(
     originX: number,
     originY: number,
     params: Parameter[],
-    contextFp: Footprint,
+    rootFp: Footprint,
     allFootprints: Footprint[],
     resolution: number
 ): { points: THREE.Vector2[], cornerIndices: number[] } {
@@ -1033,8 +1035,8 @@ function getPolyOutlineWithFeatures(
         const currRaw = points[i];
         const nextRaw = points[(i + 1) % points.length];
 
-        const curr = resolvePoint(currRaw, contextFp, allFootprints, params);
-        const next = resolvePoint(nextRaw, contextFp, allFootprints, params);
+        const curr = resolvePoint(currRaw, rootFp, allFootprints, params);
+        const next = resolvePoint(nextRaw, rootFp, allFootprints, params);
 
         const x1 = originX + curr.x;
         const y1 = originY + curr.y;
@@ -1096,7 +1098,7 @@ function generateProceduralTool(
     depth: number, 
     topRadius: number,
     bottomRadius: number,
-    contextFp: Footprint,
+    rootFp: Footprint,
     allFootprints: Footprint[],
     resolution = 32,
     overrideCS?: any
@@ -1356,7 +1358,7 @@ function generateProceduralTool(
         else if (shape.type === "line") {
             const t = evaluateExpression((shape as FootprintLine).thickness, params);
             const effectiveT = Math.max(0.001, t - offset * 2);
-            rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, contextFp, allFootprints);
+            rawPoints = getLineOutlinePoints(shape as FootprintLine, params, effectiveT, resolution, rootFp, allFootprints);
         }
 
         if (rawPoints.length > 0) {
@@ -1387,7 +1389,7 @@ function generateProceduralTool(
             baseCSforComplex = overrideCS;
         } else {
             const poly = shape as FootprintPolygon;
-            const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, contextFp, allFootprints, resolution);
+            const baseData = getPolyOutlineWithFeatures(poly.points, 0, 0, params, rootFp, allFootprints, resolution);
             const pts = baseData.points;
             if (pts.length >= 3) {
                 baseCSforComplex = new manifoldModule.CrossSection([pts.map(p => [p.x, p.y])], "EvenOdd");

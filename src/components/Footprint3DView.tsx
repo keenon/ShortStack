@@ -306,16 +306,18 @@ interface FlatMesh {
 }
 
 function flattenMeshes(
-    rootFp: Footprint, 
+    currentFp: Footprint, 
     allFootprints: Footprint[], 
     params: Parameter[],
+    rootFp: Footprint | null = null,
     transform = new THREE.Matrix4(),
     ancestorRefId: string | null = null
 ): FlatMesh[] {
+    const actualRoot = rootFp || currentFp;
     let result: FlatMesh[] = [];
 
-    if (rootFp.meshes) {
-        rootFp.meshes.forEach((m, i) => {
+    if (currentFp.meshes) {
+        currentFp.meshes.forEach((m, i) => {
             const x = evaluate(m.x, params);
             const y = evaluate(m.y, params);
             const z = evaluate(m.z, params);
@@ -335,12 +337,12 @@ function flattenMeshes(
                 globalTransform: finalMat,
                 selectableId: ancestorRefId || m.id,
                 isEditable: ancestorRefId === null,
-                uniqueId: (ancestorRefId || rootFp.id) + "_mesh_" + m.id + "_" + i
+                uniqueId: (ancestorRefId || currentFp.id) + "_mesh_" + m.id + "_" + i
             });
         });
     }
 
-    rootFp.shapes.forEach(s => {
+    currentFp.shapes.forEach(s => {
         if (s.type === "footprint") {
              const ref = s as FootprintReference;
              const child = allFootprints.find(f => f.id === ref.footprintId);
@@ -359,6 +361,7 @@ function flattenMeshes(
                      child, 
                      allFootprints, 
                      params, 
+                     actualRoot,
                      globalChildMat,
                      ancestorRefId || ref.id
                  ));
@@ -373,7 +376,7 @@ function flattenMeshes(
                         const dist = evaluate(td.distance, params);
                         const rotOffset = evaluate(td.angle, params);
                         
-                        const tf = getTransformAlongLine(line, dist, params, rootFp, allFootprints);
+                        const tf = getTransformAlongLine(line, dist, params, actualRoot, allFootprints);
                         if (tf) {
                             const finalAngle = tf.angle - 90 + rotOffset;
                             const tdMat = new THREE.Matrix4();
@@ -386,6 +389,7 @@ function flattenMeshes(
                                 child,
                                 allFootprints,
                                 params,
+                                actualRoot,
                                 globalTdMat,
                                 ancestorRefId 
                             ));
@@ -410,6 +414,7 @@ function flattenMeshes(
                  u as unknown as Footprint,
                  allFootprints,
                  params,
+                 actualRoot,
                  globalUMat,
                  ancestorRefId || u.id
              ));
@@ -613,7 +618,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   const pendingLayers = useRef<Set<string>>(new Set());
   const highResResolver = useRef<(()=>void) | null>(null);
 
-  const flattenedMeshes = useMemo(() => flattenMeshes(footprint, allFootprints, params), [footprint, allFootprints, params]);
+  const flattenedMeshes = useMemo(() => flattenMeshes(footprint, allFootprints, params, footprint), [footprint, allFootprints, params]);
   
   // Calculate expected layer count for auto-framing
   const expectedLayerCount = useMemo(() => {
