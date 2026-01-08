@@ -65,12 +65,24 @@ const FootprintPropertiesPanel = ({
   const rowRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const tieDownRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  // NEW: Effect to scroll to Tie Down
+  // FIX: Robust effect to scroll to Tie Down (handles panel remounting)
   useEffect(() => {
-    if (scrollToTieDownId && tieDownRefs.current.has(scrollToTieDownId)) {
-        tieDownRefs.current.get(scrollToTieDownId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (scrollToTieDownId) {
+        const timer = setTimeout(() => {
+            const target = tieDownRefs.current.get(scrollToTieDownId);
+            if (target) {
+                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }, 50);
+        return () => clearTimeout(timer);
     }
-  }, [scrollToTieDownId]);
+  }, [scrollToTieDownId, selectedId]);
+
+  // FIX: Clear refs on selection change to avoid stale scroll targets
+  useEffect(() => {
+    rowRefs.current.clear();
+    tieDownRefs.current.clear();
+  }, [selectedId]);
 
   // Helper to manage Tie Downs
   const addTieDown = (lineId: string, currentTieDowns: TieDown[] = []) => {

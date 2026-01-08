@@ -795,8 +795,16 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       e.stopPropagation(); e.preventDefault();
       if (viewMode !== "2D") return;
 
-      setSelectedShapeIds([lineId]);
-      setScrollToTieDownId(tieDownId);
+      // FIX: Ensure selection happens first so panel renders
+      if (!selectedShapeIds.includes(lineId)) {
+          setSelectedShapeIds([lineId]);
+      }
+
+      // FIX: Toggle scroll ID to force effect trigger even if same ID clicked
+      setScrollToTieDownId(null);
+      setTimeout(() => {
+          setScrollToTieDownId(tieDownId);
+      }, 10);
 
       const shape = footprint.shapes.find(s => s.id === lineId) as FootprintLine;
       if (!shape || shape.locked) return;
@@ -882,9 +890,12 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           const newTieDowns = [...currentShape.tieDowns];
           newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], angle: newAngleExpr };
           
-          setFootprint({ 
-              ...footprintRef.current, 
-              shapes: footprintRef.current.shapes.map(s => s.id === state.lineId ? { ...s, tieDowns: newTieDowns } : s) 
+          updateHistory({ 
+              footprint: { 
+                  ...footprintRef.current, 
+                  shapes: footprintRef.current.shapes.map(s => s.id === state.lineId ? { ...s, tieDowns: newTieDowns } : s) 
+              },
+              selectedShapeIds: dragSelectionRef.current
           });
 
           // Update Visual
@@ -908,9 +919,12 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           const newTieDowns = [...currentShape.tieDowns];
           newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], distance: newDistExpr };
 
-          setFootprint({ 
-              ...footprintRef.current, 
-              shapes: footprintRef.current.shapes.map(s => s.id === state.lineId ? { ...s, tieDowns: newTieDowns } : s) 
+          updateHistory({ 
+              footprint: { 
+                  ...footprintRef.current, 
+                  shapes: footprintRef.current.shapes.map(s => s.id === state.lineId ? { ...s, tieDowns: newTieDowns } : s) 
+              },
+              selectedShapeIds: dragSelectionRef.current
           });
 
           // Update Visual: Line from Mouse to Closest Point on Wire
@@ -923,12 +937,16 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
   };
 
   const handleTieDownMouseUp = () => {
+      if (!tieDownDragState.current) return;
+      const finalLineId = tieDownDragState.current.lineId;
+      
       tieDownDragState.current = null;
       setTieDownVisuals(null);
-      // Commit History
+
+      // FIX: Use finalLineId from the ref instead of the stale selectedShapeIds state
       updateHistory({ 
           footprint: footprintRef.current, 
-          selectedShapeIds: [selectedShapeIds[0]] // Keep selection
+          selectedShapeIds: [finalLineId] 
       });
       window.removeEventListener('mousemove', handleTieDownMouseMove);
       window.removeEventListener('mouseup', handleTieDownMouseUp);
