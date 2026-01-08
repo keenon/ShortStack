@@ -2536,6 +2536,7 @@ const handleUngroup = (unionId: string) => {
                                 onDoubleClick={handleShapeDoubleClick}
                                 handleRadius={handleRadius}
                                 rootFootprint={footprint}
+                                parentTransform={{ x: 0, y: 0, angle: 0 }}
                                 layerVisibility={layerVisibility}
                                 hoveredPointIndex={hoveredPointIndex}
                                 setHoveredPointIndex={setHoveredPointIndex}
@@ -2568,6 +2569,7 @@ const handleUngroup = (unionId: string) => {
                                     onDoubleClick={handleShapeDoubleClick}
                                     handleRadius={handleRadius}
                                     rootFootprint={footprint}
+                                    parentTransform={{ x: 0, y: 0, angle: 0 }}
                                     layerVisibility={layerVisibility}
                                     hoveredPointIndex={hoveredPointIndex}
                                     setHoveredPointIndex={setHoveredPointIndex}
@@ -2946,8 +2948,7 @@ async function collectExportShapesAsync(
                 }
 
                 exportObj.points = lineShape.points.map(p => {
-                    // 1. Resolve point in the context of the footprint where it resides
-                    const resolved = resolvePoint(p, contextFootprint, allFootprints, params);
+                    const resolved = resolvePoint(p, contextFootprint, allFootprints, params, transform);
                     
                     // 2. Transform the resolved point by the cumulative transform of the recursion
                     // transform.angle is the rotation of contextFootprint in the global export frame
@@ -2965,12 +2966,21 @@ async function collectExportShapesAsync(
                         y: v.x * sin + v.y * cos
                     } : undefined;
 
-                    return {
-                        x: gx + rx,
-                        y: gy + ry,
-                        handle_in: rotateVec(resolved.handleIn),
-                        handle_out: rotateVec(resolved.handleOut)
-                    };
+                    if (p.snapTo) {
+                        return {
+                            x: transform.x + rx,
+                            y: transform.y + ry,
+                            handle_in: rotateVec(resolved.handleIn),
+                            handle_out: rotateVec(resolved.handleOut)
+                        };
+                    } else {
+                        return {
+                            x: gx + rx,
+                            y: gy + ry,
+                            handle_in: rotateVec(resolved.handleIn),
+                            handle_out: rotateVec(resolved.handleOut)
+                        };
+                    }
                 });
                 result.push(exportObj);
             } else if (shape.type === "polygon") {
@@ -2980,7 +2990,7 @@ async function collectExportShapesAsync(
                 if (endmillRadius <= 0.001 || layer.type === "Cut") {
                     exportObj.shape_type = "polygon";
                     exportObj.points = poly.points.map(p => {
-                        const resolved = resolvePoint(p, contextFootprint, allFootprints, params);
+                        const resolved = resolvePoint(p, contextFootprint, allFootprints, params, transform);
                         const rad = (transform.angle * Math.PI) / 180;
                         const cos = Math.cos(rad);
                         const sin = Math.sin(rad);
@@ -2990,17 +3000,27 @@ async function collectExportShapesAsync(
                             x: v.x * cos - v.y * sin,
                             y: v.x * sin + v.y * cos
                         } : undefined;
-                        return {
-                            x: gx + rx,
-                            y: gy + ry,
-                            handle_in: rotateVec(resolved.handleIn),
-                            handle_out: rotateVec(resolved.handleOut)
-                        };
+                        
+                        if (p.snapTo) {
+                            return {
+                                x: transform.x + rx,
+                                y: transform.y + ry,
+                                handle_in: rotateVec(resolved.handleIn),
+                                handle_out: rotateVec(resolved.handleOut)
+                            };
+                        } else {
+                            return {
+                                x: gx + rx,
+                                y: gy + ry,
+                                handle_in: rotateVec(resolved.handleIn),
+                                handle_out: rotateVec(resolved.handleOut)
+                            };
+                        }
                     });
                     result.push(exportObj);
                 } else {
                     // Complex Carve: Pre-calculate slices in JS
-                    const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFootprint, allFootprints, 32);
+                    const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFootprint, allFootprints, 32, transform);
                     
                     // Transform basePoints to Global Export Frame (gx, gy, angle)
                     // getPolyOutlinePoints returns local (relative to shape origin).

@@ -1,6 +1,6 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion, FootprintText } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion, FootprintText, FootprintPolygon } from "../types";
 import { evaluateExpression, resolvePoint, getTransformAlongLine } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
@@ -118,6 +118,7 @@ export const RecursiveShapeRenderer = ({
   onlyHandles = false, // IMPROVEMENT: New prop to render only interactive handles
   strokeScale = 1, // NEW: Current view zoom scale for SVG filters
   overrideStyle = null, // NEW: Internal prop to force styling on union children
+  parentTransform = { x: 0, y: 0, angle: 0 }, // NEW: Transform Context for correct snapping
   hoveredTieDownId,
   setHoveredTieDownId,
   onTieDownMouseDown,
@@ -142,6 +143,7 @@ export const RecursiveShapeRenderer = ({
   onlyHandles?: boolean;
   strokeScale?: number;
   overrideStyle?: { fill?: string, stroke?: string, strokeWidth?: number } | null;
+  parentTransform?: { x: number, y: number, angle: number };
   hoveredTieDownId?: string | null;
   setHoveredTieDownId?: (id: string | null) => void;
   onTieDownMouseDown?: (e: React.MouseEvent, lineId: string, tieDownId: string) => void;
@@ -158,6 +160,23 @@ export const RecursiveShapeRenderer = ({
   // If locked, we generally don't want to show handles (points, resize rings) 
   // because they imply editability.
   const showHandles = isSelected && !isLocked && !onlyHandles; 
+
+  // Calculate Global Transform for this Shape (to pass down to children)
+  const lx = (shape.type === "line") ? 0 : evaluateExpression((shape as any).x, params);
+  const ly = (shape.type === "line") ? 0 : evaluateExpression((shape as any).y, params);
+  const la = (shape.type === "rect" || shape.type === "footprint" || shape.type === "union" || shape.type === "text") 
+      ? evaluateExpression((shape as any).angle, params) : 0;
+
+  const rad = parentTransform.angle * (Math.PI / 180);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  
+  // Current Global Transform
+  const currentGlobalX = parentTransform.x + (lx * cos - ly * sin);
+  const currentGlobalY = parentTransform.y + (lx * sin + ly * cos);
+  const currentGlobalAngle = parentTransform.angle + la;
+  
+  const childTransform = { x: currentGlobalX, y: currentGlobalY, angle: currentGlobalAngle };
 
   // --- BOARD OUTLINE RENDERER ---
   if (shape.type === "boardOutline") {
@@ -177,6 +196,7 @@ export const RecursiveShapeRenderer = ({
               setHoveredMidpointIndex={setHoveredMidpointIndex}
               onAddMidpoint={onAddMidpoint}
               onlyHandles={onlyHandles}
+              parentTransform={parentTransform}
           />
       );
   }
@@ -184,8 +204,8 @@ export const RecursiveShapeRenderer = ({
   // --- WIRE GUIDE RENDERER (Virtual Shape) ---
   if (shape.type === "wireGuide") {
     const wg = shape as FootprintWireGuide;
-    const x = evaluateExpression(wg.x, params);
-    const y = evaluateExpression(wg.y, params);
+    const x = lx; // Render relative to parent group
+    const y = ly;
 
     // Aesthetic: Subtle gray normally, bright purple when selected
     const stroke = isSelected ? selectionColor : "#666";
@@ -262,9 +282,10 @@ export const RecursiveShapeRenderer = ({
       const ref = shape as FootprintReference;
       const targetFp = allFootprints.find(f => f.id === ref.footprintId);
 
-      const x = evaluateExpression(ref.x, params);
-      const y = evaluateExpression(ref.y, params);
-      const angle = evaluateExpression(ref.angle, params);
+      // Render local
+      const x = lx;
+      const y = ly;
+      const angle = la;
 
       // Styles for the container of the footprint ref
       const containerStyle: React.CSSProperties = {
@@ -323,6 +344,7 @@ export const RecursiveShapeRenderer = ({
                     layerVisibility={layerVisibility}
                     strokeScale={strokeScale}
                     overrideStyle={overrideStyle}
+                    parentTransform={childTransform}
                   />
               ))}
               
@@ -335,9 +357,10 @@ export const RecursiveShapeRenderer = ({
 
   if (shape.type === "union") {
       const u = shape as FootprintUnion;
-      const x = evaluateExpression(u.x, params);
-      const y = evaluateExpression(u.y, params);
-      const angle = evaluateExpression(u.angle, params);
+      // Local Coords
+      const x = lx;
+      const y = ly;
+      const angle = la;
 
       // Determine Colors for the Union silhouette
       let strokeColor = isSelected ? selectionColor : "#888";
@@ -394,6 +417,7 @@ export const RecursiveShapeRenderer = ({
                                 onlyHandles={false}
                                 strokeScale={strokeScale}
                                 overrideStyle={{ fill: highestLayer ? highestLayer.color : defaultFill, stroke: "none" }}
+                                parentTransform={childTransform}
                               />
                           ))}
                       </g>
@@ -416,6 +440,7 @@ export const RecursiveShapeRenderer = ({
                                 onlyHandles={false}
                                 strokeScale={strokeScale}
                                 overrideStyle={{ fill: "black", stroke: "none" }}
+                                parentTransform={childTransform}
                               />
                           ))}
                       </g>
@@ -477,17 +502,17 @@ export const RecursiveShapeRenderer = ({
 
   if (shape.type === "circle") {
     const r = evaluateExpression(shape.diameter, params) / 2;
-    const cx = evaluateExpression(shape.x, params);
-    const cy = evaluateExpression(shape.y, params);
+    const cx = lx;
+    const cy = ly;
     return <circle cx={cx} cy={-cy} r={r} {...commonProps} />;
   }
 
   if (shape.type === "rect") {
     const w = evaluateExpression(shape.width, params);
     const h = evaluateExpression(shape.height, params);
-    const x = evaluateExpression(shape.x, params);
-    const y = evaluateExpression(shape.y, params);
-    const angle = evaluateExpression(shape.angle, params);
+    const x = lx;
+    const y = ly;
+    const angle = la;
     const rawCr = evaluateExpression((shape as FootprintRect).cornerRadius, params);
     const cr = Math.max(0, Math.min(rawCr, Math.min(w, h) / 2));
     
@@ -506,13 +531,27 @@ export const RecursiveShapeRenderer = ({
   }
 
   if (shape.type === "polygon") {
-      const originX = evaluateExpression(shape.x, params);
-      const originY = evaluateExpression(shape.y, params);
+      const originX = lx;
+      const originY = ly;
+      
       const pts = shape.points.map(p => {
-          const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
+          // Pass parentTransform to resolvePoint for snapped points inside unions
+          const resolved = resolvePoint(p, rootFootprint, allFootprints, params, parentTransform);
+          
+          let finalX, finalY;
+          if (p.snapTo) {
+              // Snapped: resolved is absolute in container space. Use as is.
+              finalX = resolved.x;
+              finalY = resolved.y;
+          } else {
+              // Unsnapped: resolved is relative to shape. Add origin.
+              finalX = originX + resolved.x;
+              finalY = originY + resolved.y;
+          }
+
           return {
-              x: originX + resolved.x,
-              y: originY + resolved.y,
+              x: finalX,
+              y: finalY,
               hIn: resolved.handleIn,
               hOut: resolved.handleOut,
               isSnapped: !!p.snapTo
@@ -618,11 +657,25 @@ export const RecursiveShapeRenderer = ({
   if (shape.type === "line") {
       const thickness = evaluateExpression((shape as FootprintLine).thickness, params);
       
+        // Use logic similar to Polygon for resolving points in container
+        const originX = (lx === 0) ? 0 : lx; // Lines are usually 0,0 but just in case
+        const originY = (ly === 0) ? 0 : ly;
+
         const pts = shape.points.map(p => {
-            const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
+            const resolved = resolvePoint(p, rootFootprint, allFootprints, params, parentTransform);
+            
+            let finalX, finalY;
+            if (p.snapTo) {
+                finalX = resolved.x;
+                finalY = resolved.y;
+            } else {
+                finalX = originX + resolved.x;
+                finalY = originY + resolved.y;
+            }
+
             return {
-                x: resolved.x,
-                y: resolved.y,
+                x: finalX,
+                y: finalY,
                 hIn: resolved.handleIn,
                 hOut: resolved.handleOut,
                 isSnapped: !!p.snapTo
@@ -657,7 +710,7 @@ export const RecursiveShapeRenderer = ({
             const dist = evaluateExpression(td.distance, params);
             const rotOffset = evaluateExpression(td.angle, params);
 
-            const transform = getTransformAlongLine(shape as FootprintLine, dist, params, rootFootprint, allFootprints);
+            const transform = getTransformAlongLine(shape as FootprintLine, dist, params, rootFootprint, allFootprints, parentTransform);
             if (!transform) return null;
 
             const finalAngle = transform.angle - 90 + rotOffset;
@@ -704,6 +757,7 @@ export const RecursiveShapeRenderer = ({
                         layerVisibility={layerVisibility}
                         strokeScale={strokeScale}
                         overrideStyle={isHovered ? { stroke: "#646cff" } : undefined}
+                        parentTransform={parentTransform}
                     />
                 </g>
             );
@@ -801,9 +855,9 @@ export const RecursiveShapeRenderer = ({
 
   if (shape.type === "text") {
     const txt = shape as FootprintText;
-    const x = evaluateExpression(txt.x, params);
-    const y = evaluateExpression(txt.y, params);
-    const angle = evaluateExpression(txt.angle, params);
+    const x = lx;
+    const y = ly;
+    const angle = la;
     const fontSize = evaluateExpression(txt.fontSize, params);
     const lines = (txt.text || "").split('\n');
     
@@ -855,6 +909,7 @@ export const BoardOutlineRenderer = ({
   setHoveredMidpointIndex,
   onAddMidpoint,
   onlyHandles = false,
+  parentTransform = { x: 0, y: 0, angle: 0 },
 }: {
   shape: FootprintBoardOutline;
   isSelected: boolean;
@@ -870,6 +925,7 @@ export const BoardOutlineRenderer = ({
   setHoveredMidpointIndex?: (index: number | null) => void;
   onAddMidpoint?: (shapeId: string, index: number) => void;
   onlyHandles?: boolean;
+  parentTransform?: { x: number, y: number, angle: number };
 }) => {
     const isLocked = !!shape.locked;
     const points = shape.points;
@@ -883,10 +939,21 @@ export const BoardOutlineRenderer = ({
     const originY = evaluateExpression(shape.y, params);
 
     const pts = points.map(p => {
-        const resolved = resolvePoint(p, rootFootprint, allFootprints, params);
+        // Pass parentTransform for correct snapping
+        const resolved = resolvePoint(p, rootFootprint, allFootprints, params, parentTransform);
+        
+        let finalX, finalY;
+        if (p.snapTo) {
+            finalX = resolved.x;
+            finalY = resolved.y;
+        } else {
+            finalX = originX + resolved.x;
+            finalY = originY + resolved.y;
+        }
+
         return {
-            x: originX + resolved.x,
-            y: originY + resolved.y,
+            x: finalX,
+            y: finalY,
             hIn: resolved.handleIn,
             hOut: resolved.handleOut,
             isSnapped: !!p.snapTo

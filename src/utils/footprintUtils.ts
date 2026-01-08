@@ -423,12 +423,51 @@ export function getShapeAABB(
         const rrad = -pA * (Math.PI / 180);
         const rcos = Math.cos(rrad); const rsin = Math.sin(rrad);
 
+        // When inside AABB, we are calculating Global Bounds.
+        // We need resolvePoint to give us Local Coordinates relative to the Shape (0,0).
+        // Then we transform those locals to Global using gx/gy/gA.
+        // pX, pY, pA is the Container Transform.
+        // gx, gy, gA is the Shape Transform.
+        // resolvePoint(..., {x:gx, y:gy, angle:gA}) gives us Local relative to Shape (0,0).
+        // We assume VisualY (-pY) flip was handled by caller for pY?
+        // Note: pY passed to getShapeAABB is usually Visual Y in FootprintEditor (0,0).
+        // BUT math logic uses +Y up.
+        // We will assume pX, pY, pA are Math Coordinates for resolvePoint context.
+        // But for visual projection, we flip Y.
+        
+        // Let's pass the Shape's Global Math Transform to resolvePoint.
+        // Shape Global Math X = gx
+        // Shape Global Math Y = gy (calculated above as +Y up)
+        // Shape Global Math Angle = gA
+        
+        const shapeGlobalTransform = { x: gx, y: gy, angle: gA };
+
         points.forEach(p => {
-            const res = resolvePoint(p, rootFootprint, allFootprints, params);
-            const mx = lx + res.x;
-            const my = ly + res.y;
-            const fx = pX + (mx * rcos - my * rsin);
-            const fy = -(pY + (mx * rsin + my * rcos));
+            // resolvePoint returns coordinates relative to Shape Origin (0,0)
+            const res = resolvePoint(p, rootFootprint, allFootprints, params, shapeGlobalTransform);
+            
+            // res is Local (x,y)
+            const mx = res.x;
+            const my = res.y;
+            
+            // Transform Local (mx, my) by Shape Global Transform (gx, gy, gA)
+            // But wait, the rotation matrix used below (rcos, rsin) uses rrad = -pA?
+            // This assumes points are relative to the Container, not the Shape?
+            // The code below: `mx = lx + res.x`.
+            // lx is Shape X in Container.
+            // If res.x is Local to Shape, then `lx + res.x` is Local to Container.
+            // Then we rotate by Container Angle (pA).
+            // This is correct IF `resolvePoint` returns Local to Shape.
+            
+            // However, `getShapeAABB` logic previously assumed `res.x` was relative to Shape.
+            // `resolvePoint` now guarantees it returns Local to Shape.
+            
+            const shapeRelX = lx + mx;
+            const shapeRelY = ly + my;
+            
+            const fx = pX + (shapeRelX * rcos - shapeRelY * rsin);
+            const fy = -(pY + (shapeRelX * rsin + shapeRelY * rcos)); // Visual Y flip
+            
             minX = Math.min(minX, fx); maxX = Math.max(maxX, fx);
             minY = Math.min(minY, fy); maxY = Math.max(maxY, fy);
         });
@@ -631,16 +670,47 @@ export function isShapeInSelection(
     else {
         const ptsRaw = (shape as any).points || [];
         if (ptsRaw.length < 2) return false;
+        
+        const shapeGlobalTransform = { x: gx, y: gy, angle: gA };
+
         const visualPoints = ptsRaw.map((p: any) => {
-             const res = resolvePoint(p, rootFootprint, allFootprints, params);
+             // Pass shapeGlobalTransform to normalize snaps relative to shape origin
+             const res = resolvePoint(p, rootFootprint, allFootprints, params, shapeGlobalTransform);
+             
+             // res is Local to Shape (0,0)
+             // lx, ly are Shape Local to Container (already factored into gx, gy)
+             // So we construct Global from Shape Global (gx, gy) + Rot(res)
+             
+             // BUT, `isShapeInSelection` loops over Container coordinates?
+             // In AABB we did: `mx = lx + res.x` (Local to Container).
+             // Let's do that here to be consistent with rotation logic.
+             // We need Container Transform (pX, pY, pA).
+             // `lx, ly` is Shape Local.
+             // `res.x` is Shape Relative.
+             
+             const mx = lx + res.x; 
+             const my = ly + res.y;
+             
+             // Rotation logic using Parent Transform
              const rrad = -pA * (Math.PI / 180);
              const rcos = Math.cos(rrad); const rsin = Math.sin(rrad);
-             const mx = lx + res.x; const my = ly + res.y;
+
+             const vx = pX + (mx * rcos - my * rsin);
+             const vy = -(pY + (mx * rsin + my * rcos)); // Visual Y
+             
+             const rotHandle = (h?: {x: number, y: number}) => {
+                 if (!h) return undefined;
+                 return {
+                     x: h.x * rcos - h.y * rsin,
+                     y: -(h.x * rsin + h.y * rcos)
+                 };
+             };
+
              return {
-                 x: pX + (mx * rcos - my * rsin),
-                 y: -(pY + (mx * rsin + my * rcos)),
-                 hOut: res.handleOut ? {x: res.handleOut.x * rcos - res.handleOut.y * rsin, y: -(res.handleOut.x * rsin + res.handleOut.y * rcos)} : undefined,
-                 hIn: res.handleIn ? {x: res.handleIn.x * rcos - res.handleIn.y * rsin, y: -(res.handleIn.x * rsin + res.handleIn.y * rcos)} : undefined
+                 x: vx,
+                 y: vy,
+                 hOut: rotHandle(res.handleOut),
+                 hIn: rotHandle(res.handleIn)
              };
         });
         const isClosed = (shape.type !== "line");
@@ -817,7 +887,11 @@ export function resolvePoint(
     point: Point,
     rootFootprint: Footprint,
     allFootprints: Footprint[],
-    params: Parameter[]
+    params: Parameter[],
+    // NEW: Context transform: Where is the current shape relative to the root?
+    // Passing this allows us to "unsnap" global coordinates back to the shape's local space.
+    // This is critical for shapes inside unions or transformed references.
+    parentTransform: { x: number, y: number, angle: number } = { x: 0, y: 0, angle: 0 }
 ): { x: number, y: number, handleIn?: {x: number, y: number}, handleOut?: {x: number, y: number} } {
     
     // Helper to evaluate local handles
@@ -840,7 +914,8 @@ export function resolvePoint(
     let currentShapes = rootFootprint.shapes;
     
     // Accumulate transform from root to the guide
-    let transform = { x: 0, y: 0, angle: 0 }; 
+    let guideTransform = { x: 0, y: 0, angle: 0 }; 
+    let foundGuide: FootprintWireGuide | null = null;
 
     for (let i = 0; i < path.length; i++) {
         const id = path[i];
@@ -853,74 +928,91 @@ export function resolvePoint(
              const ly = evaluateExpression(wg.y, params);
              
              // Current accumulated rotation
-             const rad = (transform.angle * Math.PI) / 180;
+             const rad = (guideTransform.angle * Math.PI) / 180;
              const cos = Math.cos(rad);
              const sin = Math.sin(rad);
              
              // Anchor point is translated and rotated
-             const gx = transform.x + (lx * cos - ly * sin);
-             const gy = transform.y + (lx * sin + ly * cos);
+             guideTransform.x += (lx * cos - ly * sin);
+             guideTransform.y += (lx * sin + ly * cos);
+             foundGuide = wg;
+             break; // Found it
 
-             // Handles are VECTORS: they only rotate, they do not translate
-             // UPDATED: Project single Wire Guide handle to symmetric in/out handles for the snapped point
-             // BUT use the POSITIVE vector for BOTH handles to create a "pinch" effect
-             if (wg.handle) {
-                 const hx = evaluateExpression(wg.handle.x, params);
-                 const hy = evaluateExpression(wg.handle.y, params);
-                 
-                 const rotX = hx * cos - hy * sin;
-                 const rotY = hx * sin + hy * cos;
+        } 
+        
+        let lx = 0, ly = 0, la = 0;
 
-                 return {
-                     x: gx,
-                     y: gy,
-                     handleOut: { x: rotX, y: rotY },
-                     handleIn: { x: rotX, y: rotY } // Changed from negative to positive for pinch
-                 };
-             }
-
-             return { x: gx, y: gy };
-
-        } else if (shape.type === "footprint") {
+        if (shape.type === "footprint") {
              const ref = shape as FootprintReference;
              const nextFp = allFootprints.find(f => f.id === ref.footprintId);
              if (!nextFp) return defaultRes;
 
-             const lx = evaluateExpression(ref.x, params);
-             const ly = evaluateExpression(ref.y, params);
-             const la = evaluateExpression(ref.angle, params);
-
-             const rad = (transform.angle * Math.PI) / 180;
-             const cos = Math.cos(rad);
-             const sin = Math.sin(rad);
-             
-             // Move the origin of the next footprint into the current frame
-             transform.x += (lx * cos - ly * sin);
-             transform.y += (lx * sin + ly * cos);
-             transform.angle += la;
-             
+             lx = evaluateExpression(ref.x, params);
+             ly = evaluateExpression(ref.y, params);
+             la = evaluateExpression(ref.angle, params);
              currentShapes = nextFp.shapes;
         } else if (shape.type === "union") {
             const u = shape as FootprintUnion;
-            const lx = evaluateExpression(u.x, params);
-            const ly = evaluateExpression(u.y, params);
-            const la = evaluateExpression(u.angle, params);
-
-            const rad = (transform.angle * Math.PI) / 180;
-            const cos = Math.cos(rad);
-            const sin = Math.sin(rad);
-            
-            transform.x += (lx * cos - ly * sin);
-            transform.y += (lx * sin + ly * cos);
-            transform.angle += la;
-            
+            lx = evaluateExpression(u.x, params);
+            ly = evaluateExpression(u.y, params);
+            la = evaluateExpression(u.angle, params);
             currentShapes = u.shapes;
         } else {
             return defaultRes;
         }
+
+        const rad = (guideTransform.angle * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        
+        // Move the origin of the next footprint into the current frame
+        guideTransform.x += (lx * cos - ly * sin);
+        guideTransform.y += (lx * sin + ly * cos);
+        guideTransform.angle += la;
     }
     
-    return defaultRes;
+    if (!foundGuide) return defaultRes;
+
+    // --- NEW LOGIC: INVERSE TRANSFORM ---
+    // We have Guide Global (guideTransform) and Parent Global (parentTransform).
+    // We need Point Local (relative to parent).
+    // Local = InverseParent * Global
+    
+    const pRad = parentTransform.angle * (Math.PI / 180);
+    const pCos = Math.cos(pRad);
+    const pSin = Math.sin(pRad);
+    
+    // Translate relative to parent
+    const relX = guideTransform.x - parentTransform.x;
+    const relY = guideTransform.y - parentTransform.y;
+    
+    // Rotate backwards (-pAngle)
+    const localX = relX * pCos + relY * pSin;
+    const localY = -relX * pSin + relY * pCos;
+
+    // Handles are VECTORS: they only rotate, they do not translate
+    // UPDATED: Project single Wire Guide handle to symmetric in/out handles for the snapped point
+    // BUT use the POSITIVE vector for BOTH handles to create a "pinch" effect
+    let handleIn, handleOut;
+
+    if (foundGuide.handle) {
+         const hx = evaluateExpression(foundGuide.handle.x, params);
+         const hy = evaluateExpression(foundGuide.handle.y, params);
+         
+         // Guide vector in Global Space (rotated by guide accumulated angle)
+         const gRad = guideTransform.angle * Math.PI / 180;
+         const globalHX = hx * Math.cos(gRad) - hy * Math.sin(gRad);
+         const globalHY = hx * Math.sin(gRad) + hy * Math.cos(gRad);
+         
+         // Map Vector to Local Space (Rotate by -pAngle)
+         const localHX = globalHX * pCos + globalHY * pSin;
+         const localHY = -globalHX * pSin + globalHY * pCos;
+
+         handleOut = { x: localHX, y: localHY };
+         handleIn = { x: localHX, y: localHY }; 
+    }
+
+    return { x: localX, y: localY, handleIn, handleOut };
 }
 
 // ------------------------------------------------------------------
@@ -938,19 +1030,46 @@ export function getPolyOutlinePoints(
     params: Parameter[],
     contextFp: Footprint,
     allFootprints: Footprint[],
-    resolution: number
+    resolution: number,
+    // NEW: Optional parent transform for correct snapping context in recursion
+    parentTransform: { x: number, y: number, angle: number } = { x: 0, y: 0, angle: 0 },
+    // NEW: Optional shape position to normalize snapped points relative to shape origin
+    shapePosition: { x: number, y: number } = { x: 0, y: 0 }
 ): THREE.Vector2[] {
     if (points.length < 3) return [];
 
     const pathPoints: THREE.Vector2[] = [];
 
+    // Helper: Normalize Resolved Point to be Relative to Shape Origin
+    const normalize = (p: Point) => {
+        const res = resolvePoint(p, contextFp, allFootprints, params, parentTransform);
+        if (p.snapTo) {
+            // res is Absolute in Container (Union). 
+            // We want Relative to Shape Origin (which is at shapePosition inside container).
+            return { 
+                x: res.x - shapePosition.x, 
+                y: res.y - shapePosition.y, 
+                handleIn: res.handleIn, 
+                handleOut: res.handleOut 
+            };
+        } else {
+            // res is Relative to Shape (because p.x/y are relative)
+            return res;
+        }
+    };
+
     for (let i = 0; i < points.length; i++) {
         const currRaw = points[i];
         const nextRaw = points[(i + 1) % points.length];
 
-        const curr = resolvePoint(currRaw, contextFp, allFootprints, params);
-        const next = resolvePoint(nextRaw, contextFp, allFootprints, params);
+        const curr = normalize(currRaw);
+        const next = normalize(nextRaw);
 
+        // Add originX/Y? 
+        // Typically originX/Y passed to this function are 0,0 if we want local coords.
+        // If we want global, originX/Y are passed as global coords.
+        // Since we normalized snapped points to be relative to shape, adding originX/Y works for both cases.
+        
         const x1 = originX + curr.x;
         const y1 = originY + curr.y;
         const x2 = originX + next.x;
@@ -1266,7 +1385,9 @@ export function getTransformAlongLine(
     distanceParam: number,
     params: Parameter[],
     contextFp: Footprint,
-    allFootprints: Footprint[]
+    allFootprints: Footprint[],
+    // Optional parent transform if needed for recursive context
+    parentTransform: { x: number, y: number, angle: number } = { x: 0, y: 0, angle: 0 }
 ): PathTransform | null {
     const points = shape.points;
     if (points.length < 2) return null;
@@ -1304,8 +1425,17 @@ export function getTransformAlongLine(
     const STEPS = 20; // Increase this for higher position fidelity
 
     for(let i=0; i<points.length-1; i++) {
-        const curr = resolvePoint(points[i], contextFp, allFootprints, params);
-        const next = resolvePoint(points[i+1], contextFp, allFootprints, params);
+        // Pass parentTransform to resolvePoint for nested contexts
+        const curr = resolvePoint(points[i], contextFp, allFootprints, params, parentTransform);
+        const next = resolvePoint(points[i+1], contextFp, allFootprints, params, parentTransform);
+
+        // NOTE: resolvePoint returns coordinates relative to Shape Origin (if snapped and normalized)
+        // or relative to shape if not snapped.
+        // Wait, resolvePoint with parentTransform returns coordinates Local to the Shape's Container (relative to parent).
+        // If we want coordinates relative to the line itself, we might need to adjust.
+        // But FootprintLine has `x,y` (usually 0,0).
+        // If the line has non-zero x,y, `resolvePoint` math in other places adds it.
+        // Here we just use the resolved points which are consistent with each other.
 
         if (curr.handleOut || next.handleIn) {
             const p0 = curr;
@@ -1435,7 +1565,8 @@ export function getClosestDistanceAlongLine(
     targetPoint: { x: number, y: number },
     params: Parameter[],
     contextFp: Footprint,
-    allFootprints: Footprint[]
+    allFootprints: Footprint[],
+    parentTransform: { x: number, y: number, angle: number } = { x: 0, y: 0, angle: 0 }
 ): { distance: number, closestPoint: { x: number, y: number } } {
     const points = shape.points;
     if (points.length < 2) return { distance: 0, closestPoint: { x: 0, y: 0 } };
@@ -1463,8 +1594,9 @@ export function getClosestDistanceAlongLine(
     };
 
     for(let i=0; i<points.length-1; i++) {
-        const curr = resolvePoint(points[i], contextFp, allFootprints, params);
-        const next = resolvePoint(points[i+1], contextFp, allFootprints, params);
+        // Pass parentTransform to resolvePoint
+        const curr = resolvePoint(points[i], contextFp, allFootprints, params, parentTransform);
+        const next = resolvePoint(points[i+1], contextFp, allFootprints, params, parentTransform);
 
         if (curr.handleOut || next.handleIn) {
             const p0 = curr;
