@@ -702,26 +702,58 @@ self.onmessage = async (e: MessageEvent) => {
                             }
                         } else {
                             if (!shouldGenTool && actualDepth > CSG_EPSILON) {
-                                const toolCut = collect(collect(componentCS.extrude(actualDepth)).translate([0, 0, -actualDepth/2]));
-                                const toolAligned = collect(toolCut.rotate([-90, 0, 0]));
+                                // FIXED: Handle coplanar faces for through-cuts by extending tool height
+                                let toolDepth = actualDepth;
+                                let toolOffset = 0;
 
-                                const cutY = layer.carveSide === "Top"
-                                    ? (thickness / 2 - actualDepth / 2)
-                                    : (-thickness / 2 + actualDepth / 2);
-
-                                const moved = collect(toolAligned.translate([0, cutY, 0]));
-                                base = collect(Manifold.difference(base, moved));
-
-                                // --- DIAGNOSTIC: CHECK FOR VANISHED MESH ---
-                                {
-                                    const _diagMesh = base.getMesh();
-                                    if (_diagMesh.vertProperties.length === 0) {
-                                        console.error(`[Worker] 🚨 CRITICAL: Mesh vanished after cutting "${shapeName}"`);
-                                        console.error(`[Worker]    Debug Data -> Depth: ${actualDepth}, Thickness: ${thickness}, CutY: ${cutY}`);
-                                        console.error(`[Worker]    Shape Bounds might exceed Board Bounds?`);
-                                    }
+                                if (isThroughCut) {
+                                    // OVERCUT to ensure robust boolean difference
+                                    toolDepth = thickness + 1.0; 
+                                    toolOffset = 0; // Centered at 0 to cut through both top (-t/2) and bottom (t/2)
+                                } else {
+                                    toolDepth = actualDepth;
+                                    toolOffset = layer.carveSide === "Top"
+                                        ? (thickness / 2 - actualDepth / 2)
+                                        : (-thickness / 2 + actualDepth / 2);
                                 }
-                                // -------------------------------------------
+
+                                const toolCut = collect(collect(componentCS.extrude(toolDepth)).translate([0, 0, -toolDepth/2]));
+                                const toolAligned = collect(toolCut.rotate([-90, 0, 0]));
+                                const moved = collect(toolAligned.translate([0, toolOffset, 0]));
+                                
+                                // SAFE DIFFERENCE OPERATION
+                                const nextBase = collect(Manifold.difference(base, moved));
+                                
+                                // Check if the operation destroyed the mesh
+                                let opFailed = false;
+                                try {
+                                    // Use efficient check if available, or fallback to getMesh
+                                    const nextVerts = (nextBase.numVert && typeof nextBase.numVert === 'function') 
+                                        ? nextBase.numVert() 
+                                        : nextBase.getMesh().vertProperties.length;
+                                        
+                                    if (nextVerts === 0) {
+                                        // Check if it was ALREADY empty
+                                        const prevVerts = (base.numVert && typeof base.numVert === 'function')
+                                            ? base.numVert()
+                                            : base.getMesh().vertProperties.length;
+                                            
+                                        if (prevVerts > 0) {
+                                            opFailed = true;
+                                        }
+                                    }
+                                } catch (e) {
+                                    // Fallback safety
+                                    console.warn("[Worker] Mesh validation failed, assuming success", e);
+                                }
+
+                                if (opFailed) {
+                                    console.error(`[Worker] 🚨 CRITICAL: Mesh vanished after cutting "${shapeName}". Reverting this operation to preserve board.`);
+                                    console.error(`[Worker]    Debug Data -> Depth: ${toolDepth}, Thickness: ${thickness}, ToolOffset: ${toolOffset}`);
+                                    // Do NOT update 'base'. We skip this cut.
+                                } else {
+                                    base = nextBase;
+                                }
                             }
                         }
 
