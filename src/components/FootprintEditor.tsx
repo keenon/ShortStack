@@ -2754,7 +2754,8 @@ async function collectExportShapesAsync(
     layerThickness: number,
     viewRef: Footprint3DViewHandle | null,
     transform = { x: 0, y: 0, angle: 0 },
-    forceInclude = false
+    forceInclude = false,
+    localTransform = { x: 0, y: 0, angle: 0 } // NEW: Tracks local context for correct snapping
 ): Promise<any[]> {
     let result: any[] = [];
 
@@ -2769,6 +2770,7 @@ async function collectExportShapesAsync(
         // FIX: Force Line origin to 0,0. The 2D renderer uses absolute points for lines.
         const lx = (shape.type === "line") ? 0 : evaluateExpression(shape.x, params);
         const ly = (shape.type === "line") ? 0 : evaluateExpression(shape.y, params);
+        const la = (shape.type === "rect" || shape.type === "footprint" || shape.type === "union") ? evaluateExpression((shape as any).angle, params) : 0;
         
         // Global Position
         const rad = (transform.angle * Math.PI) / 180;
@@ -2778,6 +2780,17 @@ async function collectExportShapesAsync(
         // Global Origin of the current shape (Parent Origin + Rotated Local Offset)
         const gx = transform.x + (lx * cos - ly * sin);
         const gy = transform.y + (lx * sin + ly * cos);
+
+        // NEW: Calculate Context-Local Transform (for snapping resolution)
+        // This accumulates the local offsets within the current footprint/union structure
+        const lRad = (localTransform.angle * Math.PI) / 180;
+        const lCos = Math.cos(lRad);
+        const lSin = Math.sin(lRad);
+        
+        const clx = localTransform.x + (lx * lCos - ly * lSin);
+        const cly = localTransform.y + (lx * lSin + ly * lCos);
+        const cla = localTransform.angle + la;
+        const currentLocal = { x: clx, y: cly, angle: cla };
 
         if (shape.type === "footprint") {
              const ref = shape as FootprintReference;
@@ -2795,7 +2808,8 @@ async function collectExportShapesAsync(
                      layerThickness,
                      viewRef,
                      { x: gx, y: gy, angle: globalAngle },
-                     forceInclude // Pass down forceInclude
+                     forceInclude,
+                     { x: 0, y: 0, angle: 0 } // RESET Local Transform when entering a new footprint context
                  );
                  result = result.concat(children);
              }
@@ -2848,7 +2862,8 @@ async function collectExportShapesAsync(
                      layerThickness,
                      viewRef,
                      { x: gx, y: gy, angle: globalAngle },
-                     shouldForceChildren
+                     shouldForceChildren,
+                     currentLocal // Pass the accumulated local transform for union children
                  );
 
                  if (overrideDepth >= 0) {
@@ -2928,7 +2943,14 @@ async function collectExportShapesAsync(
                             const dist = evaluateExpression(td.distance, params);
                             const rotOffset = evaluateExpression(td.angle, params);
                             
-                            const tf = getTransformAlongLine(lineShape, dist, params, contextFootprint, allFootprints);
+                            const tf = getTransformAlongLine(
+                                lineShape, 
+                                dist, 
+                                params, 
+                                contextFootprint, 
+                                allFootprints,
+                                currentLocal // Pass local context for snapping resolution
+                            );
                             if (tf) {
                                 const rx = tf.x * cos - tf.y * sin;
                                 const ry = tf.x * sin + tf.y * cos;
@@ -2948,13 +2970,12 @@ async function collectExportShapesAsync(
                 }
 
                 exportObj.points = lineShape.points.map(p => {
-                    const resolved = resolvePoint(p, contextFootprint, allFootprints, params, transform);
+                    // FIX: Pass currentLocal (Shape Context) to resolvePoint instead of Global Transform
+                    // This ensures snap coordinates are resolved relative to the Shape's Origin (which currentLocal defines).
+                    const resolved = resolvePoint(p, contextFootprint, allFootprints, params, currentLocal);
                     
-                    // 2. Transform the resolved point by the cumulative transform of the recursion
-                    // transform.angle is the rotation of contextFootprint in the global export frame
-                    const rad = (transform.angle * Math.PI) / 180;
-                    const cos = Math.cos(rad);
-                    const sin = Math.sin(rad);
+                    // resolved.x/y are now relative to the Shape Origin (currentLocal) because resolvePoint
+                    // calculates (GuideGlobal - ParentTransform).
                     
                     // Rotate anchor
                     const rx = resolved.x * cos - resolved.y * sin;
@@ -2968,8 +2989,8 @@ async function collectExportShapesAsync(
 
                     if (p.snapTo) {
                         return {
-                            x: transform.x + rx,
-                            y: transform.y + ry,
+                            x: gx + rx, // Global Shape Origin + Rotated Relative Point
+                            y: gy + ry,
                             handle_in: rotateVec(resolved.handleIn),
                             handle_out: rotateVec(resolved.handleOut)
                         };
@@ -2990,21 +3011,36 @@ async function collectExportShapesAsync(
                 if (endmillRadius <= 0.001 || layer.type === "Cut") {
                     exportObj.shape_type = "polygon";
                     exportObj.points = poly.points.map(p => {
-                        const resolved = resolvePoint(p, contextFootprint, allFootprints, params, transform);
-                        const rad = (transform.angle * Math.PI) / 180;
-                        const cos = Math.cos(rad);
-                        const sin = Math.sin(rad);
-                        const rx = resolved.x * cos - resolved.y * sin;
-                        const ry = resolved.x * sin + resolved.y * cos;
+                        // FIX: Pass currentLocal (Shape Context)
+                        const resolved = resolvePoint(p, contextFootprint, allFootprints, params, currentLocal);
+                        
+                        // resolved is Relative to Shape Origin
+                        // Global Rotation includes Shape Rotation (la)
+                        // 'transform.angle' is Parent Rotation. 'la' is Shape Rotation.
+                        // We need to rotate by Total Global Angle = transform.angle + la.
+                        // 'rad' above was calculated from 'transform.angle'.
+                        // We need a new cos/sin for the shape's total rotation?
+                        
+                        // Wait, 'gx, gy' includes rotation of 'lx, ly' by 'transform.angle'.
+                        // But the POINTS of a polygon are relative to the polygon origin, and they rotate WITH the polygon.
+                        // So we need to rotate resolved.x/y by (transform.angle + la).
+                        
+                        const shapeGlobalRad = (transform.angle + la) * (Math.PI / 180);
+                        const sCos = Math.cos(shapeGlobalRad);
+                        const sSin = Math.sin(shapeGlobalRad);
+
+                        const rx = resolved.x * sCos - resolved.y * sSin;
+                        const ry = resolved.x * sSin + resolved.y * sCos;
+                        
                         const rotateVec = (v?: {x: number, y: number}) => v ? {
-                            x: v.x * cos - v.y * sin,
-                            y: v.x * sin + v.y * cos
+                            x: v.x * sCos - v.y * sSin,
+                            y: v.x * sSin + v.y * sCos
                         } : undefined;
                         
                         if (p.snapTo) {
                             return {
-                                x: transform.x + rx,
-                                y: transform.y + ry,
+                                x: gx + rx,
+                                y: gy + ry,
                                 handle_in: rotateVec(resolved.handleIn),
                                 handle_out: rotateVec(resolved.handleOut)
                             };
@@ -3020,21 +3056,26 @@ async function collectExportShapesAsync(
                     result.push(exportObj);
                 } else {
                     // Complex Carve: Pre-calculate slices in JS
-                    const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFootprint, allFootprints, 32, transform, { x: lx, y: ly });
+                    // FIX: Pass currentLocal as parentTransform
+                    // shapePosition should be {0,0} because currentLocal puts us at Shape Origin
+                    const basePoints = getPolyOutlinePoints(
+                        poly.points, 
+                        0, 0, 
+                        params, 
+                        contextFootprint, 
+                        allFootprints, 
+                        32, 
+                        currentLocal, // Correct context for snapping
+                        { x: 0, y: 0 } // No offset needed if resolved point is relative to shape
+                    );
                     
-                    // Transform basePoints to Global Export Frame (gx, gy, angle)
-                    // getPolyOutlinePoints returns local (relative to shape origin).
-                    // We need to apply rotation manually since getPolyOutlinePoints doesn't do it.
-                    // And add gx/gy.
-                    
-                    const globalRad = (transform.angle * Math.PI) / 180;
-                    const gCos = Math.cos(globalRad);
-                    const gSin = Math.sin(globalRad);
+                    const shapeGlobalRad = (transform.angle + la) * (Math.PI / 180);
+                    const sCos = Math.cos(shapeGlobalRad);
+                    const sSin = Math.sin(shapeGlobalRad);
 
                     const globalBasePoints = basePoints.map(p => ({
-                        // This block was already using gx/gy, which is correct
-                        x: gx + (p.x * gCos - p.y * gSin),
-                        y: gy + (p.x * gSin + p.y * gCos)
+                        x: gx + (p.x * sCos - p.y * sSin),
+                        y: gy + (p.x * sSin + p.y * sCos)
                     }));
 
                     // Convert THREE.Vector2[] to {x,y}[]
