@@ -283,6 +283,10 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
     y: number;
   } | null>(null);
 
+  // NEW: State for Tie Down Interaction
+  const [hoveredTieDownId, setHoveredTieDownId] = useState<string | null>(null);
+  const [scrollToTieDownId, setScrollToTieDownId] = useState<string | null>(null);
+
   const footprintRef = useRef(footprint);
   useEffect(() => {
     footprintRef.current = footprint;
@@ -328,6 +332,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
       mode: DragMode;
       resizeHandle?: ResizeHandle;
       initialVal?: string; // Original expression for width/height/dia
+      tieDownId?: string; // NEW: Dragging a tie down
   } | null>(null);
   
   // FIX: Store the effective selection used during drag so we don't rely on stale closure state
@@ -762,6 +767,37 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
     clickedShapeId.current = null;
   };
 
+  // NEW: Handle Mouse Down on a Tie Down
+  const handleTieDownMouseDown = (e: React.MouseEvent, lineId: string, tieDownId: string) => {
+      if (e.button !== 0) return; // Left Click Only
+      e.stopPropagation(); e.preventDefault();
+      if (viewMode !== "2D") return;
+
+      setSelectedShapeIds([lineId]);
+      setScrollToTieDownId(tieDownId);
+
+      const shape = footprint.shapes.find(s => s.id === lineId);
+      if (!shape || shape.locked) return;
+
+      isShapeDragging.current = true;
+      hasMoved.current = false;
+      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+      
+      dragSelectionRef.current = [lineId]; // Ensure sync
+      shapeDragStartDataMap.current.clear();
+      shapeDragStartDataMap.current.set(lineId, JSON.parse(JSON.stringify(shape)));
+
+      dragTargetRef.current = {
+          id: lineId,
+          tieDownId: tieDownId,
+          mode: 'move',
+          initialVal: undefined
+      };
+
+      window.addEventListener('mousemove', handleShapeMouseMove);
+      window.addEventListener('mouseup', handleShapeMouseUp);
+  };
+
   const handleShapeMouseDown = (e: React.MouseEvent, id: string, pointIndex?: number) => {
       // Only allow Left Click (0) for shape interaction.
       // This allows Right Click (2) and Middle Click (1) to bubble up to camera panning.
@@ -932,6 +968,41 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           // Only move if part of selection, OR it is the specific target shape
           // FIX: Use dragSelectionRef instead of state to avoid stale closure issues
           if (s.id === targetId || dragSelectionRef.current.includes(s.id)) {
+              
+              // --- TIE DOWN LOGIC ---
+              if (dragTargetRef.current?.tieDownId && s.type === "line") {
+                  const line = s as FootprintLine;
+                  const startLine = startShape as FootprintLine;
+                  const tdIndex = startLine.tieDowns?.findIndex(t => t.id === dragTargetRef.current?.tieDownId) ?? -1;
+                  
+                  if (tdIndex !== -1 && startLine.tieDowns) {
+                      const startTD = startLine.tieDowns[tdIndex];
+                      const startDist = evaluateExpression(startTD.distance, params);
+                      
+                      if (e.altKey) {
+                          // ROTATION: Alt + Drag (1px = 1deg)
+                          const newAngle = modifyExpression(startTD.angle, dxPx);
+                          const newTieDowns = [...(line.tieDowns || [])];
+                          newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], angle: newAngle };
+                          return { ...s, tieDowns: newTieDowns };
+                      } else {
+                          // SLIDING: Drag along wire
+                          const tf = getTransformAlongLine(startLine, startDist, params, footprint, allFootprints);
+                          if (tf) {
+                              const rad = tf.angle * (Math.PI / 180);
+                              const tanX = Math.cos(rad);
+                              const tanY = Math.sin(rad);
+                              const projectedDelta = dxWorld * tanX + dyWorldMath * tanY;
+                              const newDist = modifyExpression(startTD.distance, projectedDelta);
+                              
+                              const newTieDowns = [...(line.tieDowns || [])];
+                              newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], distance: newDist };
+                              return { ...s, tieDowns: newTieDowns };
+                          }
+                      }
+                  }
+                  return s; // Fallback
+              }
               // --- RESIZE EXECUTION ---
               if (mode === 'resize' && s.id === targetId && initialVal) {
                   const cx = evaluateExpression(startShape.x, params);
@@ -2348,6 +2419,9 @@ const handleUngroup = (unionId: string) => {
                                 setHoveredMidpointIndex={setHoveredMidpointIndex}
                                 onAddMidpoint={handleAddMidpoint}
                                 strokeScale={strokeScale}
+                                hoveredTieDownId={hoveredTieDownId}
+                                setHoveredTieDownId={setHoveredTieDownId}
+                                onTieDownMouseDown={handleTieDownMouseDown}
                             />
                         );
                     })}
@@ -2490,6 +2564,9 @@ const handleUngroup = (unionId: string) => {
                 onGroup={handleGroup}
                 onUngroup={handleUngroup}
                 onBatchUpdate={handleBatchUpdate}
+                hoveredTieDownId={hoveredTieDownId}
+                setHoveredTieDownId={setHoveredTieDownId}
+                scrollToTieDownId={scrollToTieDownId}
               />
               {activeShape && (
                 <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>

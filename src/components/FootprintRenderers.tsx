@@ -118,6 +118,9 @@ export const RecursiveShapeRenderer = ({
   onlyHandles = false, // IMPROVEMENT: New prop to render only interactive handles
   strokeScale = 1, // NEW: Current view zoom scale for SVG filters
   overrideStyle = null, // NEW: Internal prop to force styling on union children
+  hoveredTieDownId,
+  setHoveredTieDownId,
+  onTieDownMouseDown,
 }: {
   shape: FootprintShape;
   allFootprints: Footprint[];
@@ -139,6 +142,9 @@ export const RecursiveShapeRenderer = ({
   onlyHandles?: boolean;
   strokeScale?: number;
   overrideStyle?: { fill?: string, stroke?: string, strokeWidth?: number } | null;
+  hoveredTieDownId?: string | null;
+  setHoveredTieDownId?: (id: string | null) => void;
+  onTieDownMouseDown?: (e: React.MouseEvent, lineId: string, tieDownId: string) => void;
 }) => {
   // Define locked state visuals
   const isLocked = !!shape.locked;
@@ -316,6 +322,7 @@ export const RecursiveShapeRenderer = ({
                     rootFootprint={rootFootprint}
                     layerVisibility={layerVisibility}
                     strokeScale={strokeScale}
+                    overrideStyle={overrideStyle}
                   />
               ))}
               
@@ -442,11 +449,11 @@ export const RecursiveShapeRenderer = ({
       fill = hexToRgba(highestLayer.color, 0.2);
   }
 
-  // Apply override from Union parent
+  // Apply override from Union parent or Tie Down interaction
   if (overrideStyle) {
       if (overrideStyle.fill) fill = overrideStyle.fill;
       if (overrideStyle.stroke) stroke = overrideStyle.stroke;
-      strokeWidth = 0;
+      strokeWidth = overrideStyle.strokeWidth || 2;
   }
 
   // If inside a selected parent footprint, highlight slightly
@@ -642,7 +649,7 @@ export const RecursiveShapeRenderer = ({
         // 2. Generate Outline Path for Visuals
         const outlineD = generateLineOutlinePath(pts, thickness);
 
-        // NEW: Render Tie Downs
+        // NEW: Export Tie Downs
         const tieDownElements = ((shape as FootprintLine).tieDowns || []).map(td => {
             const fp = allFootprints.find(f => f.id === td.footprintId);
             if (!fp) return null;
@@ -667,22 +674,38 @@ export const RecursiveShapeRenderer = ({
                 assignedLayers: {}
             };
 
+            const isHovered = hoveredTieDownId === td.id;
+
             return (
-                <RecursiveShapeRenderer
-                    key={td.id}
-                    shape={mockRefShape}
-                    allFootprints={allFootprints}
-                    params={params}
-                    stackup={stackup}
-                    isSelected={false}
-                    isParentSelected={isSelected}
-                    onMouseDown={() => {}} 
-                    onHandleDown={() => {}}
-                    handleRadius={handleRadius}
-                    rootFootprint={rootFootprint}
-                    layerVisibility={layerVisibility}
-                    strokeScale={strokeScale}
-                />
+                <g key={td.id}
+                   onMouseEnter={() => setHoveredTieDownId && setHoveredTieDownId(td.id)}
+                   onMouseLeave={() => setHoveredTieDownId && setHoveredTieDownId(null)}
+                   onMouseDown={(e) => {
+                       e.stopPropagation();
+                       if (onTieDownMouseDown) onTieDownMouseDown(e, shape.id, td.id);
+                   }}
+                >
+                    {isHovered && (
+                        <circle cx={transform.x} cy={-transform.y} r={handleRadius * 1.5} 
+                                fill="none" stroke="#646cff" strokeWidth={2} strokeDasharray="2,2" 
+                                vectorEffect="non-scaling-stroke" />
+                    )}
+                    <RecursiveShapeRenderer
+                        shape={mockRefShape}
+                        allFootprints={allFootprints}
+                        params={params}
+                        stackup={stackup}
+                        isSelected={false}
+                        isParentSelected={isSelected}
+                        onMouseDown={() => {}} 
+                        onHandleDown={() => {}}
+                        handleRadius={handleRadius}
+                        rootFootprint={rootFootprint}
+                        layerVisibility={layerVisibility}
+                        strokeScale={strokeScale}
+                        overrideStyle={isHovered ? { stroke: "#646cff" } : undefined}
+                    />
+                </g>
             );
         });
 

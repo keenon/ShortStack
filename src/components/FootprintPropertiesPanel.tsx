@@ -3,7 +3,7 @@
 import { Fragment, useMemo, useRef, useEffect } from "react";
 import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion, FootprintText, TieDown } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints, getTransformAlongLine } from "../utils/footprintUtils";
+import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints } from "../utils/footprintUtils";
 
 const FootprintPropertiesPanel = ({
   footprint,
@@ -27,6 +27,9 @@ const FootprintPropertiesPanel = ({
   onGroup,
   onUngroup,
   onBatchUpdate, // NEW: For mass locking
+  hoveredTieDownId,
+  setHoveredTieDownId,
+  scrollToTieDownId,
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -49,6 +52,9 @@ const FootprintPropertiesPanel = ({
   onGroup?: () => void;
   onUngroup?: (id: string) => void;
   onBatchUpdate?: (updates: {id: string, field: string, value: any}[]) => void;
+  hoveredTieDownId?: string | null;
+  setHoveredTieDownId?: (id: string | null) => void;
+  scrollToTieDownId?: string | null;
 }) => {
   
   // Get available wire guides for Snapping
@@ -57,6 +63,14 @@ const FootprintPropertiesPanel = ({
 
   // NEW: Refs for scrolling
   const rowRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const tieDownRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  // NEW: Effect to scroll to Tie Down
+  useEffect(() => {
+    if (scrollToTieDownId && tieDownRefs.current.has(scrollToTieDownId)) {
+        tieDownRefs.current.get(scrollToTieDownId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [scrollToTieDownId]);
 
   // Helper to manage Tie Downs
   const addTieDown = (lineId: string, currentTieDowns: TieDown[] = []) => {
@@ -1028,8 +1042,17 @@ const FootprintPropertiesPanel = ({
                 </div>
                 
                 <div className="points-list-container">
-                    {((shape as FootprintLine).tieDowns || []).map((td, idx) => (
-                        <div key={td.id} className="point-block">
+                    {((shape as FootprintLine).tieDowns || []).map((td, idx) => {
+                        const isHovered = hoveredTieDownId === td.id;
+                        return (
+                        <div 
+                            key={td.id} 
+                            className="point-block"
+                            ref={(el) => { if (el) tieDownRefs.current.set(td.id, el); else tieDownRefs.current.delete(td.id); }}
+                            style={isHovered ? { border: '1px solid #646cff' } : {}}
+                            onMouseEnter={() => setHoveredTieDownId && setHoveredTieDownId(td.id)}
+                            onMouseLeave={() => setHoveredTieDownId && setHoveredTieDownId(null)}
+                        >
                             <div className="point-header">
                                 <span>Tie Down {idx + 1}</span>
                                 <button className="icon-btn danger" onClick={() => removeTieDown(shape.id, td.id, (shape as FootprintLine).tieDowns!)}>×</button>
@@ -1059,7 +1082,8 @@ const FootprintPropertiesPanel = ({
                                 </div>
                             </div>
                         </div>
-                    ))}
+                        );
+                    })}
                     {(!(shape as FootprintLine).tieDowns || (shape as FootprintLine).tieDowns!.length === 0) && <div className="empty-hint">No tie downs added.</div>}
                 </div>
             </div>
