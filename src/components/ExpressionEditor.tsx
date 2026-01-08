@@ -1,5 +1,7 @@
+// src/components/ExpressionEditor.tsx
 import React, { useState, useRef, useEffect, KeyboardEvent } from "react";
-import * as math from "mathjs";
+// CHANGED: Import the custom instance instead of standard library
+import { math } from "../utils/footprintUtils"; 
 import { Parameter } from "../types";
 import "./ExpressionEditor.css";
 

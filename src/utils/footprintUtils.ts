@@ -1,7 +1,44 @@
 // src/utils/footprintUtils.ts
-import * as math from "mathjs";
+import { create, all } from "mathjs";
 import * as THREE from "three"; // Added THREE import
 import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine } from "../types";
+
+// --- CUSTOM MATHJS INSTANCE ---
+export const math = create(all);
+
+// Capture original functions to use in overrides
+const _add = math.add as any;
+const _subtract = math.subtract as any;
+
+// Override add/subtract to support "Implicit Millimeters"
+// This allows "10 + 5mm" to evaluate to "15mm" instead of throwing an error.
+math.import({
+    add: function(a: any, b: any) {
+        // Check if operands are Units
+        const aIsUnit = a && a.isUnit;
+        const bIsUnit = b && b.isUnit;
+        const aIsNum = typeof a === 'number';
+        const bIsNum = typeof b === 'number';
+
+        // If adding Unit + Number, treat Number as mm
+        if (aIsUnit && bIsNum) return _add(a, math.unit(b, 'mm'));
+        if (aIsNum && bIsUnit) return _add(math.unit(a, 'mm'), b);
+        
+        return _add(a, b);
+    },
+    subtract: function(a: any, b: any) {
+        const aIsUnit = a && a.isUnit;
+        const bIsUnit = b && b.isUnit;
+        const aIsNum = typeof a === 'number';
+        const bIsNum = typeof b === 'number';
+
+        // If subtracting Unit/Number, treat Number as mm
+        if (aIsUnit && bIsNum) return _subtract(a, math.unit(b, 'mm'));
+        if (aIsNum && bIsUnit) return _subtract(math.unit(a, 'mm'), b);
+        
+        return _subtract(a, b);
+    }
+}, { override: true });
 
 export function modifyExpression(expression: string, delta: number): string {
   if (delta === 0) return expression;
@@ -1151,7 +1188,7 @@ export function convertRectToPolyPoints(
         
         let hIn, hOut;
         
-        // Handles are vectors, they rotate but do not translate
+        // Handles are VECTORS, they rotate but do not translate
         if (p.hIn) {
             hIn = {
                 x: S(`(${p.hIn.x}) * ${cosA} - (${p.hIn.y}) * ${sinA}`),
