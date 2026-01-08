@@ -2201,6 +2201,14 @@ const handleUngroup = (unionId: string) => {
     if (!layer) return;
 
     if (format === "STL") {
+        // Force switch to 3D View if not active to ensure the Mesh Worker and R3F Loop are running.
+        // This prevents the "generating high resolution 3D mesh" step from hanging due to paused render loops in 2D mode.
+        if (viewMode !== "3D") {
+            setViewMode("3D");
+            // Yield execution to allow React to render the view switch and the Canvas to initialize
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
         if (!footprint3DRef.current) {
             alert("Please switch to 3D View to initialize the mesh before exporting STL.");
             return;
@@ -2226,6 +2234,8 @@ const handleUngroup = (unionId: string) => {
 
     if (!path) return;
 
+    // ... (Rest of function remains unchanged) ...
+    
     // 2. Prepare Data
     const layerThickness = evaluateExpression(layer.thicknessExpression, params);
 
@@ -2233,7 +2243,6 @@ const handleUngroup = (unionId: string) => {
     const assignedOutlineId = footprint.boardOutlineAssignments?.[layerId];
     const outlineShape = footprint.shapes.find(s => s.id === assignedOutlineId) as FootprintBoardOutline | undefined;
     
-    // FIX: Retrieve Origin for Board Outline (it might not be 0,0)
     const originX = outlineShape ? evaluateExpression(outlineShape.x, params) : 0;
     const originY = outlineShape ? evaluateExpression(outlineShape.y, params) : 0;
 
