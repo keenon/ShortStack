@@ -444,6 +444,11 @@ self.onmessage = async (e: MessageEvent) => {
             report(`Initializing ${layerStr}...`, 0);
 
             try {
+                // DEBUG: Log Inputs
+                console.log(`[Worker] Computing Layer "${layer.name}" (Type: ${layer.type})`);
+                console.log(`[Worker] Bounds:`, JSON.stringify(bounds));
+                console.log(`[Worker] Thickness:`, thickness);
+
                 // UPDATED: Origin Logic
                 // We enforce (0,0) as the global origin to match the React view.
                 const centerX = 0;
@@ -493,6 +498,13 @@ self.onmessage = async (e: MessageEvent) => {
                     // Correct: boundsCenterZ variable holds 2D Y center. So we negate it for 3D Z.
                     base = collect(cube.translate([boundsCenterX, 0, -boundsCenterZ]));
                 }
+
+                // DEBUG: Check Base Generation
+                if (!base) {
+                    throw new Error(`[Worker] Failed to generate base stock for layer ${layer.name}`);
+                }
+                const baseMeshCheck = base.getMesh();
+                console.log(`[Worker] Base Stock Vertices: ${baseMeshCheck.vertProperties.length}`);
 
                 // Keep a reference to the un-modified base to use as a clipping mask
                 // Because Manifold operations return NEW objects, this reference remains "pure"
@@ -699,6 +711,17 @@ self.onmessage = async (e: MessageEvent) => {
 
                                 const moved = collect(toolAligned.translate([0, cutY, 0]));
                                 base = collect(Manifold.difference(base, moved));
+
+                                // --- DIAGNOSTIC: CHECK FOR VANISHED MESH ---
+                                {
+                                    const _diagMesh = base.getMesh();
+                                    if (_diagMesh.vertProperties.length === 0) {
+                                        console.error(`[Worker] 🚨 CRITICAL: Mesh vanished after cutting "${shapeName}"`);
+                                        console.error(`[Worker]    Debug Data -> Depth: ${actualDepth}, Thickness: ${thickness}, CutY: ${cutY}`);
+                                        console.error(`[Worker]    Shape Bounds might exceed Board Bounds?`);
+                                    }
+                                }
+                                // -------------------------------------------
                             }
                         }
 
@@ -750,6 +773,15 @@ self.onmessage = async (e: MessageEvent) => {
                                     final = collect(flipped.translate([0, -thickness/2, 0]));
                                 }
                                 base = collect(Manifold.difference(base, final));
+
+                                // --- DIAGNOSTIC: CHECK FOR VANISHED MESH (FILLET) ---
+                                {
+                                    const _diagMesh = base.getMesh();
+                                    if (_diagMesh.vertProperties.length === 0) {
+                                        console.error(`[Worker] 🚨 CRITICAL: Mesh vanished after fillet subtract on "${shapeName}"`);
+                                    }
+                                }
+                                // ----------------------------------------------------
                             }
                         }
                     });
@@ -765,6 +797,9 @@ self.onmessage = async (e: MessageEvent) => {
 
                 const mesh = base.getMesh();
                 
+                // DEBUG: Final Result
+                console.log(`[Worker] Final Mesh "${layer.name}": ${mesh.vertProperties.length} verts, ${mesh.triVerts.length} tris`);
+
                 report(`Layer ${layer.name}: Complete`, 1.0);
 
                 self.postMessage({ 

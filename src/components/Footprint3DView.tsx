@@ -213,6 +213,19 @@ const LayerSolid = ({
     }).then((data) => {
         if (cancelled) return;
         
+        // --- DEBUG PRINTS START ---
+        console.group(`[LayerSolid] Loaded: ${layer.name}`);
+        console.log(`Vertices: ${data.vertProperties?.length || 0}`);
+        console.log(`Indices: ${data.triVerts?.length || 0}`);
+        
+        if (!data.vertProperties || data.vertProperties.length === 0) {
+            console.error(`⚠️ Layer "${layer.name}" returned NO geometry! Check if thickness is 0 or if boolean subtracted everything.`);
+        } else if (!data.triVerts || data.triVerts.length === 0) {
+            console.error(`⚠️ Layer "${layer.name}" has vertices but NO faces.`);
+        }
+        console.groupEnd();
+        // --- DEBUG PRINTS END ---
+
         if (data.vertProperties && data.triVerts) {
             const geom = new THREE.BufferGeometry();
             geom.setAttribute('position', new THREE.BufferAttribute(data.vertProperties, 3));
@@ -1009,7 +1022,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 });
 
 function geometryToSTL(geometry: THREE.BufferGeometry): Uint8Array {
-    const geom = geometry.toNonIndexed();
+    const geom = geometry.index ? geometry.toNonIndexed() : geometry.clone();
     const pos = geom.getAttribute('position');
     const count = pos.count;
     const triangleCount = Math.floor(count / 3);
