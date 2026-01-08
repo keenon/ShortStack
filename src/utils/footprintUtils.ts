@@ -992,14 +992,6 @@ export function resolvePoint(
     const pCos = Math.cos(pRad);
     const pSin = Math.sin(pRad);
     
-    // Translate relative to parent
-    const relX = guideTransform.x - parentTransform.x;
-    const relY = guideTransform.y - parentTransform.y;
-    
-    // Rotate backwards (-pAngle)
-    const localX = relX * pCos + relY * pSin;
-    const localY = -relX * pSin + relY * pCos;
-
     // Handles are VECTORS: they only rotate, they do not translate
     // UPDATED: Project single Wire Guide handle to symmetric in/out handles for the snapped point
     // BUT use the POSITIVE vector for BOTH handles to create a "pinch" effect
@@ -1016,13 +1008,39 @@ export function resolvePoint(
          const globalHX = hx * Math.cos(gRad) - hy * Math.sin(gRad);
          const globalHY = hx * Math.sin(gRad) + hy * Math.cos(gRad);
          
+         // Apply Junction Offset (Perpendicular shift)
+         const offset = evaluateExpression(point.junctionOffset, params);
+         if (Math.abs(offset) > 0.0001) {
+             const len = Math.sqrt(globalHX * globalHX + globalHY * globalHY);
+             if (len > 0) {
+                 // Normalize and rotate 90 degrees (-y, x) for left perpendicular relative to flow
+                 const perpX = -globalHY / len;
+                 const perpY = globalHX / len;
+                 guideTransform.x += perpX * offset;
+                 guideTransform.y += perpY * offset;
+             }
+         }
+
          // Map Vector to Local Space (Rotate by -pAngle)
-         const localHX = globalHX * pCos + globalHY * pSin;
-         const localHY = -globalHX * pSin + globalHY * pCos;
+         const localHX_raw = globalHX * pCos + globalHY * pSin;
+         const localHY_raw = -globalHX * pSin + globalHY * pCos;
+
+         // Apply Flip Direction
+         const flip = !!point.flipDirection;
+         const localHX = flip ? -localHX_raw : localHX_raw;
+         const localHY = flip ? -localHY_raw : localHY_raw;
 
          handleOut = { x: localHX, y: localHY };
          handleIn = { x: localHX, y: localHY }; 
     }
+
+    // Translate relative to parent (Done AFTER applying offsets to guideTransform)
+    const relX = guideTransform.x - parentTransform.x;
+    const relY = guideTransform.y - parentTransform.y;
+    
+    // Rotate backwards (-pAngle)
+    const localX = relX * pCos + relY * pSin;
+    const localY = -relX * pSin + relY * pCos;
 
     return { x: localX, y: localY, handleIn, handleOut };
 }

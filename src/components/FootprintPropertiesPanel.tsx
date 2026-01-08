@@ -217,6 +217,35 @@ const FootprintPropertiesPanel = ({
                 </select>
             </div>
 
+            {/* NEW: Snapped Wire Properties (Junction features) */}
+            {isHandleForced && (
+                <div style={{ 
+                    marginBottom: '10px', padding: '8px', background: '#222', 
+                    borderRadius: '4px', borderLeft: '3px solid #646cff' 
+                }}>
+                    <div style={{ fontSize: '0.8em', color: '#aaa', marginBottom: '5px', fontWeight: 'bold' }}>
+                        Wire Junction
+                    </div>
+                    <div style={{ marginBottom: '8px' }}>
+                        <div style={{ fontSize: '0.75em', color: '#888', marginBottom: '2px' }}>Junction Offset (mm)</div>
+                        <ExpressionEditor 
+                            value={p.junctionOffset || "0"} 
+                            onChange={(val) => updateFn({ ...p, junctionOffset: val })} 
+                            params={params} 
+                            placeholder="0" 
+                        />
+                    </div>
+                    <label className="checkbox-label">
+                        <input 
+                            type="checkbox" 
+                            checked={!!p.flipDirection} 
+                            onChange={(e) => updateFn({ ...p, flipDirection: e.target.checked })} 
+                        />
+                        <span style={{ fontSize: '0.9em' }}>Flip Direction</span>
+                    </label>
+                </div>
+            )}
+
             {/* If Snapped, disable X/Y editing or show visual cue */}
             {p.snapTo ? (
                 <div style={{ padding: '8px', background: '#333', borderRadius: '4px', fontSize: '0.9em', color: '#aaa', fontStyle: 'italic', textAlign: 'center' }}>
