@@ -5,6 +5,7 @@ export interface Parameter {
   expression: string; // NEW: Stores the formula (e.g., "Length / 2")
   value: number;      // NEW: Stores the evaluated result (e.g., 10.5)
   unit: "mm" | "in";
+  isFavorite?: boolean; // NEW: Fusion 360 Favorite flag
 }
 
 export type ManufacturingType = "Cut" | "Carved/Printed";

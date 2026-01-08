@@ -32,6 +32,7 @@ export default function ParametersEditor({ params, setParams }: Props) {
       expression: "0",
       value: 0,
       unit: "mm", // Default unit
+      isFavorite: false, // Default favorite status
     };
     // Recalculate immediately (though new param "0" won't affect others yet)
     setParams(resolveParameters([...params, newParam]));
@@ -41,7 +42,7 @@ export default function ParametersEditor({ params, setParams }: Props) {
   function updateRow(
     id: string,
     field: keyof Parameter,
-    newValue: string | number
+    newValue: string | number | boolean
   ) {
     const updatedParams = params.map((item) =>
       item.id === id ? { ...item, [field]: newValue } : item
@@ -95,6 +96,13 @@ export default function ParametersEditor({ params, setParams }: Props) {
         // Use Expression column if available, else Value
         const exprRaw = cols[2] && cols[2].trim() ? cols[2].trim() : cols[3].trim(); 
         
+        // Check for Favorite column (index 5)
+        let isFavorite = false;
+        if (cols.length >= 6) {
+            const favStr = cols[5].trim().toUpperCase();
+            isFavorite = favStr === "TRUE" || favStr === "1";
+        }
+
         // Sanitize Key to be a valid variable name
         const cleanKey = name.replace(/[^a-zA-Z0-9_]/g, "_");
         
@@ -103,7 +111,8 @@ export default function ParametersEditor({ params, setParams }: Props) {
             key: cleanKey,
             expression: exprRaw,
             value: 0, // Will be resolved
-            unit: unitRaw === "in" ? "in" : "mm"
+            unit: unitRaw === "in" ? "in" : "mm",
+            isFavorite: isFavorite
         });
       });
 
@@ -113,8 +122,13 @@ export default function ParametersEditor({ params, setParams }: Props) {
           newItems.forEach(item => {
               const idx = next.findIndex(p => p.key === item.key);
               if (idx !== -1) {
-                  // Update existing
-                  next[idx] = { ...next[idx], expression: item.expression, unit: item.unit };
+                  // Update existing parameter with new values from CSV (Overwrite)
+                  next[idx] = { 
+                      ...next[idx], 
+                      expression: item.expression, 
+                      unit: item.unit,
+                      isFavorite: item.isFavorite 
+                  };
               } else {
                   // Append new
                   next.push(item);
@@ -148,9 +162,11 @@ export default function ParametersEditor({ params, setParams }: Props) {
             const expr = p.expression;
             // Format value to 2 decimal places if it's a float, or keep integer string
             const valStr = Number.isInteger(p.value) ? p.value.toFixed(2) : p.value.toString();
+            // Fusion expects "TRUE" or "FALSE"
+            const favStr = p.isFavorite ? "TRUE" : "FALSE";
             
-            // Output row: Name, Unit, Expression, Value, Comments(empty), Favorite(false)
-            csvContent += `${p.key},${p.unit},${expr},${valStr},,false\n`;
+            // Output row: Name, Unit, Expression, Value, Comments(empty), Favorite
+            csvContent += `${p.key},${p.unit},${expr},${valStr},,${favStr}\n`;
         });
 
         await writeTextFile(path, csvContent);
@@ -212,6 +228,10 @@ export default function ParametersEditor({ params, setParams }: Props) {
             <th style={{ width: "40%" }}>Expression</th>
             <th style={{ width: "20%" }}>Resolved Value</th>
             <th style={{ width: "100px" }}>Unit</th>
+            <th style={{ width: "90px", textAlign: "center", lineHeight: "1.2" }}>
+                Favorite<br/>
+                <span style={{ fontSize: "0.75em", fontWeight: "normal", color: "#888" }}>(Fusion 360)</span>
+            </th>
             <th style={{ width: "50px" }}>Action</th>
           </tr>
         </thead>
@@ -277,6 +297,14 @@ export default function ParametersEditor({ params, setParams }: Props) {
                   <option value="mm">mm</option>
                   <option value="in">in</option>
                 </select>
+              </td>
+              <td style={{ textAlign: "center" }}>
+                <input 
+                    type="checkbox" 
+                    checked={!!item.isFavorite} 
+                    onChange={(e) => updateRow(item.id, "isFavorite", e.target.checked)}
+                    style={{ cursor: "pointer" }}
+                />
               </td>
               <td>
                 <button className="danger" onClick={() => deleteRow(item.id)}>

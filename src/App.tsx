@@ -168,9 +168,10 @@ function App() {
           return {
             ...item,
             id: item.id || crypto.randomUUID(),
-            expression: item.expression || String(item.value || 0), // Default expression to value if missing
+            expression: item.expression || String(item.value || 0), 
             value: item.value || 0,
             unit: item.unit || "mm",
+            isFavorite: !!item.isFavorite, // NEW: Ensure boolean, default false
           };
         });
 
