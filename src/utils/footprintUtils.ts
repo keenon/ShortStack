@@ -1207,10 +1207,13 @@ function bezierDerivative(p0: number, p1: number, p2: number, p3: number, t: num
 }
 
 // Linear Interpolation for Angles (Degrees) handling wrap-around (-180 to 180)
-function lerpAngle(a: number, b: number, t: number): number {
-    const diff = b - a;
-    const wrappedDiff = ((diff + 180) % 360) - 180;
-    return a + wrappedDiff * t;
+// FIXED: Use correct logic for shortest path interpolation
+function lerpAngle(start: number, end: number, t: number): number {
+    let diff = end - start;
+    // Normalize diff to -180 to 180 to take the shortest path
+    while (diff <= -180) diff += 360;
+    while (diff > 180) diff -= 360;
+    return start + diff * t;
 }
 
 interface PathTransform {
