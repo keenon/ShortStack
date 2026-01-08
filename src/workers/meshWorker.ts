@@ -613,7 +613,7 @@ self.onmessage = async (e: MessageEvent) => {
                             const w = evaluateExpression((s as FootprintRect).width, params);
                             const h = evaluateExpression((s as FootprintRect).height, params);
                             const crRaw = evaluateExpression((s as FootprintRect).cornerRadius, params);
-                            const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                            const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2 - 0.001));
                             
                             if (w > 0 && h > 0) {
                                 cs = collect(CrossSection.square([w, h], true));
@@ -874,7 +874,7 @@ self.onmessage = async (e: MessageEvent) => {
                         const w = evaluateExpression((s as FootprintRect).width, params);
                         const h = evaluateExpression((s as FootprintRect).height, params);
                         const crRaw = evaluateExpression((s as FootprintRect).cornerRadius, params);
-                        const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2));
+                        const cr = Math.max(0, Math.min(crRaw, Math.min(w, h) / 2 - 0.001));
                         if (w > 0 && h > 0) {
                             cs = collect(CrossSection.square([w, h], true));
                             if (cr > 0.001) cs = collect(cs.offset(-cr, "Round", 8)).offset(cr, "Round", 8);
@@ -1322,7 +1322,7 @@ function generateProceduralTool(
             const halfW = w / 2;
             const halfH = h / 2;
             const limit = Math.min(halfW, halfH);
-            if (cr > limit) cr = limit;
+            if (cr > limit - 0.001) cr = limit - 0.001;
             
             const segCorner = Math.max(4, Math.ceil(resolution / 4));
             
