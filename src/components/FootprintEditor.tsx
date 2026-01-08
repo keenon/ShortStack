@@ -3020,7 +3020,7 @@ async function collectExportShapesAsync(
                     result.push(exportObj);
                 } else {
                     // Complex Carve: Pre-calculate slices in JS
-                    const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFootprint, allFootprints, 32, transform);
+                    const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFootprint, allFootprints, 32, transform, { x: lx, y: ly });
                     
                     // Transform basePoints to Global Export Frame (gx, gy, angle)
                     // getPolyOutlinePoints returns local (relative to shape origin).

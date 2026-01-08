@@ -412,7 +412,7 @@ export const RecursiveShapeRenderer = ({
                                 onMouseDown={() => {}} 
                                 onHandleDown={() => {}} 
                                 handleRadius={handleRadius}
-                                rootFootprint={u as unknown as Footprint}
+                                rootFootprint={rootFootprint}
                                 layerVisibility={layerVisibility}
                                 onlyHandles={false}
                                 strokeScale={strokeScale}
@@ -435,7 +435,7 @@ export const RecursiveShapeRenderer = ({
                                 onMouseDown={() => {}} 
                                 onHandleDown={() => {}} 
                                 handleRadius={handleRadius}
-                                rootFootprint={u as unknown as Footprint}
+                                rootFootprint={rootFootprint}
                                 layerVisibility={layerVisibility}
                                 onlyHandles={false}
                                 strokeScale={strokeScale}

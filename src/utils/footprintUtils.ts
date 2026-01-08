@@ -353,7 +353,7 @@ export function getShapeAABB(
         let valid = false;
 
         union.shapes.forEach(child => {
-            const childBounds = getShapeAABB(child, params, union as unknown as Footprint, allFootprints, gx, gy, gA);
+            const childBounds = getShapeAABB(child, params, rootFootprint, allFootprints, gx, gy, gA);
             if (childBounds) {
                 valid = true;
                 minX = Math.min(minX, childBounds.x1, childBounds.x2); maxX = Math.max(maxX, childBounds.x1, childBounds.x2);
