@@ -3,7 +3,7 @@
 import { Fragment, useMemo, useRef, useEffect } from "react";
 import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion, FootprintText, TieDown } from "../types";
 import ExpressionEditor from "./ExpressionEditor";
-import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints } from "../utils/footprintUtils";
+import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints, isFootprintOptionValid } from "../utils/footprintUtils";
 
 const FootprintPropertiesPanel = ({
   footprint,
@@ -88,7 +88,8 @@ const FootprintPropertiesPanel = ({
   const addTieDown = (lineId: string, currentTieDowns: TieDown[] = []) => {
       const last = currentTieDowns[currentTieDowns.length - 1];
       let newDistExpr = "20";
-      let newFpId = allFootprints.length > 0 ? allFootprints[0].id : "";
+      // FIX: Default to empty string ("no footprint") instead of allFootprints[0] to avoid accidental recursion loops
+      let newFpId = ""; 
       let newAngle = "0";
 
       if (last) {
@@ -1079,9 +1080,15 @@ const FootprintPropertiesPanel = ({
                                     style={{width:'100%', background:'#333', border:'1px solid #555', color:'white'}}
                                 >
                                     <option value="" disabled>Select Footprint...</option>
-                                    {allFootprints.map(fp => (
-                                        <option key={fp.id} value={fp.id}>{fp.name}</option>
-                                    ))}
+                                    {allFootprints.map(fp => {
+                                        // Prevent selection of recursive footprints
+                                        const isValid = isFootprintOptionValid(footprint.id, fp, allFootprints);
+                                        return (
+                                            <option key={fp.id} value={fp.id} disabled={!isValid}>
+                                                {fp.name} {!isValid ? "(Recursive)" : ""}
+                                            </option>
+                                        );
+                                    })}
                                 </select>
                             </div>
 
