@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
@@ -286,6 +286,28 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   // NEW: State for Tie Down Interaction
   const [hoveredTieDownId, setHoveredTieDownId] = useState<string | null>(null);
   const [scrollToTieDownId, setScrollToTieDownId] = useState<string | null>(null);
+
+  // NEW: Dedicated Tie Down Drag State
+  const tieDownDragState = useRef<{
+      active: boolean;
+      type: 'slide' | 'rotate';
+      tieDownId: string;
+      lineId: string;
+      startMouse: { x: number, y: number };
+      pivot: { x: number, y: number }; // Global coordinates of the tie down anchor
+      startAngle: number; // For rotation: mouse angle
+      initialParamAngle: number; // Value of angle param at start
+      initialParamDist: number; // Value of dist param at start
+      distOffset: number; // The difference between mouse projection on wire and the actual object center at start
+      wireSnapPoint: { x: number, y: number } | null; // For visualization
+  } | null>(null);
+
+  // Visual helper for tie down operations (passed to renderer or overlay)
+  const [tieDownVisuals, setTieDownVisuals] = useState<{
+      type: 'slide' | 'rotate';
+      lineStart: { x: number, y: number }; // Start of dotted line (Mouse or Pivot)
+      lineEnd: { x: number, y: number };   // End of dotted line (Wire Point or Mouse)
+  } | null>(null);
 
   const footprintRef = useRef(footprint);
   useEffect(() => {
@@ -776,26 +798,140 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       setSelectedShapeIds([lineId]);
       setScrollToTieDownId(tieDownId);
 
-      const shape = footprint.shapes.find(s => s.id === lineId);
+      const shape = footprint.shapes.find(s => s.id === lineId) as FootprintLine;
       if (!shape || shape.locked) return;
+      const tieDown = shape.tieDowns?.find(td => td.id === tieDownId);
+      if (!tieDown) return;
 
-      isShapeDragging.current = true;
-      hasMoved.current = false;
-      shapeDragStartPos.current = { x: e.clientX, y: e.clientY };
+      const mWorld = getMouseWorldPos(e.clientX, e.clientY);
+      // NOTE: getMouseWorldPos returns visual coords (Y down). 
+      // We convert to Math coords (Y up) for geometry calculations.
+      const mouseMath = { x: mWorld.x, y: -mWorld.y };
+
+      const type = e.altKey ? 'rotate' : 'slide';
       
-      dragSelectionRef.current = [lineId]; // Ensure sync
-      shapeDragStartDataMap.current.clear();
-      shapeDragStartDataMap.current.set(lineId, JSON.parse(JSON.stringify(shape)));
+      // Calculate Pivot Point (Current location of Tie Down)
+      const currentDist = evaluateExpression(tieDown.distance, params);
+      const tf = getTransformAlongLine(shape, currentDist, params, footprint, allFootprints);
+      if (!tf) return;
 
-      dragTargetRef.current = {
-          id: lineId,
-          tieDownId: tieDownId,
-          mode: 'move',
-          initialVal: undefined
+      let startState: any = {
+          active: true,
+          type,
+          tieDownId,
+          lineId,
+          startMouse: mouseMath,
+          pivot: { x: tf.x, y: tf.y },
+          initialParamAngle: evaluateExpression(tieDown.angle, params),
+          initialParamDist: currentDist,
       };
 
-      window.addEventListener('mousemove', handleShapeMouseMove);
-      window.addEventListener('mouseup', handleShapeMouseUp);
+      if (type === 'rotate') {
+          // Calculate initial angle from pivot to mouse
+          const dy = mouseMath.y - tf.y;
+          const dx = mouseMath.x - tf.x;
+          startState.startAngle = Math.atan2(dy, dx) * (180 / Math.PI);
+          
+          setTieDownVisuals({
+              type: 'rotate',
+              lineStart: { x: tf.x, y: tf.y },
+              lineEnd: { x: mouseMath.x, y: mouseMath.y } // Visual Y handled in render
+          });
+      } else {
+          // Slide: Find where the mouse projects onto the wire NOW to set the offset
+          // so drag doesn't snap center to mouse
+          const result = getClosestDistanceAlongLine(shape, mouseMath, params, footprint, allFootprints);
+          startState.distOffset = currentDist - result.distance;
+          
+          setTieDownVisuals({
+              type: 'slide',
+              lineStart: { x: mouseMath.x, y: mouseMath.y }, // From mouse
+              lineEnd: { x: result.closestPoint.x, y: result.closestPoint.y } // To wire
+          });
+      }
+
+      tieDownDragState.current = startState;
+      
+      window.addEventListener('mousemove', handleTieDownMouseMove);
+      window.addEventListener('mouseup', handleTieDownMouseUp);
+  };
+
+  const handleTieDownMouseMove = (e: MouseEvent) => {
+      if (!tieDownDragState.current || !tieDownDragState.current.active) return;
+      const state = tieDownDragState.current;
+      
+      const mWorld = getMouseWorldPos(e.clientX, e.clientY);
+      const mouseMath = { x: mWorld.x, y: -mWorld.y };
+
+      const currentShape = footprintRef.current.shapes.find(s => s.id === state.lineId) as FootprintLine;
+      if (!currentShape || !currentShape.tieDowns) return;
+      
+      const tdIndex = currentShape.tieDowns.findIndex(td => td.id === state.tieDownId);
+      if (tdIndex === -1) return;
+
+      if (state.type === 'rotate') {
+          // Calculate Delta Angle
+          const dy = mouseMath.y - state.pivot.y;
+          const dx = mouseMath.x - state.pivot.x;
+          const currentAngle = Math.atan2(dy, dx) * (180 / Math.PI);
+          const delta = currentAngle - state.startAngle; // CCW is positive in math
+          
+          // Apply to initial param
+          const newAngleExpr = modifyExpression(String(state.initialParamAngle), delta);
+          
+          const newTieDowns = [...currentShape.tieDowns];
+          newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], angle: newAngleExpr };
+          
+          setFootprint({ 
+              ...footprintRef.current, 
+              shapes: footprintRef.current.shapes.map(s => s.id === state.lineId ? { ...s, tieDowns: newTieDowns } : s) 
+          });
+
+          // Update Visual
+          setTieDownVisuals({
+              type: 'rotate',
+              lineStart: { x: state.pivot.x, y: state.pivot.y },
+              lineEnd: { x: mouseMath.x, y: mouseMath.y }
+          });
+
+      } else {
+          // Slide Logic
+          const result = getClosestDistanceAlongLine(currentShape, mouseMath, params, footprintRef.current, allFootprints);
+          
+          // New distance = Projected Distance + Constant Offset
+          const rawNewDist = result.distance + state.distOffset;
+          
+          // Update Param
+          const deltaDist = rawNewDist - state.initialParamDist;
+          const newDistExpr = modifyExpression(String(state.initialParamDist), deltaDist);
+
+          const newTieDowns = [...currentShape.tieDowns];
+          newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], distance: newDistExpr };
+
+          setFootprint({ 
+              ...footprintRef.current, 
+              shapes: footprintRef.current.shapes.map(s => s.id === state.lineId ? { ...s, tieDowns: newTieDowns } : s) 
+          });
+
+          // Update Visual: Line from Mouse to Closest Point on Wire
+          setTieDownVisuals({
+              type: 'slide',
+              lineStart: { x: mouseMath.x, y: mouseMath.y },
+              lineEnd: { x: result.closestPoint.x, y: result.closestPoint.y }
+          });
+      }
+  };
+
+  const handleTieDownMouseUp = () => {
+      tieDownDragState.current = null;
+      setTieDownVisuals(null);
+      // Commit History
+      updateHistory({ 
+          footprint: footprintRef.current, 
+          selectedShapeIds: [selectedShapeIds[0]] // Keep selection
+      });
+      window.removeEventListener('mousemove', handleTieDownMouseMove);
+      window.removeEventListener('mouseup', handleTieDownMouseUp);
   };
 
   const handleShapeMouseDown = (e: React.MouseEvent, id: string, pointIndex?: number) => {
@@ -969,40 +1105,6 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           // FIX: Use dragSelectionRef instead of state to avoid stale closure issues
           if (s.id === targetId || dragSelectionRef.current.includes(s.id)) {
               
-              // --- TIE DOWN LOGIC ---
-              if (dragTargetRef.current?.tieDownId && s.type === "line") {
-                  const line = s as FootprintLine;
-                  const startLine = startShape as FootprintLine;
-                  const tdIndex = startLine.tieDowns?.findIndex(t => t.id === dragTargetRef.current?.tieDownId) ?? -1;
-                  
-                  if (tdIndex !== -1 && startLine.tieDowns) {
-                      const startTD = startLine.tieDowns[tdIndex];
-                      const startDist = evaluateExpression(startTD.distance, params);
-                      
-                      if (e.altKey) {
-                          // ROTATION: Alt + Drag (1px = 1deg)
-                          const newAngle = modifyExpression(startTD.angle, dxPx);
-                          const newTieDowns = [...(line.tieDowns || [])];
-                          newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], angle: newAngle };
-                          return { ...s, tieDowns: newTieDowns };
-                      } else {
-                          // SLIDING: Drag along wire
-                          const tf = getTransformAlongLine(startLine, startDist, params, footprint, allFootprints);
-                          if (tf) {
-                              const rad = tf.angle * (Math.PI / 180);
-                              const tanX = Math.cos(rad);
-                              const tanY = Math.sin(rad);
-                              const projectedDelta = dxWorld * tanX + dyWorldMath * tanY;
-                              const newDist = modifyExpression(startTD.distance, projectedDelta);
-                              
-                              const newTieDowns = [...(line.tieDowns || [])];
-                              newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], distance: newDist };
-                              return { ...s, tieDowns: newTieDowns };
-                          }
-                      }
-                  }
-                  return s; // Fallback
-              }
               // --- RESIZE EXECUTION ---
               if (mode === 'resize' && s.id === targetId && initialVal) {
                   const cx = evaluateExpression(startShape.x, params);
@@ -2503,6 +2605,28 @@ const handleUngroup = (unionId: string) => {
                                 fill="#00ff00" 
                                 vectorEffect="non-scaling-stroke"
                             />
+                        </g>
+                    )}
+
+                    {/* NEW: Tie Down Visual Guides */}
+                    {tieDownVisuals && (
+                        <g pointerEvents="none">
+                            <line 
+                                x1={tieDownVisuals.lineStart.x} y1={-tieDownVisuals.lineStart.y} 
+                                x2={tieDownVisuals.lineEnd.x} y2={-tieDownVisuals.lineEnd.y} 
+                                stroke="#646cff" 
+                                strokeWidth={1.5} 
+                                strokeDasharray="4,2" 
+                                vectorEffect="non-scaling-stroke"
+                            />
+                            {tieDownVisuals.type === 'slide' && (
+                                <circle 
+                                    cx={tieDownVisuals.lineEnd.x} cy={-tieDownVisuals.lineEnd.y} 
+                                    r={handleRadius * 0.6} 
+                                    fill="#646cff" 
+                                    vectorEffect="non-scaling-stroke" 
+                                />
+                            )}
                         </g>
                     )}
 

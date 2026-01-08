@@ -1387,3 +1387,78 @@ export function getFootprintAABB(
 
     return { x1: minX, y1: minY, x2: maxX, y2: maxY };
 }
+
+
+// NEW: Calculate closest distance on wire to a target point
+export function getClosestDistanceAlongLine(
+    shape: FootprintLine,
+    targetPoint: { x: number, y: number },
+    params: Parameter[],
+    contextFp: Footprint,
+    allFootprints: Footprint[]
+): { distance: number, closestPoint: { x: number, y: number } } {
+    const points = shape.points;
+    if (points.length < 2) return { distance: 0, closestPoint: { x: 0, y: 0 } };
+
+    let bestDist = Infinity;
+    let bestTotalDist = 0;
+    let bestPoint = { x: 0, y: 0 };
+
+    let currentTotalLength = 0;
+    const STEPS = 20;
+
+    // Helper: Project point P onto Segment AB
+    const project = (p: {x:number,y:number}, a: {x:number,y:number}, b: {x:number,y:number}) => {
+        const ax = p.x - a.x; const ay = p.y - a.y;
+        const bx = b.x - a.x; const by = b.y - a.y;
+        const t = (ax * bx + ay * by) / (bx * bx + by * by);
+        const sat = Math.max(0, Math.min(1, t));
+        return {
+            t: sat,
+            x: a.x + sat * bx,
+            y: a.y + sat * by,
+            distSq: (a.x + sat * bx - p.x)**2 + (a.y + sat * by - p.y)**2,
+            len: Math.sqrt(bx*bx + by*by)
+        };
+    };
+
+    for(let i=0; i<points.length-1; i++) {
+        const curr = resolvePoint(points[i], contextFp, allFootprints, params);
+        const next = resolvePoint(points[i+1], contextFp, allFootprints, params);
+
+        if (curr.handleOut || next.handleIn) {
+            const p0 = curr;
+            const p3 = next;
+            const p1 = { x: p0.x + (p0.handleOut?.x||0), y: p0.y + (p0.handleOut?.y||0) };
+            const p2 = { x: p3.x + (p3.handleIn?.x||0), y: p3.y + (p3.handleIn?.y||0) };
+
+            let prevBez = p0;
+            for(let s=1; s<=STEPS; s++) {
+                const t = s/STEPS;
+                const tx = bezier1D(p0.x, p1.x, p2.x, p3.x, t);
+                const ty = bezier1D(p0.y, p1.y, p2.y, p3.y, t);
+                const currentBez = { x: tx, y: ty };
+
+                const proj = project(targetPoint, prevBez, currentBez);
+                if (proj.distSq < bestDist) {
+                    bestDist = proj.distSq;
+                    bestTotalDist = currentTotalLength + proj.t * proj.len;
+                    bestPoint = { x: proj.x, y: proj.y };
+                }
+
+                currentTotalLength += proj.len;
+                prevBez = currentBez;
+            }
+        } else {
+            const proj = project(targetPoint, curr, next);
+            if (proj.distSq < bestDist) {
+                bestDist = proj.distSq;
+                bestTotalDist = currentTotalLength + proj.t * proj.len;
+                bestPoint = { x: proj.x, y: proj.y };
+            }
+            currentTotalLength += proj.len;
+        }
+    }
+
+    return { distance: bestTotalDist, closestPoint: bestPoint };
+}
