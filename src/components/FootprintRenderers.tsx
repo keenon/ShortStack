@@ -1,6 +1,6 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion, FootprintText, FootprintPolygon } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion, FootprintText } from "../types";
 import { evaluateExpression, resolvePoint, getTransformAlongLine } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
