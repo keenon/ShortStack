@@ -332,7 +332,8 @@ export function getShapeAABB(
     params: Parameter[],
     rootFootprint: Footprint,
     allFootprints: Footprint[],
-    pX = 0, pY = 0, pA = 0 // Added parent transform params
+    pX = 0, pY = 0, pA = 0, // Parent GLOBAL Transform
+    localTransform = { x: 0, y: 0, angle: 0 } // NEW: Parent LOCAL Transform (relative to rootFootprint)
 ): Rect | null {
     const lx = (shape.type === "line") ? 0 : evaluateExpression((shape as any).x, params);
     const ly = (shape.type === "line") ? 0 : evaluateExpression((shape as any).y, params);
@@ -347,13 +348,27 @@ export function getShapeAABB(
     const gy = pY + (lx * sin + ly * cos);
     const gA = pA + la;
 
+    // Calculate LOCAL transform for children (Relative to current rootFootprint)
+    // We must accumulate localTransform
+    const lRad = (localTransform.angle * Math.PI) / 180;
+    const lCos = Math.cos(lRad);
+    const lSin = Math.sin(lRad);
+    const nextLocalX = localTransform.x + (lx * lCos - ly * lSin);
+    const nextLocalY = localTransform.y + (lx * lSin + ly * lCos);
+    const nextLocalA = localTransform.angle + la;
+    const currentLocalTransform = { x: nextLocalX, y: nextLocalY, angle: nextLocalA };
+
     if (shape.type === "union") {
         const union = shape as FootprintUnion;
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         let valid = false;
 
         union.shapes.forEach(child => {
-            const childBounds = getShapeAABB(child, params, rootFootprint, allFootprints, gx, gy, gA);
+            const childBounds = getShapeAABB(
+                child, params, rootFootprint, allFootprints, 
+                gx, gy, gA, 
+                currentLocalTransform // Pass accumulated local transform
+            );
             if (childBounds) {
                 valid = true;
                 minX = Math.min(minX, childBounds.x1, childBounds.x2); maxX = Math.max(maxX, childBounds.x1, childBounds.x2);
@@ -371,7 +386,11 @@ export function getShapeAABB(
         let valid = false;
 
         target.shapes.forEach(child => {
-            const childBounds = getShapeAABB(child, params, target, allFootprints, gx, gy, gA);
+            const childBounds = getShapeAABB(
+                child, params, target, allFootprints, 
+                gx, gy, gA, 
+                { x: 0, y: 0, angle: 0 } // RESET Local Transform when entering a new footprint context
+            );
             if (childBounds) {
                 valid = true;
                 minX = Math.min(minX, childBounds.x1, childBounds.x2); 
@@ -423,28 +442,10 @@ export function getShapeAABB(
         const rrad = -pA * (Math.PI / 180);
         const rcos = Math.cos(rrad); const rsin = Math.sin(rrad);
 
-        // When inside AABB, we are calculating Global Bounds.
-        // We need resolvePoint to give us Local Coordinates relative to the Shape (0,0).
-        // Then we transform those locals to Global using gx/gy/gA.
-        // pX, pY, pA is the Container Transform.
-        // gx, gy, gA is the Shape Transform.
-        // resolvePoint(..., {x:gx, y:gy, angle:gA}) gives us Local relative to Shape (0,0).
-        // We assume VisualY (-pY) flip was handled by caller for pY?
-        // Note: pY passed to getShapeAABB is usually Visual Y in FootprintEditor (0,0).
-        // BUT math logic uses +Y up.
-        // We will assume pX, pY, pA are Math Coordinates for resolvePoint context.
-        // But for visual projection, we flip Y.
-        
-        // Let's pass the Shape's Global Math Transform to resolvePoint.
-        // Shape Global Math X = gx
-        // Shape Global Math Y = gy (calculated above as +Y up)
-        // Shape Global Math Angle = gA
-        
-        const shapeGlobalTransform = { x: gx, y: gy, angle: gA };
-
         points.forEach(p => {
-            // resolvePoint returns coordinates relative to Shape Origin (0,0)
-            const res = resolvePoint(p, rootFootprint, allFootprints, params, shapeGlobalTransform);
+            // CRITICAL FIX: Pass currentLocalTransform to resolvePoint
+            // This ensures points are resolved relative to THIS shape's origin within the current rootFootprint.
+            const res = resolvePoint(p, rootFootprint, allFootprints, params, currentLocalTransform);
             
             // res is Local (x,y)
             const mx = res.x;
@@ -570,9 +571,10 @@ export function isShapeInSelection(
     params: Parameter[],
     rootFootprint: Footprint,
     allFootprints: Footprint[],
-    pX = 0, pY = 0, pA = 0 // Added parent transform params
+    pX = 0, pY = 0, pA = 0, // Global Transform
+    localTransform = { x: 0, y: 0, angle: 0 } // NEW: Local Context Transform
 ): boolean {
-    const aabb = getShapeAABB(shape, params, rootFootprint, allFootprints, pX, pY, pA);
+    const aabb = getShapeAABB(shape, params, rootFootprint, allFootprints, pX, pY, pA, localTransform);
     if (!aabb || !doRectsIntersect(selectionBox, aabb)) return false;
 
     // Narrow Phase
@@ -593,11 +595,20 @@ export function isShapeInSelection(
     const gy = pY + (lx * sin + ly * cos);
     const gA = pA + la;
 
-    // RECURSIVE CHECK FOR UNIONS (The requested fix)
+    // Calculate LOCAL transform for children
+    const lRad = (localTransform.angle * Math.PI) / 180;
+    const lCos = Math.cos(lRad);
+    const lSin = Math.sin(lRad);
+    const nextLocalX = localTransform.x + (lx * lCos - ly * lSin);
+    const nextLocalY = localTransform.y + (lx * lSin + ly * lCos);
+    const nextLocalA = localTransform.angle + la;
+    const currentLocalTransform = { x: nextLocalX, y: nextLocalY, angle: nextLocalA };
+
+    // RECURSIVE CHECK FOR UNIONS
     if (shape.type === "union") {
         const u = shape as FootprintUnion;
         return u.shapes.some(child => 
-            isShapeInSelection(selectionBox, child, params, u as unknown as Footprint, allFootprints, gx, gy, gA)
+            isShapeInSelection(selectionBox, child, params, u as unknown as Footprint, allFootprints, gx, gy, gA, currentLocalTransform)
         );
     }
 
@@ -606,7 +617,7 @@ export function isShapeInSelection(
         const target = allFootprints.find(f => f.id === ref.footprintId);
         if (!target) return false;
         return target.shapes.some(child => 
-            isShapeInSelection(selectionBox, child, params, target, allFootprints, gx, gy, gA)
+            isShapeInSelection(selectionBox, child, params, target, allFootprints, gx, gy, gA, { x: 0, y: 0, angle: 0 })
         );
     }
 
@@ -671,11 +682,10 @@ export function isShapeInSelection(
         const ptsRaw = (shape as any).points || [];
         if (ptsRaw.length < 2) return false;
         
-        const shapeGlobalTransform = { x: gx, y: gy, angle: gA };
-
+        // Removed shapeGlobalTransform, use currentLocalTransform logic
         const visualPoints = ptsRaw.map((p: any) => {
-             // Pass shapeGlobalTransform to normalize snaps relative to shape origin
-             const res = resolvePoint(p, rootFootprint, allFootprints, params, shapeGlobalTransform);
+             // CRITICAL FIX: Pass currentLocalTransform to resolvePoint
+             const res = resolvePoint(p, rootFootprint, allFootprints, params, currentLocalTransform);
              
              // res is Local to Shape (0,0)
              // lx, ly are Shape Local to Container (already factored into gx, gy)
