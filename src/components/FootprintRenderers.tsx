@@ -340,11 +340,13 @@ export const RecursiveShapeRenderer = ({
                     }}
                     onHandleDown={() => {}} // Handles inside child footprints are not editable here
                     handleRadius={handleRadius}
-                    rootFootprint={rootFootprint}
+                    // --- FIX: Switch context to child footprint and reset local transform ---
+                    rootFootprint={targetFp}
+                    parentTransform={{ x: 0, y: 0, angle: 0 }}
+                    // -----------------------------------------------------------------------
                     layerVisibility={layerVisibility}
                     strokeScale={strokeScale}
                     overrideStyle={overrideStyle}
-                    parentTransform={childTransform}
                   />
               ))}
               
@@ -501,19 +503,19 @@ export const RecursiveShapeRenderer = ({
   };
 
   if (shape.type === "circle") {
-    const r = evaluateExpression(shape.diameter, params) / 2;
+    const r = evaluateExpression((shape as any).diameter, params) / 2;
     const cx = lx;
     const cy = ly;
     return <circle cx={cx} cy={-cy} r={r} {...commonProps} />;
   }
 
   if (shape.type === "rect") {
-    const w = evaluateExpression(shape.width, params);
-    const h = evaluateExpression(shape.height, params);
+    const w = evaluateExpression((shape as any).width, params);
+    const h = evaluateExpression((shape as any).height, params);
     const x = lx;
     const y = ly;
     const angle = la;
-    const rawCr = evaluateExpression((shape as FootprintRect).cornerRadius, params);
+    const rawCr = evaluateExpression((shape as any).cornerRadius, params);
     const cr = Math.max(0, Math.min(rawCr, Math.min(w, h) / 2));
     
     return (
@@ -534,7 +536,7 @@ export const RecursiveShapeRenderer = ({
       const originX = lx;
       const originY = ly;
       
-      const pts = shape.points.map(p => {
+      const pts = (shape as any).points.map((p: any) => {
           // Pass parentTransform to resolvePoint for snapped points inside unions
           const resolved = resolvePoint(p, rootFootprint, allFootprints, params, parentTransform);
           
@@ -584,7 +586,7 @@ export const RecursiveShapeRenderer = ({
           d += " Z";
       }
 
-      const handles = (showHandles && !overrideStyle) ? pts.map((pt, idx) => {
+      const handles = (showHandles && !overrideStyle) ? pts.map((pt: any, idx: number) => {
           const elements = [];
           const isHovered = hoveredPointIndex === idx;
           const anchorColor = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
@@ -661,7 +663,7 @@ export const RecursiveShapeRenderer = ({
         const originX = (lx === 0) ? 0 : lx; // Lines are usually 0,0 but just in case
         const originY = (ly === 0) ? 0 : ly;
 
-        const pts = shape.points.map(p => {
+        const pts = (shape as any).points.map((p: any) => {
             const resolved = resolvePoint(p, rootFootprint, allFootprints, params, parentTransform);
             
             let finalX, finalY;
@@ -763,7 +765,7 @@ export const RecursiveShapeRenderer = ({
             );
         });
 
-      const handles = (showHandles && !overrideStyle) ? pts.map((pt, idx) => {
+      const handles = (showHandles && !overrideStyle) ? pts.map((pt: any, idx: number) => {
           const elements = [];
           const isHovered = hoveredPointIndex === idx;
           const anchorFill = pt.isSnapped ? "#00ff00" : (isHovered ? "#ffaa00" : "#fff");
