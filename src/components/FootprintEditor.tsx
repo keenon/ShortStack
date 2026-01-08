@@ -77,43 +77,52 @@ const LayerVisibilityPanel = ({
       
       {!collapsed && (
         <div className="layer-list-scroll">
+            {/* UNASSIGNED LAYER */}
             <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
                 <div className="layer-vis-info">
                     <div className="layer-color-square unassigned" title="Unassigned" />
                     <span className="layer-vis-name">Unassigned</span>
                 </div>
+                {/* Show/Hide button on the right */}
                 <button className={`vis-toggle-btn ${visibility["unassigned"] !== false ? "visible" : "hidden"}`} onClick={() => onToggle("unassigned")}>
                     {visibility["unassigned"] !== false ? "Hide" : "Show"}
                 </button>
             </div>
+
+            {/* STACKUP LAYERS */}
             {stackup.map((layer) => (
-                <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`} style={{flexWrap: 'wrap'}}>
-                    <div className="layer-vis-info" style={{width: '100%', marginBottom: '5px'}}>
-                        <div className="layer-color-square" style={{ backgroundColor: layer.color }} />
-                        <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
-                    </div>
+                <div key={layer.id} className={`layer-vis-item ${visibility[layer.id] === false ? "is-hidden" : ""}`} style={{flexDirection: 'column', alignItems: 'stretch', gap: '5px'}}>
                     
-                    <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-end' }}>
-                        <button className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`} onClick={() => onToggle(layer.id)} style={{ marginRight: 'auto' }}>
+                    {/* Top Row: Info + Toggle */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                        <div className="layer-vis-info" style={{ overflow: 'hidden' }}>
+                            <div className="layer-color-square" style={{ backgroundColor: layer.color }} />
+                            <span className="layer-vis-name" title={layer.name}>{layer.name}</span>
+                        </div>
+                        <button 
+                            className={`vis-toggle-btn ${visibility[layer.id] !== false ? "visible" : "hidden"}`} 
+                            onClick={() => onToggle(layer.id)}
+                        >
                             {visibility[layer.id] !== false ? "Hide" : "Show"}
                         </button>
-                        
-                        {isBoard && (
-                            <>
-                                {layer.type === "Cut" ? (
-                                    <>
-                                        <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "SVG")}>SVG</button>
-                                        <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "DXF")}>DXF</button>
-                                    </>
-                                ) : (
-                                    <>
-                                        <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "STL")}>STL</button>
-                                        <button className="vis-toggle-btn" onClick={() => onExport(layer.id, "SVG")}>SVG</button>
-                                    </>
-                                )}
-                            </>
-                        )}
                     </div>
+                    
+                    {/* Bottom Row: Export Buttons (aligned left) */}
+                    {isBoard && (
+                        <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-start', paddingLeft: '22px' }}>
+                            {layer.type === "Cut" ? (
+                                <>
+                                    <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "SVG")}>SVG</button>
+                                    <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "DXF")}>DXF</button>
+                                </>
+                            ) : (
+                                <>
+                                    <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "STL")}>STL</button>
+                                    <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "SVG")}>SVG</button>
+                                </>
+                            )}
+                        </div>
+                    )}
                 </div>
             ))}
             {stackup.length === 0 && <div className="empty-state-small">No stackup layers.</div>}
