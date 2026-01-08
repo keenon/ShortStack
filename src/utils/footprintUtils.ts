@@ -993,7 +993,9 @@ export function resolvePoint(
     // Handles are VECTORS: they only rotate, they do not translate
     // UPDATED: Project single Wire Guide handle to symmetric in/out handles for the snapped point
     // BUT use the POSITIVE vector for BOTH handles to create a "pinch" effect
-    let handleIn, handleOut;
+    // FIX: Initialize with default (local) handles so they persist if guide handles are missing
+    let handleIn = defaultRes.handleIn;
+    let handleOut = defaultRes.handleOut;
 
     if (foundGuide.handle) {
          const hx = evaluateExpression(foundGuide.handle.x, params);

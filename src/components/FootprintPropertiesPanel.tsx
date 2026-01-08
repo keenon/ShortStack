@@ -179,6 +179,8 @@ const FootprintPropertiesPanel = ({
       // Look up snapped guide to determine handle overrides
       const snappedGuide = findWireGuideByPath(p.snapTo, footprint, allFootprints);
       const guideHasDirection = !!snappedGuide?.handle;
+      // Handle is forced ONLY if snapped AND guide has a handle
+      const isHandleForced = !!p.snapTo && guideHasDirection;
 
       const isHovered = hoveredPointIndex === idx;
 
@@ -236,20 +238,20 @@ const FootprintPropertiesPanel = ({
                 <>
                     <div className="point-controls-toggles">
                         <label className="checkbox-label" style={p.snapTo ? { opacity: 0.7 } : {}}>
-                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasDirection : !!p.handleIn} onChange={(e) => {
+                            <input type="checkbox" disabled={isHandleForced} checked={isHandleForced ? true : !!p.handleIn} onChange={(e) => {
                                     if (e.target.checked) updateFn({ ...p, handleIn: { x: "-5", y: "0" } });
                                     else { const { handleIn, ...rest } = p; updateFn(rest as Point); }
                                 }} /> In Handle
                         </label>
                         <label className="checkbox-label" style={p.snapTo ? { opacity: 0.7 } : {}}>
-                            <input type="checkbox" disabled={!!p.snapTo} checked={p.snapTo ? guideHasDirection : !!p.handleOut} onChange={(e) => {
+                            <input type="checkbox" disabled={isHandleForced} checked={isHandleForced ? true : !!p.handleOut} onChange={(e) => {
                                     if (e.target.checked) updateFn({ ...p, handleOut: { x: "5", y: "0" } });
                                     else { const { handleIn, ...rest } = p; updateFn(rest as Point); }
                                 }} /> Out Handle
                         </label>
                     </div>
 
-                    {!p.snapTo && p.handleIn && (
+                    {!isHandleForced && p.handleIn && (
                         <div className="handle-sub-block">
                              <div className="sub-label">Handle In (Relative)</div>
                              <div className="handle-inputs">
@@ -258,7 +260,7 @@ const FootprintPropertiesPanel = ({
                              </div>
                         </div>
                     )}
-                    {!p.snapTo && p.handleOut && (
+                    {!isHandleForced && p.handleOut && (
                         <div className="handle-sub-block">
                              <div className="sub-label">Handle Out (Relative)</div>
                              <div className="handle-inputs">
@@ -267,7 +269,7 @@ const FootprintPropertiesPanel = ({
                              </div>
                         </div>
                     )}
-                    {p.snapTo && guideHasDirection && (
+                    {isHandleForced && (
                         <div style={{ marginTop: '5px', fontSize: '0.8em', color: '#666' }}>
                            Handles are inherited from the Wire Guide.
                         </div>
