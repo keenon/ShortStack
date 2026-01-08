@@ -312,13 +312,6 @@ function flattenShapes(
                             const tdGlobalX = globalX + rotX;
                             const tdGlobalY = globalY + rotY;
                             const tdGlobalRot = transform.rotation + tdLocalRot;
-                            
-                            const lineRelRad = (currentRelTransform.rotation * Math.PI) / 180;
-                            const lRCos = Math.cos(lineRelRad);
-                            const lRSin = Math.sin(lineRelRad);
-                            const tdRelX = currentRelTransform.x + (tdLocalX * lRCos - tdLocalY * lRSin);
-                            const tdRelY = currentRelTransform.y + (tdLocalX * lRSin + tdLocalY * lRCos);
-                            const tdRelRot = currentRelTransform.rotation + tdLocalRot;
 
                             const children = flattenShapes(
                                 target, 
