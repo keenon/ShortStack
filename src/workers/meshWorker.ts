@@ -1444,10 +1444,8 @@ function generateProceduralTool(
                     area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
                 }
                 
-                // Manifold generates holes with negative area. 
-                // We assume tool slices should be solid. 
-                // Discard holes or extremely small artifacts.
-                if (area < 0) return null; 
+                // Keep holes (negative area) so islands are preserved.
+                // Only discard degenerate/zero-area polygons.
                 if (Math.abs(area) < 0.00001) return null;
 
                 // Do NOT reverse here. If it was positive (solid), keep it.
@@ -1464,15 +1462,90 @@ function generateProceduralTool(
         });
     });
 
+    // Helper for point-in-polygon check
+    const isPointInPoly = (pt: THREE.Vector2, poly: THREE.Vector2[]) => {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i].x, yi = poly[i].y;
+            const xj = poly[j].x, yj = poly[j].y;
+            const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
+                (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    };
+
+    // Helper to get signed area (Positive=CCW/Solid, Negative=CW/Hole)
+    const getSignedArea = (poly: THREE.Vector2[]) => {
+        let area = 0;
+        for (let i = 0; i < poly.length; i++) {
+            const j = (i + 1) % poly.length;
+            area += poly[i].x * poly[j].y - poly[j].x * poly[i].y;
+        }
+        return area * 0.5;
+    };
+
     const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
-        let offset = startIdx;
+        // 1. Calculate global index offsets for each contour
+        const contourOffsets: number[] = [];
+        let runningOffset = startIdx;
         contours.forEach(c => {
-            const tris = THREE.ShapeUtils.triangulateShape(c, []);
+            contourOffsets.push(runningOffset);
+            runningOffset += c.length;
+        });
+
+        // 2. Classify Contours into Solids and Holes
+        const solids: { poly: THREE.Vector2[], idx: number }[] = [];
+        const holes: { poly: THREE.Vector2[], idx: number }[] = [];
+
+        contours.forEach((c, i) => {
+            if (getSignedArea(c) > 0) {
+                solids.push({ poly: c, idx: i });
+            } else {
+                // Ensure holes are actually holes (Three.js expects holes to be CW usually, 
+                // but ShapeUtils is robust. We just need to separate them).
+                holes.push({ poly: c, idx: i });
+            }
+        });
+
+        // 3. Assign holes to their parent solids
+        // (Simple heuristic: checking if the first point of the hole is inside the solid)
+        solids.forEach(solid => {
+            const myHoles = holes.filter(h => isPointInPoly(h.poly[0], solid.poly));
+            
+            // Format for ShapeUtils: [Solid, Hole1, Hole2...] (points only)
+            const holeArrays = myHoles.map(h => h.poly);
+            
+            // Triangulate
+            const tris = THREE.ShapeUtils.triangulateShape(solid.poly, holeArrays);
+            
+            // 4. Map resulting local indices back to global mesh indices
             tris.forEach(t => {
-                if (reverse) rawIndices.push(offset + t[0], offset + t[2], offset + t[1]);
-                else rawIndices.push(offset + t[0], offset + t[1], offset + t[2]);
+                const getGlobalIndex = (localIdx: number) => {
+                    // Index is in the Solid
+                    if (localIdx < solid.poly.length) {
+                        return contourOffsets[solid.idx] + localIdx;
+                    }
+                    
+                    // Index is in one of the Holes
+                    let remaining = localIdx - solid.poly.length;
+                    for (let k = 0; k < myHoles.length; k++) {
+                        const hLen = myHoles[k].poly.length;
+                        if (remaining < hLen) {
+                            return contourOffsets[myHoles[k].idx] + remaining;
+                        }
+                        remaining -= hLen;
+                    }
+                    return 0; // Should never happen
+                };
+
+                const a = getGlobalIndex(t[0]);
+                const b = getGlobalIndex(t[1]);
+                const c = getGlobalIndex(t[2]);
+
+                if (reverse) rawIndices.push(a, c, b);
+                else rawIndices.push(a, b, c);
             });
-            offset += c.length;
         });
     };
     // Top cap
