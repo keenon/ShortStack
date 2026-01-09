@@ -1,5 +1,5 @@
 // src/components/FabricationEditor.tsx
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import { FabricationPlan, Footprint, StackupLayer, FabricationMethod, Parameter, WaterlineSettings } from "../types";
 import { IconOutline } from "./Icons";
 import ExpressionEditor from "./ExpressionEditor";
@@ -57,6 +57,61 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     setFabPlans(prev => prev.map(p => p.id === activePlan.id ? updatedPlan : p));
   };
 
+  // --- CALCULATION HELPERS ---
+
+  const getLayerStats = (layer: StackupLayer) => {
+    if (!activePlan) return { method: "Laser cut" as FabricationMethod, numFiles: 1, exportText: "", numSheets: 0, actualThickness: 0, delta: 0 };
+
+    const method = activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC");
+    const settings = activePlan.waterlineSettings[layer.id] || {
+        sheetThicknessExpression: "3",
+        startSide: "Cut side",
+        rounding: "Round up"
+    };
+
+    const progThickness = evaluateExpression(layer.thicknessExpression, params);
+    const sheetThickness = evaluateExpression(settings.sheetThicknessExpression, params);
+    
+    let numSheets = 0;
+    if (method === "Waterline laser cut" && sheetThickness > 0) {
+        const ratio = progThickness / sheetThickness;
+        numSheets = settings.rounding === "Round up" ? Math.ceil(ratio) : Math.floor(ratio);
+    }
+    
+    const actualThickness = numSheets * sheetThickness;
+    const delta = actualThickness - progThickness;
+
+    let numFiles = 1;
+    let exportText = "";
+
+    switch (method) {
+        case "Laser cut": 
+            exportText = "Exports a DXF"; 
+            numFiles = 1;
+            break;
+        case "3D printed": 
+            exportText = "Exports an STL"; 
+            numFiles = 1;
+            break;
+        case "CNC": 
+            exportText = "Exports an SVG depth map"; 
+            numFiles = 1;
+            break;
+        case "Waterline laser cut": 
+            exportText = `Exports ${numSheets} DXF cuts`; 
+            numFiles = numSheets;
+            break;
+    }
+
+    return { method, numFiles, exportText, numSheets, actualThickness, delta, progThickness };
+  };
+
+  // Memoize total file count
+  const totalFiles = useMemo(() => {
+    if (!activePlan) return 0;
+    return stackup.reduce((sum, layer) => sum + getLayerStats(layer).numFiles, 0);
+  }, [activePlan, stackup, params]);
+
   const handleReorder = (dragIndex: number, dropIndex: number) => {
     if (dragIndex === dropIndex) return;
     const next = [...fabPlans];
@@ -94,30 +149,19 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
             <tr>
               <th style={{ width: '40px' }}></th>
               <th style={{ width: '200px' }}>Layer Name</th>
-              <th style={{ width: '150px' }}>Method</th>
+              <th style={{ width: '220px' }}>Method</th>
               <th>Strategy Details</th>
             </tr>
           </thead>
           <tbody>
             {stackup.map(layer => {
-              const method = activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC");
+              const { method, exportText, numSheets, actualThickness, delta, progThickness } = getLayerStats(layer);
               const isWaterline = method === "Waterline laser cut";
               const settings = activePlan.waterlineSettings[layer.id] || {
                   sheetThicknessExpression: "3",
                   startSide: "Cut side",
                   rounding: "Round up"
               };
-
-              const progThickness = evaluateExpression(layer.thicknessExpression, params);
-              const sheetThickness = evaluateExpression(settings.sheetThicknessExpression, params);
-              
-              let numSheets = 0;
-              if (sheetThickness > 0) {
-                  const ratio = progThickness / sheetThickness;
-                  numSheets = settings.rounding === "Round up" ? Math.ceil(ratio) : Math.floor(ratio);
-              }
-              const actualThickness = numSheets * sheetThickness;
-              const delta = actualThickness - progThickness;
 
               return (
                 <tr key={layer.id} style={{ height: 'auto' }}>
@@ -126,7 +170,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                   </td>
                   <td style={{ verticalAlign: 'top', paddingTop: '15px' }}>
                       <div style={{ fontWeight: 'bold' }}>{layer.name}</div>
-                      <div style={{ color: '#666', fontSize: '0.8em' }}>Programmed: {progThickness.toFixed(2)}mm</div>
+                      <div style={{ color: '#666', fontSize: '0.8em' }}>Programmed: {progThickness?.toFixed(2)}mm</div>
                   </td>
                   <td style={{ verticalAlign: 'top', paddingTop: '10px' }}>
                     <select 
@@ -141,6 +185,9 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                         <option value="3D printed">3D printed</option>
                       </>}
                     </select>
+                    <div style={{ marginTop: '6px', fontSize: '0.75em', color: '#646cff', fontWeight: 'bold' }}>
+                        {exportText}
+                    </div>
                   </td>
                   <td>
                     {isWaterline && (
@@ -192,12 +239,45 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                         </div>
                       </div>
                     )}
+                    {!isWaterline && (
+                        <div style={{ color: '#555', fontSize: '0.85em', paddingTop: '10px' }}>
+                            Standard profile export based on layer manufacturing type.
+                        </div>
+                    )}
                   </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+
+        {/* SUMMARY FOOTER */}
+        <div style={{ 
+            marginTop: '30px', 
+            padding: '20px', 
+            background: '#2a2a2a', 
+            borderRadius: '8px', 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center',
+            border: '1px solid #444'
+        }}>
+            <div>
+                <div style={{ fontSize: '1.1em', fontWeight: 'bold' }}>
+                    Exports {totalFiles} files total
+                </div>
+                <div style={{ fontSize: '0.8em', color: '#888' }}>
+                    All files will be generated into a single destination folder.
+                </div>
+            </div>
+            <button 
+                className="primary" 
+                style={{ padding: '12px 24px', fontSize: '1em' }}
+                onClick={() => alert("Fabrication export logic is coming soon!")}
+            >
+                Export fabrication folder
+            </button>
+        </div>
       </div>
     );
   }
