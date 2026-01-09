@@ -1,10 +1,22 @@
 // src/components/FabricationEditor.tsx
 import { useState, useRef, useMemo } from "react";
-import { FabricationPlan, Footprint, StackupLayer, FabricationMethod, Parameter, WaterlineSettings, MeshAsset } from "../types";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { join } from "@tauri-apps/api/path";
+import { 
+    FabricationPlan, 
+    Footprint, 
+    StackupLayer, 
+    FabricationMethod, 
+    Parameter, 
+    WaterlineSettings, 
+    MeshAsset, 
+    FootprintBoardOutline 
+} from "../types";
 import { IconOutline, IconGrip } from "./Icons";
 import ExpressionEditor from "./ExpressionEditor";
-import { evaluateExpression } from "../utils/footprintUtils";
-// Import the 3D View
+import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
+import { collectExportShapesAsync } from "../utils/exportUtils";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import "./FabricationEditor.css";
 
@@ -14,19 +26,19 @@ interface Props {
   footprints: Footprint[];
   stackup: StackupLayer[];
   params: Parameter[];
-  meshAssets: MeshAsset[]; // Added to props
+  meshAssets: MeshAsset[];
 }
 
 export default function FabricationEditor({ fabPlans, setFabPlans, footprints, stackup, params, meshAssets }: Props) {
   const [activePlanId, setActivePlanId] = useState<string | null>(null);
-  const activePlan = fabPlans.find(p => p.id === activePlanId);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState("");
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-  const dragItemIndex = useRef<number | null>(null);
   
-  // Ref for 3D View to handle STL exports later
+  const activePlan = fabPlans.find(p => p.id === activePlanId);
+  const dragItemIndex = useRef<number | null>(null);
   const view3DRef = useRef<Footprint3DViewHandle>(null);
 
-  // Identify the target footprint for the 3D viewer
   const targetFootprint = useMemo(() => {
     return footprints.find(fp => fp.id === activePlan?.footprintId);
   }, [activePlan, footprints]);
@@ -63,15 +75,22 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
     const progThickness = evaluateExpression(layer.thicknessExpression, params);
     const sheetThickness = evaluateExpression(settings.sheetThicknessExpression, params);
+    
     let numSheets = 0;
     if (method === "Waterline laser cut" && sheetThickness > 0) {
         const ratio = progThickness / sheetThickness;
         numSheets = settings.rounding === "Round up" ? Math.ceil(ratio) : Math.floor(ratio);
     }
+    
     const actualThickness = numSheets * sheetThickness;
     const delta = actualThickness - progThickness;
-    let numFiles = 1;
-    let exportText = method === "Waterline laser cut" ? `Exports ${numSheets} DXF cuts` : (method === "CNC" ? "Exports SVG depth" : "Single file");
+    let numFiles = method === "Waterline laser cut" ? numSheets : 1;
+    
+    let exportText = "Single file";
+    if (method === "Waterline laser cut") exportText = `Exports ${numSheets} DXF cuts`;
+    else if (method === "CNC") exportText = "Exports SVG depth map";
+    else if (method === "3D printed") exportText = "Exports STL mesh";
+    
     return { method, numFiles, exportText, numSheets, actualThickness, delta, progThickness };
   };
 
@@ -89,10 +108,116 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     setFabPlans(next);
   };
 
+  // --- BULK EXPORT LOGIC ---
+  const handleBulkExport = async () => {
+    if (!activePlan || !targetFootprint) return;
+
+    const folderPath = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Export Folder"
+    });
+
+    if (!folderPath) return;
+
+    setIsExporting(true);
+    const planName = activePlan.name.replace(/[^a-zA-Z0-9]/g, '_');
+
+    try {
+        // 1. Prepare 3D View if any layer needs STL
+        const needsStl = stackup.some(l => activePlan.layerMethods[l.id] === "3D printed");
+        if (needsStl) {
+            setExportProgress("Computing high-resolution meshes...");
+            await view3DRef.current?.ensureHighRes();
+        }
+
+        // 2. Iterate Layers
+        for (const layer of stackup) {
+            const { method } = getLayerStats(layer);
+            if (method === "Waterline laser cut") continue; // Ignored per instructions
+
+            setExportProgress(`Processing layer: ${layer.name}...`);
+
+            // Determine file extension and rust format
+            let extension = "svg";
+            if (method === "Laser cut") extension = "dxf";
+            if (method === "3D printed") extension = "stl";
+            const rustFormat = extension.toUpperCase();
+            
+            const fileName = `${planName}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}.${extension}`;
+            const fullPath = await join(folderPath as string, fileName);
+
+            // Basic layer data
+            const layerThickness = evaluateExpression(layer.thicknessExpression, params);
+            
+            // Resolve Board Outline for this layer
+            const assignedOutlineId = targetFootprint.boardOutlineAssignments?.[layer.id];
+            const outlineShape = targetFootprint.shapes.find(s => s.id === assignedOutlineId) as FootprintBoardOutline | undefined;
+            const originX = outlineShape ? evaluateExpression(outlineShape.x, params) : 0;
+            const originY = outlineShape ? evaluateExpression(outlineShape.y, params) : 0;
+
+            const outline = (outlineShape?.points || []).map(p => {
+                const resolved = resolvePoint(p, targetFootprint, footprints, params);
+                return {
+                    x: resolved.x + originX,
+                    y: resolved.y + originY,
+                    handle_in: resolved.handleIn,
+                    handle_out: resolved.handleOut
+                };
+            });
+
+            let stl_content: number[] | null = null;
+            let shapes: any[] = [];
+
+            if (method === "3D printed") {
+                // Fetch binary STL from the 3D View
+                const rawStl = view3DRef.current?.getLayerSTL(layer.id);
+                if (rawStl) {
+                    stl_content = Array.from(rawStl);
+                } else {
+                    console.error(`Failed to get STL for layer ${layer.name}`);
+                }
+            } else {
+                // Collect geometric shapes for SVG/DXF
+                const effectiveType = method === "Laser cut" ? "Cut" as const : "Carved/Printed" as const;
+                shapes = await collectExportShapesAsync(
+                    targetFootprint, 
+                    targetFootprint.shapes, 
+                    footprints,
+                    params,
+                    { ...layer, type: effectiveType },
+                    layerThickness,
+                    view3DRef.current
+                );
+            }
+
+            // 3. Dispatch to Rust
+            await invoke("export_layer_files", {
+                request: {
+                    filepath: fullPath,
+                    file_type: rustFormat,
+                    machining_type: method === "Laser cut" ? "Cut" : "Carved/Printed",
+                    cut_direction: layer.carveSide,
+                    outline,
+                    shapes,
+                    layer_thickness: layerThickness,
+                    stl_content
+                }
+            });
+        }
+        setExportProgress("");
+        alert("Bulk export successful!");
+    } catch (e) {
+        console.error("Bulk export failed", e);
+        alert("Export failed: " + e);
+    } finally {
+        setIsExporting(false);
+    }
+  };
+
   if (activePlan) {
     return (
       <div className="fab-editor-layout">
-        {/* LEFT SIDE: Settings */}
         <div className="fab-settings-panel">
             <header className="fab-header">
                 <button className="secondary" onClick={() => setActivePlanId(null)}>← Back</button>
@@ -130,11 +255,11 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                 onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? 
                                     {...p, layerMethods: {...p.layerMethods, [layer.id]: e.target.value as FabricationMethod}} : p))}
                             >
-                                {layer.type === "Cut" ? <option value="Laser cut">Laser cut</option> : 
+                                {layer.type === "Cut" ? <option value="Laser cut">Laser cut (DXF)</option> : 
                                 <>
-                                    <option value="CNC">CNC</option>
+                                    <option value="CNC">CNC (SVG Depth Map)</option>
                                     <option value="Waterline laser cut">Waterline laser cut</option>
-                                    <option value="3D printed">3D printed</option>
+                                    <option value="3D printed">3D printed (STL)</option>
                                 </>}
                             </select>
 
@@ -159,12 +284,19 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
             </div>
 
             <footer className="fab-footer">
-                <div className="summary">Exports <strong>{totalFiles} files</strong></div>
-                <button className="primary" onClick={() => alert("Bulk export coming soon!")}>Export Folder</button>
+                <div className="summary">
+                    {isExporting ? exportProgress : `Ready to export ${totalFiles} files`}
+                </div>
+                <button 
+                    className="primary" 
+                    onClick={handleBulkExport}
+                    disabled={isExporting || !targetFootprint}
+                >
+                    {isExporting ? "Exporting..." : "Export Folder"}
+                </button>
             </footer>
         </div>
 
-        {/* RIGHT SIDE: 3D Preview */}
         <div className="fab-preview-panel">
             {targetFootprint ? (
                 <Footprint3DView 
@@ -175,13 +307,13 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     stackup={stackup}
                     meshAssets={meshAssets}
                     is3DActive={true}
-                    selectedId={null} // Read-only mode for fab
+                    selectedId={null} 
                     onSelect={() => {}}
                     onUpdateMesh={() => {}}
                 />
             ) : (
                 <div className="empty-preview">
-                    <p>Select a footprint to preview stackup</p>
+                    <p>Select a target footprint to preview the stackup</p>
                 </div>
             )}
         </div>
