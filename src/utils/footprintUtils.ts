@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import { create, all } from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine, FootprintBoardOutline } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine } from "../types";
 
 // --- CUSTOM MATHJS INSTANCE ---
 export const math = create(all);

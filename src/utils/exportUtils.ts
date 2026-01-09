@@ -1,6 +1,6 @@
 // src/utils/exportUtils.ts
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintUnion, FootprintCircle, FootprintRect, FootprintLine, FootprintPolygon } from "../types";
-import { evaluateExpression, resolvePoint, getTransformAlongLine, getPolyOutlinePoints, offsetPolygonContour } from "./footprintUtils";
+import { evaluateExpression, resolvePoint, getTransformAlongLine, offsetPolygonContour } from "./footprintUtils";
 import { Footprint3DViewHandle } from "../components/Footprint3DView";
 import * as THREE from "three";
 

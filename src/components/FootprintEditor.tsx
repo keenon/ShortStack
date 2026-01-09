@@ -2,16 +2,15 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
 import { useUndoHistory } from "../hooks/useUndoHistory"; 
 import { collectExportShapesAsync } from "../utils/exportUtils";
-import * as THREE from "three";
 import './FootprintEditor.css';
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
