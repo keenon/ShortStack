@@ -1549,6 +1549,44 @@ export function getTransformAlongLine(
     return null;
 }
 
+
+/**
+ * Calculates the total length of a FootprintLine including Bezier segments.
+ */
+export function getLineLength(
+    shape: FootprintLine,
+    params: Parameter[],
+    contextFp: Footprint,
+    allFootprints: Footprint[],
+    parentTransform: { x: number, y: number, angle: number } = { x: 0, y: 0, angle: 0 }
+): number {
+    const points = shape.points;
+    if (points.length < 2) return 0;
+    let totalLength = 0;
+    const STEPS = 20;
+    for (let i = 0; i < points.length - 1; i++) {
+        const curr = resolvePoint(points[i], contextFp, allFootprints, params, parentTransform);
+        const next = resolvePoint(points[i + 1], contextFp, allFootprints, params, parentTransform);
+        if (curr.handleOut || next.handleIn) {
+            const p0 = curr;
+            const p3 = next;
+            const p1 = { x: p0.x + (p0.handleOut?.x || 0), y: p0.y + (p0.handleOut?.y || 0) };
+            const p2 = { x: p3.x + (p3.handleIn?.x || 0), y: p3.y + (p3.handleIn?.y || 0) };
+            let prevX = p0.x; let prevY = p0.y;
+            for (let s = 1; s <= STEPS; s++) {
+                const t = s / STEPS;
+                const tx = bezier1D(p0.x, p1.x, p2.x, p3.x, t);
+                const ty = bezier1D(p0.y, p1.y, p2.y, p3.y, t);
+                totalLength += Math.sqrt((tx - prevX) ** 2 + (ty - prevY) ** 2);
+                prevX = tx; prevY = ty;
+            }
+        } else {
+            totalLength += Math.sqrt((next.x - curr.x) ** 2 + (next.y - curr.y) ** 2);
+        }
+    }
+    return totalLength;
+}
+
 export function getFootprintAABB(
     footprint: Footprint,
     params: Parameter[],

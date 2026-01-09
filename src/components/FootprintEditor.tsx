@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
@@ -830,9 +830,15 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
       const type = e.altKey ? 'rotate' : 'slide';
       
-      // Calculate Pivot Point (Current location of Tie Down)
-      const currentDist = evaluateExpression(tieDown.distance, params);
-      const tf = getTransformAlongLine(shape, currentDist, params, footprint, allFootprints);
+      // Get the raw value from the expression
+      const initialEvaluatedDist = evaluateExpression(tieDown.distance, params);
+      
+      // Calculate the visual limit (clamped)
+      const lineLength = getLineLength(shape, params, footprint, allFootprints);
+      const clampedDist = Math.max(0, Math.min(initialEvaluatedDist, lineLength));
+
+      // Calculate Pivot Point based on CLAMPED distance
+      const tf = getTransformAlongLine(shape, clampedDist, params, footprint, allFootprints);
       if (!tf) return;
 
       let startState: any = {
@@ -843,7 +849,8 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           startMouse: mouseMath,
           pivot: { x: tf.x, y: tf.y },
           initialParamAngle: evaluateExpression(tieDown.angle, params),
-          initialParamDist: currentDist,
+          initialEvaluatedDist, // The original numerical value (could be -50 or 500)
+          initialClampedDist: clampedDist, // Where it is visually (0 or lineLength)
       };
 
       if (type === 'rotate') {
@@ -861,7 +868,10 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           // Slide: Find where the mouse projects onto the wire NOW to set the offset
           // so drag doesn't snap center to mouse
           const result = getClosestDistanceAlongLine(shape, mouseMath, params, footprint, allFootprints);
-          startState.distOffset = currentDist - result.distance;
+          
+          // OFFSET is calculated from the CLAMPED visual position. 
+          // This removes the "dead zone" catch-up effect.
+          startState.distOffset = clampedDist - result.distance;
           
           setTieDownVisuals({
               type: 'slide',
@@ -922,11 +932,17 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           const result = getClosestDistanceAlongLine(currentShape, mouseMath, params, footprintRef.current, allFootprints);
           
           // New distance = Projected Distance + Constant Offset
-          const rawNewDist = result.distance + state.distOffset;
+          const desiredVisualDist = result.distance + state.distOffset;
           
-          // Update Param
-          const deltaDist = rawNewDist - state.initialParamDist;
-          const newDistExpr = modifyExpression(String(state.initialParamDist), deltaDist);
+          // 2. Calculate the DELTA relative to the INITIAL EVALUATED value.
+          // Example: expression was "-50" (initialEvaluatedDist). Clamped was "0" (initialClampedDist).
+          // If we drag 10mm forward, desiredVisualDist becomes 10.
+          // Delta = 10 - (-50) = 60.
+          // modifyExpression("-50", 60) results in "10", effectively snapping the 
+          // tie down to the line edge the moment dragging starts.
+          const deltaToApply = desiredVisualDist - (state as any).initialEvaluatedDist;
+          
+          const newDistExpr = modifyExpression(String((state as any).initialEvaluatedDist), deltaToApply);
 
           const newTieDowns = [...currentShape.tieDowns];
           newTieDowns[tdIndex] = { ...newTieDowns[tdIndex], distance: newDistExpr };
