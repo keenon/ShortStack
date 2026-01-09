@@ -311,3 +311,127 @@ button:disabled {
 .icon-btn.danger:hover {
     background-color: rgba(255, 77, 77, 0.1);
 }
+
+/* --- UNIFIED LIST ALIGNMENT --- */
+.footprint-row {
+  cursor: pointer;
+  transition: background-color 0.1s;
+}
+
+.footprint-row:hover {
+  background-color: #333;
+}
+
+.footprint-row.drag-over {
+  background-color: rgba(100, 108, 255, 0.05);
+}
+
+.actions-cell {
+  display: flex;
+  gap: 5px;
+  justify-content: flex-end;
+  align-items: center;
+  padding-right: 15px !important;
+}
+
+.drag-handle-cell {
+  padding: 0 !important;
+  width: 40px;
+}
+
+td {
+  vertical-align: middle;
+  height: 50px; /* Standardize row height */
+}
+
+.footprint-list {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.footprint-list th, .footprint-list td {
+  padding: 12px 10px;
+  border-bottom: 1px solid #333;
+}
+
+.footprint-row:hover {
+  background-color: #2a2a2a;
+}
+
+.drag-handle-cell {
+  width: 40px;
+  padding: 0 !important;
+}
+
+.actions-cell {
+  text-align: right;
+}
+
+/* --- UNIFIED EDITOR TABLE ALIGNMENT --- */
+.unified-editor-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.unified-editor-table th, 
+.unified-editor-table td {
+  padding: 12px 10px;
+  border-bottom: 1px solid #333;
+  vertical-align: middle;
+  height: 50px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Fixed Column Widths */
+.col-grip { width: 40px; }
+.col-type { width: 60px; }
+.col-name { width: auto; }
+.col-info { width: 150px; }
+.col-info-wide { width: 100px; }
+.col-actions { width: 120px; text-align: right; }
+
+.footprint-row {
+  cursor: pointer;
+  transition: background-color 0.1s;
+}
+
+.footprint-row:hover {
+  background-color: #2a2a2a;
+}
+
+/* Dragging indicator: Blue border on ANY row (item or empty zone) */
+tr.drag-over {
+  border-top: 2px solid #646cff !important;
+  background-color: rgba(100, 108, 255, 0.05) !important;
+}
+
+/* Bottom Drop Zone Specifics */
+.drop-zone-row {
+  height: 20px !important;
+  background-color: transparent;
+}
+
+.drop-zone-row td {
+  border: none !important;
+  padding: 0 !important;
+}
+
+.drag-handle-cell {
+  cursor: grab;
+  opacity: 0.3;
+  text-align: center;
+}
+
+.drag-handle-cell:active {
+  cursor: grabbing;
+}
+
+.actions-cell {
+  display: flex;
+  gap: 5px;
+  justify-content: flex-end;
+  align-items: center;
+}

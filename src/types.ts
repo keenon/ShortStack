@@ -187,6 +187,7 @@ export interface ProjectData {
   stackup: StackupLayer[];
   footprints: Footprint[];
   meshes: MeshAsset[]; // NEW: Global library\n  fabPlans?: FabricationPlan[];
+  fabPlans?: FabricationPlan[];
 }
 // --- FABRICATION TYPES ---
 export type CutFabricationMethod = "Laser cut";
