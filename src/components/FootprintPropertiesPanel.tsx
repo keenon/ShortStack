@@ -343,10 +343,14 @@ const FootprintPropertiesPanel = ({
             <div className="prop-section">
                 <h4>Applied Layers</h4>
                 <div className="layer-list">
-                    {stackup.map(layer => {
+                                        {stackup.map(layer => {
                         const assignedId = assignments[layer.id];
                         const isChecked = assignedId === shape.id;
                         
+                        // --- UI GUARD: Disable uncheck if it's the only outline for this layer ---
+                        const otherOutlines = footprint.shapes.filter(s => s.type === "boardOutline" && s.id !== shape.id);
+                        const isRequired = isChecked && otherOutlines.length === 0;
+
                         // Find name of outline actually using this layer
                         const otherOutline = assignedId && assignedId !== shape.id ? footprint.shapes.find(s => s.id === assignedId) : null;
 
@@ -355,21 +359,22 @@ const FootprintPropertiesPanel = ({
                                 <input 
                                     type="checkbox" 
                                     checked={isChecked} 
+                                    disabled={isRequired}
                                     onChange={(e) => {
                                         const newAss = { ...assignments };
                                         if (e.target.checked) {
                                             newAss[layer.id] = shape.id;
                                         } else {
-                                            // Fallback to first outline if unchecking
-                                            const firstOutline = footprint.shapes.find(s => s.type === "boardOutline");
-                                            newAss[layer.id] = firstOutline ? firstOutline.id : "";
+                                            // Technically disabled, but if reached, fallback to first available
+                                            newAss[layer.id] = otherOutlines.length > 0 ? otherOutlines[0].id : "";
                                         }
                                         updateFootprint("boardOutlineAssignments", newAss);
                                     }}
                                 />
                                 <div className="layer-color-badge" style={{ backgroundColor: layer.color }} />
                                 <span className="layer-name">{layer.name}</span>
-                                {!isChecked && otherOutline && (
+                                {isRequired && <small style={{ color: '#666', marginLeft: 'auto' }}>(Required)</small>}
+                                {!isChecked && otherOutline && !isRequired && (
                                     <small style={{ color: '#888', fontStyle: 'italic', marginLeft: 'auto' }}>
                                         Using: {otherOutline.name}
                                     </small>

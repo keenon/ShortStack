@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintRect, FootprintCircle, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getPolyOutlinePoints, offsetPolygonContour, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
@@ -1716,23 +1716,30 @@ const handleUngroup = (unionId: string) => {
     });
   };
   
-  const deleteShape = useCallback((shapeId: string) => {
-    const shapeToDelete = footprintRef.current.shapes.find(s => s.id === shapeId);
-    let newAssignments = { ...footprintRef.current.boardOutlineAssignments };
-    const newShapes = footprintRef.current.shapes.filter(s => s.id !== shapeId);
-
-    // REASSIGNMENT LOGIC for Board Outlines
-    if (shapeToDelete?.type === "boardOutline") {
-        const remainingOutlines = newShapes.filter(s => s.type === "boardOutline");
-        Object.entries(newAssignments).forEach(([layerId, assignedId]) => {
-            if (assignedId === shapeId) {
-                newAssignments[layerId] = remainingOutlines.length > 0 ? remainingOutlines[0].id : "";
-            }
-        });
+    const deleteShape = useCallback((shapeId: string) => {
+    const currentFp = footprintRef.current;
+    const shapeToDelete = currentFp.shapes.find(s => s.id === shapeId);
+    
+    // --- INTEGRITY GUARD: Prevent deleting the last board outline ---
+    if (shapeToDelete?.type === "boardOutline" && currentFp.isBoard) {
+        const remainingOutlines = currentFp.shapes.filter(s => s.type === "boardOutline" && s.id !== shapeId);
+        if (remainingOutlines.length === 0) {
+            alert("Cannot delete the last board outline while 'Standalone Board' is checked. Disable 'Standalone Board' first if you wish to remove all outlines.");
+            return;
+        }
     }
 
-    updateHistory({ footprint: { ...footprintRef.current, shapes: newShapes, boardOutlineAssignments: newAssignments }, selectedShapeIds: selectedShapeIds.filter(x => x !== shapeId) });
-  }, [editorState, updateHistory]);
+    let newShapes = currentFp.shapes.filter(s => s.id !== shapeId);
+
+    // Apply repair logic to re-map layers if the current outline was deleted
+    let repairedFp = { ...currentFp, shapes: newShapes };
+    repairedFp = repairBoardAssignments(repairedFp, stackup);
+
+    updateHistory({ 
+        footprint: repairedFp, 
+        selectedShapeIds: selectedShapeIds.filter(x => x !== shapeId) 
+    });
+  }, [editorState, updateHistory, stackup]);
 
   const convertShape = useCallback((oldShapeId: string, newShape: FootprintShape) => {
       const currentShapes = footprintRef.current.shapes;
@@ -2227,6 +2234,12 @@ const handleUngroup = (unionId: string) => {
 const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "DXF_CUT" | "SVG" | "DXF" | "STL") => {
     const layer = stackup.find(l => l.id === layerId);
     if (!layer) return;
+
+    // --- REPAIR BEFORE EXPORT ---
+    const repairedFp = repairBoardAssignments(footprint, stackup);
+    if (repairedFp !== footprint) {
+        onUpdate(repairedFp);
+    }
 
     // Determine intended output style
     const isCutStyle = format === "SVG_CUT" || format === "DXF_CUT" || layer.type === "Cut";

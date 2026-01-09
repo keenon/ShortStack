@@ -8,7 +8,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
 
 import { Parameter, StackupLayer, ProjectData, Footprint, FootprintShape, LayerAssignment, FootprintBoardOutline, MeshAsset } from "./types";
-import { resolveParameters } from "./utils/footprintUtils";
+import { resolveParameters, repairBoardAssignments } from "./utils/footprintUtils";
 
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
@@ -319,7 +319,7 @@ function App() {
               return m;
           });
 
-          return { 
+          const preRepairedFp = { 
               ...fp, 
               id: fp.id || crypto.randomUUID(), 
               shapes: sanitizedShapes, 
@@ -327,6 +327,9 @@ function App() {
               boardOutline: undefined, // Clear legacy
               boardOutlineAssignments 
           };
+
+          // --- REPAIR ASSIGNMENTS ON LOAD ---
+          return repairBoardAssignments(preRepairedFp, newStackup);
         });
 
         if (needsUpgrade) {

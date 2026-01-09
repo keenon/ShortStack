@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import { create, all } from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine, FootprintBoardOutline } from "../types";
 
 // --- CUSTOM MATHJS INSTANCE ---
 export const math = create(all);
@@ -1701,4 +1701,33 @@ export function getClosestDistanceAlongLine(
     }
 
     return { distance: bestTotalDist, closestPoint: bestPoint };
+}
+
+/**
+ * Ensures that if a footprint is marked as a board, it has at least one outline
+ * and every layer in the stackup is assigned to a valid outline.
+ */
+export function repairBoardAssignments(
+    footprint: Footprint,
+    stackup: StackupLayer[]
+): Footprint {
+    if (!footprint.isBoard) return footprint;
+
+    const outlines = footprint.shapes.filter(s => s.type === "boardOutline");
+    if (outlines.length === 0) return footprint;
+
+    const newAssignments = { ...(footprint.boardOutlineAssignments || {}) };
+    let modified = false;
+
+    stackup.forEach(layer => {
+        const currentAssignment = newAssignments[layer.id];
+        const targetExists = footprint.shapes.some(s => s.id === currentAssignment && s.type === "boardOutline");
+
+        if (!currentAssignment || !targetExists) {
+            newAssignments[layer.id] = outlines[0].id;
+            modified = true;
+        }
+    });
+
+    return modified ? { ...footprint, boardOutlineAssignments: newAssignments } : footprint;
 }
