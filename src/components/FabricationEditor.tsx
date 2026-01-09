@@ -16,7 +16,7 @@ import {
 import { IconOutline, IconGrip } from "./Icons";
 import ExpressionEditor from "./ExpressionEditor";
 import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
-import { collectExportShapesAsync } from "../utils/exportUtils";
+import { collectExportShapesAsync, sliceExportShapes } from "../utils/exportUtils";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import "./FabricationEditor.css";
 
@@ -70,7 +70,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   };
 
   const getLayerStats = (layer: StackupLayer) => {
-    if (!activePlan) return { method: "Laser cut" as FabricationMethod, numFiles: 1, exportText: "", numSheets: 0, actualThickness: 0, delta: 0, progThickness: 0 };
+    if (!activePlan) return { method: "Laser cut" as FabricationMethod, numFiles: 1, exportText: "", numSheets: 0, actualThickness: 0, delta: 0, progThickness: 0, sheetThickness: 0 };
     const method = activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC");
     const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
     const progThickness = evaluateExpression(layer.thicknessExpression, params);
@@ -91,7 +91,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     else if (method === "CNC") exportText = "Exports SVG depth map";
     else if (method === "3D printed") exportText = "Exports STL mesh";
     
-    return { method, numFiles, exportText, numSheets, actualThickness, delta, progThickness };
+    return { method, numFiles, exportText, numSheets, actualThickness, delta, progThickness, sheetThickness };
   };
 
   const totalFiles = useMemo(() => {
@@ -133,23 +133,10 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
 
         // 2. Iterate Layers
         for (const layer of stackup) {
-            const { method } = getLayerStats(layer);
-            if (method === "Waterline laser cut") continue; // Ignored per instructions
-
+            const { method, numSheets, sheetThickness } = getLayerStats(layer);
+            
             setExportProgress(`Processing layer: ${layer.name}...`);
 
-            // Determine file extension and rust format
-            let extension = "svg";
-            if (method === "Laser cut") extension = "dxf";
-            if (method === "3D printed") extension = "stl";
-            const rustFormat = extension.toUpperCase();
-            
-            const fileName = `${planName}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}.${extension}`;
-            const fullPath = await join(folderPath as string, fileName);
-
-            // Basic layer data
-            const layerThickness = evaluateExpression(layer.thicknessExpression, params);
-            
             // Resolve Board Outline for this layer
             const assignedOutlineId = targetFootprint.boardOutlineAssignments?.[layer.id];
             const outlineShape = targetFootprint.shapes.find(s => s.id === assignedOutlineId) as FootprintBoardOutline | undefined;
@@ -166,44 +153,97 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                 };
             });
 
-            let stl_content: number[] | null = null;
-            let shapes: any[] = [];
-
-            if (method === "3D printed") {
-                // Fetch binary STL from the 3D View
-                const rawStl = view3DRef.current?.getLayerSTL(layer.id);
-                if (rawStl) {
-                    stl_content = Array.from(rawStl);
-                } else {
-                    console.error(`Failed to get STL for layer ${layer.name}`);
-                }
-            } else {
-                // Collect geometric shapes for SVG/DXF
-                const effectiveType = method === "Laser cut" ? "Cut" as const : "Carved/Printed" as const;
-                shapes = await collectExportShapesAsync(
+            // --- STRATEGY SWITCH ---
+            
+            if (method === "Waterline laser cut") {
+                // Collect RAW shapes once
+                const layerThickness = evaluateExpression(layer.thicknessExpression, params);
+                const rawShapes = await collectExportShapesAsync(
                     targetFootprint, 
                     targetFootprint.shapes, 
                     footprints,
                     params,
-                    { ...layer, type: effectiveType },
+                    { ...layer, type: "Carved/Printed" }, // Force carved to get depths
                     layerThickness,
                     view3DRef.current
                 );
-            }
 
-            // 3. Dispatch to Rust
-            await invoke("export_layer_files", {
-                request: {
-                    filepath: fullPath,
-                    file_type: rustFormat,
-                    machining_type: method === "Laser cut" ? "Cut" : "Carved/Printed",
-                    cut_direction: layer.carveSide,
-                    outline,
-                    shapes,
-                    layer_thickness: layerThickness,
-                    stl_content
+                const settings = activePlan.waterlineSettings[layer.id];
+                const invertOrder = settings && settings.startSide === "Back side";
+
+                // Iterate Sheets
+                for (let i = 0; i < numSheets; i++) {
+                    const sheetIndex = invertOrder ? (numSheets - 1 - i) : i;
+                    const sliceZ = sheetIndex * sheetThickness; // Check profile at start of sheet (Top of sheet)
+                    
+                    // Generate Sliced Shapes
+                    const slicedShapes = sliceExportShapes(rawShapes, sliceZ, sheetThickness);
+                    
+                    const fileName = `${planName}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_Sheet${i+1}.dxf`;
+                    const fullPath = await join(folderPath as string, fileName);
+
+                    // Export DXF for this sheet
+                    await invoke("export_layer_files", {
+                        request: {
+                            filepath: fullPath,
+                            file_type: "DXF",
+                            machining_type: "Cut", // Force Cut mode for DXF output
+                            cut_direction: "Top",
+                            outline,
+                            shapes: slicedShapes,
+                            layer_thickness: sheetThickness,
+                            stl_content: null
+                        }
+                    });
                 }
-            });
+
+            } else {
+                // Determine file extension and rust format
+                let extension = "svg";
+                if (method === "Laser cut") extension = "dxf";
+                if (method === "3D printed") extension = "stl";
+                const rustFormat = extension.toUpperCase();
+                
+                const fileName = `${planName}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}.${extension}`;
+                const fullPath = await join(folderPath as string, fileName);
+
+                const layerThickness = evaluateExpression(layer.thicknessExpression, params);
+                let stl_content: number[] | null = null;
+                let shapes: any[] = [];
+
+                if (method === "3D printed") {
+                    const rawStl = view3DRef.current?.getLayerSTL(layer.id);
+                    if (rawStl) {
+                        stl_content = Array.from(rawStl);
+                    } else {
+                        console.error(`Failed to get STL for layer ${layer.name}`);
+                    }
+                } else {
+                    const effectiveType = method === "Laser cut" ? "Cut" as const : "Carved/Printed" as const;
+                    shapes = await collectExportShapesAsync(
+                        targetFootprint, 
+                        targetFootprint.shapes, 
+                        footprints,
+                        params,
+                        { ...layer, type: effectiveType },
+                        layerThickness,
+                        view3DRef.current
+                    );
+                }
+
+                await invoke("export_layer_files", {
+                    request: {
+                        filepath: fullPath,
+                        file_type: rustFormat,
+                        machining_type: method === "Laser cut" ? "Cut" : "Carved/Printed",
+                        cut_direction: layer.carveSide,
+                        outline,
+                        shapes,
+                        layer_thickness: layerThickness,
+                        stl_content
+                    }
+                });
+            }
         }
         setExportProgress("");
         alert("Bulk export successful!");
@@ -274,6 +314,17 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                     <div className="waterline-summary">
                                         {numSheets} sheets → {actualThickness.toFixed(2)}mm 
                                         <span className={delta < 0 ? "error" : "success"}>({delta >= 0 ? '+' : ''}{delta.toFixed(2)})</span>
+                                    </div>
+                                    {/* Order toggle */}
+                                    <div style={{marginTop: '5px'}}>
+                                        <select 
+                                            style={{fontSize: '0.9em', padding: '2px'}}
+                                            value={settings.startSide}
+                                            onChange={(e) => updateWaterlineSetting(layer.id, "startSide", e.target.value)}
+                                        >
+                                            <option value="Cut side">Start from Cut Side (Top)</option>
+                                            <option value="Back side">Start from Back Side (Bottom)</option>
+                                        </select>
                                     </div>
                                 </div>
                             )}

@@ -1,5 +1,5 @@
 // src/utils/exportUtils.ts
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintUnion, FootprintCircle, FootprintRect, FootprintLine, FootprintPolygon, FootprintBoardOutline } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintUnion, FootprintCircle, FootprintRect, FootprintLine, FootprintPolygon } from "../types";
 import { evaluateExpression, resolvePoint, getTransformAlongLine, getPolyOutlinePoints, offsetPolygonContour } from "./footprintUtils";
 import { Footprint3DViewHandle } from "../components/Footprint3DView";
 import * as THREE from "three";
@@ -59,6 +59,7 @@ export async function collectExportShapesAsync(
              const assigned = u.assignedLayers?.[layer.id];
              let overrideDepth = -1;
              let overrideRadius = 0;
+             let overrideInputFillet = 0;
              let effectiveDepth = 0;
              
              if (assigned) {
@@ -68,14 +69,19 @@ export async function collectExportShapesAsync(
                      const val = evaluateExpression(typeof assigned === 'object' ? assigned.depth : assigned, params);
                      overrideDepth = Math.max(0, val);
                      effectiveDepth = overrideDepth;
-                     if (typeof assigned === 'object') overrideRadius = evaluateExpression(assigned.endmillRadius, params);
+                     if (typeof assigned === 'object') {
+                         overrideRadius = evaluateExpression(assigned.endmillRadius, params);
+                         overrideInputFillet = evaluateExpression(assigned.inputFillet, params);
+                     }
                  }
              }
 
              if (layer.type === "Carved/Printed" && overrideRadius > 0 && viewRef) {
+                 // For complex unions with radii, we use the 2D contour generator from the worker if available
                  const contourPoints = await viewRef.computeUnionOutline(
                      u.shapes, params, contextFootprint, allFootprints, { x: gx, y: gy, rotation: transform.angle + evaluateExpression(u.angle, params) }
                  );
+                 // Note: this path bypasses hierarchical structure, flattening the union into polygons
                  const sliceResult = slicePolygonContours(contourPoints, effectiveDepth, overrideRadius, 0, 0, 0);
                  result = result.concat(sliceResult);
              } else {
@@ -90,6 +96,7 @@ export async function collectExportShapesAsync(
                      childrenExport.forEach(child => {
                          child.depth = overrideDepth;
                          if (overrideRadius > 0) child.endmill_radius = overrideRadius;
+                         if (overrideInputFillet > 0) child.input_fillet = overrideInputFillet;
                      });
                  }
                  result = result.concat(childrenExport);
@@ -100,6 +107,7 @@ export async function collectExportShapesAsync(
              
              let depth = 0;
              let endmillRadius = 0;
+             let inputFillet = 0;
              
              if (explicitAssignment) {
                  if (layer.type === "Cut") {
@@ -108,7 +116,10 @@ export async function collectExportShapesAsync(
                      const assign = shape.assignedLayers![layer.id];
                      const val = evaluateExpression(typeof assign === 'object' ? assign.depth : assign, params);
                      depth = Math.max(0, val);
-                     if (typeof assign === 'object') endmillRadius = evaluateExpression(assign.endmillRadius, params);
+                     if (typeof assign === 'object') {
+                         endmillRadius = evaluateExpression(assign.endmillRadius, params);
+                         inputFillet = evaluateExpression(assign.inputFillet, params);
+                     }
                  }
              } else {
                  depth = (layer.type === "Cut") ? layerThickness : 0; 
@@ -117,7 +128,10 @@ export async function collectExportShapesAsync(
              if (!forceInclude && depth <= 0.0001) continue;
 
              const exportObj: any = { x: gx, y: gy, depth: depth };
-             if (layer.type === "Carved/Printed" && endmillRadius > 0) exportObj.endmill_radius = endmillRadius;
+             if (layer.type === "Carved/Printed") {
+                 if (endmillRadius > 0) exportObj.endmill_radius = endmillRadius;
+                 if (inputFillet > 0) exportObj.input_fillet = inputFillet;
+             }
 
              if (shape.type === "circle") {
                  exportObj.shape_type = "circle";
@@ -168,28 +182,25 @@ export async function collectExportShapesAsync(
                 result.push(exportObj);
             } else if (shape.type === "polygon") {
                 const poly = shape as FootprintPolygon;
-                if (endmillRadius <= 0.001 || layer.type === "Cut") {
-                    exportObj.shape_type = "polygon";
-                    exportObj.points = poly.points.map(p => {
-                        const resolved = resolvePoint(p, contextFootprint, allFootprints, params, currentLocal);
-                        const shapeGlobalRad = (transform.angle + la) * (Math.PI / 180);
-                        const sCos = Math.cos(shapeGlobalRad);
-                        const sSin = Math.sin(shapeGlobalRad);
-                        const rx = resolved.x * sCos - resolved.y * sSin;
-                        const ry = resolved.x * sSin + resolved.y * sCos;
-                        const rotateVec = (v?: {x: number, y: number}) => v ? { x: v.x * sCos - v.y * sSin, y: v.x * sSin + v.y * sCos } : undefined;
-                        return { x: gx + rx, y: gy + ry, handle_in: rotateVec(resolved.handleIn), handle_out: rotateVec(resolved.handleOut) };
-                    });
-                    result.push(exportObj);
-                } else {
-                    const basePoints = getPolyOutlinePoints(poly.points, 0, 0, params, contextFootprint, allFootprints, 32, currentLocal, { x: 0, y: 0 });
+                
+                // For polygon, if we have radii, we should probably output the base polygon 
+                // and let the expanding logic handle offsets, rather than slicing here (which is for 3D stacks).
+                // But `slicePolygonContours` was used for *depth maps*.
+                // For *profile cuts* (Waterline), we want the single contour at a depth.
+                // We'll output the raw polygon and handle slicing in `sliceExportShapes`.
+                
+                exportObj.shape_type = "polygon";
+                exportObj.points = poly.points.map(p => {
+                    const resolved = resolvePoint(p, contextFootprint, allFootprints, params, currentLocal);
                     const shapeGlobalRad = (transform.angle + la) * (Math.PI / 180);
                     const sCos = Math.cos(shapeGlobalRad);
                     const sSin = Math.sin(shapeGlobalRad);
-                    const contour = basePoints.map(p => ({ x: gx + (p.x * sCos - p.y * sSin), y: gy + (p.x * sSin + p.y * sCos) }));
-                    const slices = slicePolygonContours([contour], depth, endmillRadius, 0, 0, 0);
-                    result = result.concat(slices);
-                }
+                    const rx = resolved.x * sCos - resolved.y * sSin;
+                    const ry = resolved.x * sSin + resolved.y * sCos;
+                    const rotateVec = (v?: {x: number, y: number}) => v ? { x: v.x * sCos - v.y * sSin, y: v.x * sSin + v.y * sCos } : undefined;
+                    return { x: gx + rx, y: gy + ry, handle_in: rotateVec(resolved.handleIn), handle_out: rotateVec(resolved.handleOut) };
+                });
+                result.push(exportObj);
             }
         }
     }
@@ -228,4 +239,84 @@ function slicePolygonContours(contours: {x:number, y:number}[][], depth: number,
         });
     });
     return result;
+}
+
+/**
+ * Filters a list of export shapes to only those that intersect a specific Z-depth slice,
+ * and modifies their geometry to account for chamfers/fillets at that depth.
+ */
+export function sliceExportShapes(allShapes: any[], sliceZ: number, layerThickness: number): any[] {
+    const sliced: any[] = [];
+
+    for (const shape of allShapes) {
+        const totalDepth = shape.depth || 0;
+        
+        // If the shape doesn't reach this slice (it's shallower than the current Z), skip
+        // Standard pocket starts at Z=0 and goes to Z=totalDepth.
+        if (sliceZ >= totalDepth - 0.0001) continue;
+
+        // Calculate Offset at this specific Z
+        let offset = 0;
+        const inputFillet = shape.input_fillet || 0;
+        const endmillRadius = shape.endmill_radius || 0;
+
+        // 1. Input Fillet (Top Chamfer)
+        // Active from Z=0 to Z=inputFillet
+        if (inputFillet > 0.001 && sliceZ < inputFillet) {
+            // Formula: (r - x)^2 + (r - z)^2 = r^2  => x (offset)
+            // Or simpler trig:
+            // At Z=0, offset = -radius (Wide). At Z=radius, offset = 0 (Nominal).
+            // Circular profile (quarter circle):
+            // dist_from_center_of_fillet = inputFillet - sliceZ
+            // width_from_vertical_wall = sqrt(r^2 - dist^2)
+            // offset = width_from_vertical_wall - r  (Negative = wider)
+            const dist = inputFillet - sliceZ;
+            const w = Math.sqrt(Math.max(0, inputFillet * inputFillet - dist * dist));
+            offset += (w - inputFillet); // Negative value
+        }
+
+        // 2. Endmill Radius (Bottom Ball/Fillet)
+        // Active from Z = (TotalDepth - endmillRadius) to TotalDepth
+        const bottomStart = totalDepth - endmillRadius;
+        if (endmillRadius > 0.001 && sliceZ > bottomStart) {
+            // At Z=bottomStart, offset = 0.
+            // At Z=TotalDepth, offset = radius (closed/narrow).
+            const heightFromBottom = totalDepth - sliceZ;
+            // width = sqrt(r^2 - (r-h)^2)
+            // offset = r - width (Positive = narrower)
+            const dist = endmillRadius - heightFromBottom;
+            const w = Math.sqrt(Math.max(0, endmillRadius * endmillRadius - dist * dist));
+            offset += (endmillRadius - w);
+        }
+
+        // Clone and modify
+        // We set depth to layerThickness because for this slice (sheet), it is a through cut.
+        const newShape = { ...shape, depth: layerThickness };
+        
+        // Apply Offset
+        if (Math.abs(offset) > 0.0001) {
+            if (newShape.shape_type === "circle") {
+                newShape.diameter -= 2 * offset;
+                if (newShape.diameter <= 0.001) continue; // Closed up
+            } else if (newShape.shape_type === "rect") {
+                newShape.width -= 2 * offset;
+                newShape.height -= 2 * offset;
+                if (newShape.width <= 0.001 || newShape.height <= 0.001) continue;
+                if (newShape.corner_radius) newShape.corner_radius = Math.max(0, newShape.corner_radius - offset);
+            } else if (newShape.shape_type === "line") {
+                newShape.thickness -= 2 * offset;
+                if (newShape.thickness <= 0.001) continue;
+            } else if (newShape.shape_type === "polygon") {
+                const vecPts = newShape.points.map((p:any) => new THREE.Vector2(p.x, p.y));
+                // offsetPolygonContour returns THREE.Vector2[]
+                const offPts = offsetPolygonContour(vecPts, offset);
+                if (offPts.length < 3) continue;
+                newShape.points = offPts.map(p => ({ x: p.x, y: p.y }));
+            }
+        }
+
+        sliced.push(newShape);
+    }
+
+    return sliced;
 }
