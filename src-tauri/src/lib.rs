@@ -92,6 +92,7 @@ fn export_layer_files(request: ExportRequest) {
 
     if request.file_type == "SVG" {
         if request.machining_type == "Carved/Printed" {
+            println!("DEBUG: Branch -> Depth Map SVG");
             // New logic for depth map export
             if let Err(e) = generate_depth_map_svg(&request) {
                 eprintln!("Error generating Depth Map SVG: {}", e);
@@ -99,6 +100,7 @@ fn export_layer_files(request: ExportRequest) {
                 println!("Depth Map SVG export successful.");
             }
         } else {
+            println!("DEBUG: Branch -> Profile SVG (Cut)");
             // Original logic for profile cut export
             if let Err(e) = generate_profile_svg(&request) {
                 eprintln!("Error generating Profile SVG: {}", e);
@@ -107,6 +109,7 @@ fn export_layer_files(request: ExportRequest) {
             }
         }
     } else if request.file_type == "DXF" {
+        println!("DEBUG: Branch -> DXF");
         if let Err(e) = generate_dxf(&request) {
             eprintln!("Error generating DXF: {}", e);
         } else {
@@ -431,7 +434,11 @@ fn get_board_and_shapes_expanded(request: &ExportRequest) -> Option<(Polygon<f64
 
 // Helper to get unioned geometry for profile cuts
 fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f64>)> {
-    if request.outline.is_empty() { return None; }
+    println!("DEBUG: Inside get_geometry_unioned");
+    if request.outline.is_empty() { 
+        println!("DEBUG: ⚠️ Request outline is empty! Returning None.");
+        return None; 
+    }
     
     // Discretize board outline (closed)
     let board_ls = discretize_path_closed(&request.outline);
@@ -441,9 +448,11 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
 
     // 2. Convert Shapes to Sketch and Union using csgrs
     let mut united_sketch: Option<Sketch<()>> = None;
+    let mut shape_count = 0;
 
     for shape in &request.shapes {
         if let Some(poly) = shape_to_polygon(shape) {
+            shape_count += 1;
             // Convert geo::Polygon to Sketch
             let geom = geo::Geometry::Polygon(poly);
             let shape_sketch = Sketch::from_geo(geom.into(), None); 
@@ -456,8 +465,11 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
         }
     }
     
+    println!("DEBUG: Processed {} valid shapes for union.", shape_count);
+    
     // 3. Convert Sketch back to MultiPolygon for export
     let united_shapes = if let Some(sketch) = united_sketch {
+        println!("DEBUG: Clipping united shapes to board outline...");
         // CLIP: Intersect the unioned shapes with the board outline
         let clipped_sketch = sketch.intersection(&board_sketch);
         let mut polys = Vec::new();
@@ -470,20 +482,24 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
         }
         MultiPolygon::new(polys)
     } else {
+        println!("DEBUG: No united shapes created (list is empty or all invalid).");
         MultiPolygon::new(vec![])
     };
     
     Some((board_poly, united_shapes))
 }
 
-// Helper to get raw polygon list for depth maps (no union)
-// [REMOVED/REPLACED by get_board_and_shapes_expanded for the new feature]
-
 fn generate_profile_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
+    println!("DEBUG: Starting generate_profile_svg...");
     let (board_poly_raw, united_shapes_raw) = match get_geometry_unioned(request) {
         Some(g) => g,
-        None => return Ok(()),
+        None => {
+            println!("DEBUG: ⚠️ get_geometry_unioned returned None. No file will be saved.");
+            return Ok(());
+        },
     };
+
+    println!("DEBUG: Geometry generated. Outline valid. Shape count: {}", united_shapes_raw.0.len());
 
     // Transform logic (Standard SVG Y-Down flip)
     let transform = |c: Coord<f64>| Coord { x: c.x, y: -c.y };
@@ -500,6 +516,8 @@ fn generate_profile_svg(request: &ExportRequest) -> Result<(), Box<dyn std::erro
     let min_y = bounds.min().y;
     let width = bounds.width();
     let height = bounds.height();
+
+    println!("DEBUG: SVG Bounds - {} {} {} {}", min_x, min_y, width, height);
 
     let mut document = Document::new()
         .set("viewBox", format!("{} {} {} {}", min_x, min_y, width, height))
@@ -531,7 +549,9 @@ fn generate_profile_svg(request: &ExportRequest) -> Result<(), Box<dyn std::erro
         document = document.add(shapes_path);
     }
 
+    println!("DEBUG: Saving SVG to {}", request.filepath);
     svg::save(&request.filepath, &document)?;
+    println!("DEBUG: SVG saved successfully.");
 
     Ok(())
 }
