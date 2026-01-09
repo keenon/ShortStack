@@ -194,9 +194,19 @@ export type CutFabricationMethod = "Laser cut";
 export type CarvedFabricationMethod = "CNC" | "Waterline laser cut" | "3D printed";
 export type FabricationMethod = CutFabricationMethod | CarvedFabricationMethod;
 
+export type WaterlineStartSide = "Cut side" | "Back side";
+export type WaterlineRounding = "Round up" | "Round down";
+
+export interface WaterlineSettings {
+  sheetThicknessExpression: string;
+  startSide: WaterlineStartSide;
+  rounding: WaterlineRounding;
+}
+
 export interface FabricationPlan {
   id: string;
   name: string;
   footprintId: string;
   layerMethods: Record<string, FabricationMethod>;
+  waterlineSettings: Record<string, WaterlineSettings>;
 }

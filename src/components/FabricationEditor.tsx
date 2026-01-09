@@ -1,7 +1,9 @@
 // src/components/FabricationEditor.tsx
 import { useState, useRef } from "react";
-import { FabricationPlan, Footprint, StackupLayer, FabricationMethod } from "../types";
+import { FabricationPlan, Footprint, StackupLayer, FabricationMethod, Parameter, WaterlineSettings } from "../types";
 import { IconOutline } from "./Icons";
+import ExpressionEditor from "./ExpressionEditor";
+import { evaluateExpression } from "../utils/footprintUtils";
 
 const IconGrip = ({ className }: { className?: string }) => (
     <svg className={className} width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
@@ -14,18 +16,45 @@ interface Props {
   setFabPlans: React.Dispatch<React.SetStateAction<FabricationPlan[]>>;
   footprints: Footprint[];
   stackup: StackupLayer[];
+  params: Parameter[];
 }
 
-export default function FabricationEditor({ fabPlans, setFabPlans, footprints, stackup }: Props) {
+export default function FabricationEditor({ fabPlans, setFabPlans, footprints, stackup, params }: Props) {
   const [activePlanId, setActivePlanId] = useState<string | null>(null);
   const activePlan = fabPlans.find(p => p.id === activePlanId);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const dragItemIndex = useRef<number | null>(null);
 
   const addPlan = () => {
-    const newPlan: FabricationPlan = { id: crypto.randomUUID(), name: "New Fabrication Plan", footprintId: footprints.length > 0 ? footprints[0].id : "", layerMethods: {} };
+    const newPlan: FabricationPlan = { 
+        id: crypto.randomUUID(), 
+        name: "New Fabrication Plan", 
+        footprintId: footprints.length > 0 ? footprints[0].id : "", 
+        layerMethods: {},
+        waterlineSettings: {} 
+    };
     setFabPlans([...fabPlans, newPlan]);
     setActivePlanId(newPlan.id);
+  };
+
+  const updateWaterlineSetting = (layerId: string, field: keyof WaterlineSettings, value: any) => {
+    if (!activePlan) return;
+    
+    const existing = activePlan.waterlineSettings[layerId] || {
+        sheetThicknessExpression: "3",
+        startSide: "Cut side",
+        rounding: "Round up"
+    };
+
+    const updatedPlan = {
+        ...activePlan,
+        waterlineSettings: {
+            ...activePlan.waterlineSettings,
+            [layerId]: { ...existing, [field]: value }
+        }
+    };
+
+    setFabPlans(prev => prev.map(p => p.id === activePlan.id ? updatedPlan : p));
   };
 
   const handleReorder = (dragIndex: number, dropIndex: number) => {
@@ -60,33 +89,113 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
         </div>
 
         <h3>Layer Fabrication Strategy</h3>
-        <table>
+        <table className="unified-editor-table">
           <thead>
             <tr>
               <th style={{ width: '40px' }}></th>
-              <th>Layer Name</th>
-              <th>Type</th>
-              <th>Fabrication Method</th>
+              <th style={{ width: '200px' }}>Layer Name</th>
+              <th style={{ width: '150px' }}>Method</th>
+              <th>Strategy Details</th>
             </tr>
           </thead>
           <tbody>
-            {stackup.map(layer => (
-              <tr key={layer.id}>
-                <td><div style={{ width: '12px', height: '12px', borderRadius: '2px', backgroundColor: layer.color }} /></td>
-                <td>{layer.name}</td>
-                <td style={{ color: '#888', fontSize: '0.9em' }}>{layer.type}</td>
-                <td>
-                  <select 
-                    value={activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC")}
-                    onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? 
-                        {...p, layerMethods: {...p.layerMethods, [layer.id]: e.target.value as FabricationMethod}} : p))}
-                  >
-                    {layer.type === "Cut" ? <option value="Laser cut">Laser cut</option> : 
-                    <><option value="CNC">CNC</option><option value="Waterline laser cut">Waterline laser cut</option><option value="3D printed">3D printed</option></>}
-                  </select>
-                </td>
-              </tr>
-            ))}
+            {stackup.map(layer => {
+              const method = activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC");
+              const isWaterline = method === "Waterline laser cut";
+              const settings = activePlan.waterlineSettings[layer.id] || {
+                  sheetThicknessExpression: "3",
+                  startSide: "Cut side",
+                  rounding: "Round up"
+              };
+
+              const progThickness = evaluateExpression(layer.thicknessExpression, params);
+              const sheetThickness = evaluateExpression(settings.sheetThicknessExpression, params);
+              
+              let numSheets = 0;
+              if (sheetThickness > 0) {
+                  const ratio = progThickness / sheetThickness;
+                  numSheets = settings.rounding === "Round up" ? Math.ceil(ratio) : Math.floor(ratio);
+              }
+              const actualThickness = numSheets * sheetThickness;
+              const delta = actualThickness - progThickness;
+
+              return (
+                <tr key={layer.id} style={{ height: 'auto' }}>
+                  <td style={{ verticalAlign: 'top', paddingTop: '15px' }}>
+                      <div style={{ width: '12px', height: '12px', borderRadius: '2px', backgroundColor: layer.color }} />
+                  </td>
+                  <td style={{ verticalAlign: 'top', paddingTop: '15px' }}>
+                      <div style={{ fontWeight: 'bold' }}>{layer.name}</div>
+                      <div style={{ color: '#666', fontSize: '0.8em' }}>Programmed: {progThickness.toFixed(2)}mm</div>
+                  </td>
+                  <td style={{ verticalAlign: 'top', paddingTop: '10px' }}>
+                    <select 
+                      value={method}
+                      onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? 
+                          {...p, layerMethods: {...p.layerMethods, [layer.id]: e.target.value as FabricationMethod}} : p))}
+                    >
+                      {layer.type === "Cut" ? <option value="Laser cut">Laser cut</option> : 
+                      <>
+                        <option value="CNC">CNC</option>
+                        <option value="Waterline laser cut">Waterline laser cut</option>
+                        <option value="3D printed">3D printed</option>
+                      </>}
+                    </select>
+                  </td>
+                  <td>
+                    {isWaterline && (
+                      <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '4px', border: '1px solid #333', marginTop: '5px', marginBottom: '10px' }}>
+                        <div className="row" style={{ marginBottom: '15px' }}>
+                            <div style={{ flex: 2 }}>
+                                <label style={{ fontSize: '0.8em', color: '#aaa', display: 'block', marginBottom: '4px' }}>Sheet Thickness</label>
+                                <ExpressionEditor 
+                                    value={settings.sheetThicknessExpression} 
+                                    onChange={(val) => updateWaterlineSetting(layer.id, "sheetThicknessExpression", val)} 
+                                    params={params} 
+                                />
+                            </div>
+                            <div style={{ flex: 1 }}>
+                                <label style={{ fontSize: '0.8em', color: '#aaa', display: 'block', marginBottom: '4px' }}>Rounding</label>
+                                <select 
+                                    value={settings.rounding} 
+                                    onChange={(e) => updateWaterlineSetting(layer.id, "rounding", e.target.value)}
+                                >
+                                    <option value="Round up">Up</option>
+                                    <option value="Round down">Down</option>
+                                </select>
+                            </div>
+                            <div style={{ flex: 1 }}>
+                                <label style={{ fontSize: '0.8em', color: '#aaa', display: 'block', marginBottom: '4px' }}>Start side</label>
+                                <select 
+                                    value={settings.startSide} 
+                                    onChange={(e) => updateWaterlineSetting(layer.id, "startSide", e.target.value)}
+                                >
+                                    <option value="Cut side">Cut</option>
+                                    <option value="Back side">Back</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #333', paddingTop: '10px' }}>
+                            <div>
+                                <span style={{ color: '#888', fontSize: '0.9em' }}>Required: </span>
+                                <strong style={{ color: '#646cff' }}>{numSheets} sheets</strong>
+                            </div>
+                            <div style={{ textAlign: 'right' }}>
+                                <div style={{ fontSize: '0.9em' }}>
+                                    Stack: <strong>{actualThickness.toFixed(2)}mm</strong>
+                                </div>
+                                <div style={{ fontSize: '0.75em', color: delta > 0 ? '#ffae00' : (delta < 0 ? '#ff4d4d' : '#00ff00') }}>
+                                    {delta === 0 ? "Perfect" : `${delta > 0 ? '+' : ''}${delta.toFixed(2)}mm`}
+                                </div>
+                            </div>
+                        </div>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -139,7 +248,6 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
               </tr>
             );
           })}
-          {/* BOTTOM DROP TARGET */}
           {fabPlans.length > 0 && (
             <tr
                 onDragOver={(e) => { e.preventDefault(); setDragOverIndex(fabPlans.length); }}

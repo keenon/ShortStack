@@ -337,7 +337,10 @@ function App() {
         setStackup(newStackup);
         setFootprints(newFootprints);
         setMeshAssets(rawMeshAssets);
-        setFabPlans(rawData.fabPlans || []);
+        setFabPlans((rawData.fabPlans || []).map((p: any) => ({
+            ...p,
+            waterlineSettings: p.waterlineSettings || {}
+        })));
         setCurrentPath(path as string);
         setActiveTab("stackup");
       }
@@ -446,6 +449,7 @@ function App() {
             setFabPlans={setFabPlans}
             footprints={footprints}
             stackup={stackup}
+            params={params}
           />
         </div>
       </main>
