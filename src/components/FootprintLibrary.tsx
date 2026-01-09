@@ -3,14 +3,8 @@ import { useState, useRef } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Footprint, Parameter, StackupLayer, MeshAsset } from "../types";
 import FootprintEditor from "./FootprintEditor";
-import { IconOutline, IconFootprint, IconDuplicate } from "./Icons";
+import { IconOutline, IconFootprint, IconDuplicate, IconGrip } from "./Icons";
 import './FootprintLibrary.css';
-
-const IconGrip = ({ className }: { className?: string }) => (
-    <svg className={className} width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M9 3H11V21H9V3ZM13 3H15V21H13V3Z" />
-    </svg>
-);
 
 interface Props {
   footprints: Footprint[];

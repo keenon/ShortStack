@@ -1,15 +1,12 @@
 // src/components/FabricationEditor.tsx
 import { useState, useRef, useMemo } from "react";
-import { FabricationPlan, Footprint, StackupLayer, FabricationMethod, Parameter, WaterlineSettings } from "../types";
-import { IconOutline } from "./Icons";
+import { FabricationPlan, Footprint, StackupLayer, FabricationMethod, Parameter, WaterlineSettings, MeshAsset } from "../types";
+import { IconOutline, IconGrip } from "./Icons";
 import ExpressionEditor from "./ExpressionEditor";
 import { evaluateExpression } from "../utils/footprintUtils";
-
-const IconGrip = ({ className }: { className?: string }) => (
-    <svg className={className} width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M9 3H11V21H9V3ZM13 3H15V21H13V3Z" />
-    </svg>
-);
+// Import the 3D View
+import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
+import "./FabricationEditor.css";
 
 interface Props {
   fabPlans: FabricationPlan[];
@@ -17,13 +14,22 @@ interface Props {
   footprints: Footprint[];
   stackup: StackupLayer[];
   params: Parameter[];
+  meshAssets: MeshAsset[]; // Added to props
 }
 
-export default function FabricationEditor({ fabPlans, setFabPlans, footprints, stackup, params }: Props) {
+export default function FabricationEditor({ fabPlans, setFabPlans, footprints, stackup, params, meshAssets }: Props) {
   const [activePlanId, setActivePlanId] = useState<string | null>(null);
   const activePlan = fabPlans.find(p => p.id === activePlanId);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const dragItemIndex = useRef<number | null>(null);
+  
+  // Ref for 3D View to handle STL exports later
+  const view3DRef = useRef<Footprint3DViewHandle>(null);
+
+  // Identify the target footprint for the 3D viewer
+  const targetFootprint = useMemo(() => {
+    return footprints.find(fp => fp.id === activePlan?.footprintId);
+  }, [activePlan, footprints]);
 
   const addPlan = () => {
     const newPlan: FabricationPlan = { 
@@ -39,74 +45,36 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
 
   const updateWaterlineSetting = (layerId: string, field: keyof WaterlineSettings, value: any) => {
     if (!activePlan) return;
-    
     const existing = activePlan.waterlineSettings[layerId] || {
         sheetThicknessExpression: "3",
         startSide: "Cut side",
         rounding: "Round up"
     };
-
     const updatedPlan = {
         ...activePlan,
-        waterlineSettings: {
-            ...activePlan.waterlineSettings,
-            [layerId]: { ...existing, [field]: value }
-        }
+        waterlineSettings: { ...activePlan.waterlineSettings, [layerId]: { ...existing, [field]: value } }
     };
-
     setFabPlans(prev => prev.map(p => p.id === activePlan.id ? updatedPlan : p));
   };
 
-  // --- CALCULATION HELPERS ---
-
   const getLayerStats = (layer: StackupLayer) => {
-    if (!activePlan) return { method: "Laser cut" as FabricationMethod, numFiles: 1, exportText: "", numSheets: 0, actualThickness: 0, delta: 0 };
-
+    if (!activePlan) return { method: "Laser cut" as FabricationMethod, numFiles: 1, exportText: "", numSheets: 0, actualThickness: 0, delta: 0, progThickness: 0 };
     const method = activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC");
-    const settings = activePlan.waterlineSettings[layer.id] || {
-        sheetThicknessExpression: "3",
-        startSide: "Cut side",
-        rounding: "Round up"
-    };
-
+    const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
     const progThickness = evaluateExpression(layer.thicknessExpression, params);
     const sheetThickness = evaluateExpression(settings.sheetThicknessExpression, params);
-    
     let numSheets = 0;
     if (method === "Waterline laser cut" && sheetThickness > 0) {
         const ratio = progThickness / sheetThickness;
         numSheets = settings.rounding === "Round up" ? Math.ceil(ratio) : Math.floor(ratio);
     }
-    
     const actualThickness = numSheets * sheetThickness;
     const delta = actualThickness - progThickness;
-
     let numFiles = 1;
-    let exportText = "";
-
-    switch (method) {
-        case "Laser cut": 
-            exportText = "Exports a DXF"; 
-            numFiles = 1;
-            break;
-        case "3D printed": 
-            exportText = "Exports an STL"; 
-            numFiles = 1;
-            break;
-        case "CNC": 
-            exportText = "Exports an SVG depth map"; 
-            numFiles = 1;
-            break;
-        case "Waterline laser cut": 
-            exportText = `Exports ${numSheets} DXF cuts`; 
-            numFiles = numSheets;
-            break;
-    }
-
+    let exportText = method === "Waterline laser cut" ? `Exports ${numSheets} DXF cuts` : (method === "CNC" ? "Exports SVG depth" : "Single file");
     return { method, numFiles, exportText, numSheets, actualThickness, delta, progThickness };
   };
 
-  // Memoize total file count
   const totalFiles = useMemo(() => {
     if (!activePlan) return 0;
     return stackup.reduce((sum, layer) => sum + getLayerStats(layer).numFiles, 0);
@@ -123,160 +91,99 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
 
   if (activePlan) {
     return (
-      <div className="editor-content">
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '20px' }}>
-          <button className="secondary" onClick={() => setActivePlanId(null)}>← Back to Library</button>
-          <h2 style={{ margin: 0 }}>Edit Plan: {activePlan.name}</h2>
-        </div>
+      <div className="fab-editor-layout">
+        {/* LEFT SIDE: Settings */}
+        <div className="fab-settings-panel">
+            <header className="fab-header">
+                <button className="secondary" onClick={() => setActivePlanId(null)}>← Back</button>
+                <h2>{activePlan.name}</h2>
+            </header>
 
-        <div className="row" style={{ marginBottom: '20px' }}>
-          <div style={{ flex: 1 }}>
-            <label style={{ display: 'block', marginBottom: '5px' }}>Plan Name</label>
-            <input type="text" value={activePlan.name} onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? {...p, name: e.target.value} : p))} />
-          </div>
-          <div style={{ flex: 1 }}>
-            <label style={{ display: 'block', marginBottom: '5px' }}>Target Footprint</label>
-            <select value={activePlan.footprintId} onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? {...p, footprintId: e.target.value} : p))}>
-              <option value="" disabled>Select Footprint...</option>
-              {footprints.map(fp => ( <option key={fp.id} value={fp.id}>{fp.name}</option> ))}
-            </select>
-          </div>
-        </div>
-
-        <h3>Layer Fabrication Strategy</h3>
-        <table className="unified-editor-table">
-          <thead>
-            <tr>
-              <th style={{ width: '40px' }}></th>
-              <th style={{ width: '200px' }}>Layer Name</th>
-              <th style={{ width: '220px' }}>Method</th>
-              <th>Strategy Details</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stackup.map(layer => {
-              const { method, exportText, numSheets, actualThickness, delta, progThickness } = getLayerStats(layer);
-              const isWaterline = method === "Waterline laser cut";
-              const settings = activePlan.waterlineSettings[layer.id] || {
-                  sheetThicknessExpression: "3",
-                  startSide: "Cut side",
-                  rounding: "Round up"
-              };
-
-              return (
-                <tr key={layer.id} style={{ height: 'auto' }}>
-                  <td style={{ verticalAlign: 'top', paddingTop: '15px' }}>
-                      <div style={{ width: '12px', height: '12px', borderRadius: '2px', backgroundColor: layer.color }} />
-                  </td>
-                  <td style={{ verticalAlign: 'top', paddingTop: '15px' }}>
-                      <div style={{ fontWeight: 'bold' }}>{layer.name}</div>
-                      <div style={{ color: '#666', fontSize: '0.8em' }}>Programmed: {progThickness?.toFixed(2)}mm</div>
-                  </td>
-                  <td style={{ verticalAlign: 'top', paddingTop: '10px' }}>
-                    <select 
-                      value={method}
-                      onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? 
-                          {...p, layerMethods: {...p.layerMethods, [layer.id]: e.target.value as FabricationMethod}} : p))}
-                    >
-                      {layer.type === "Cut" ? <option value="Laser cut">Laser cut</option> : 
-                      <>
-                        <option value="CNC">CNC</option>
-                        <option value="Waterline laser cut">Waterline laser cut</option>
-                        <option value="3D printed">3D printed</option>
-                      </>}
-                    </select>
-                    <div style={{ marginTop: '6px', fontSize: '0.75em', color: '#646cff', fontWeight: 'bold' }}>
-                        {exportText}
-                    </div>
-                  </td>
-                  <td>
-                    {isWaterline && (
-                      <div style={{ background: '#1a1a1a', padding: '15px', borderRadius: '4px', border: '1px solid #333', marginTop: '5px', marginBottom: '10px' }}>
-                        <div className="row" style={{ marginBottom: '15px' }}>
-                            <div style={{ flex: 2 }}>
-                                <label style={{ fontSize: '0.8em', color: '#aaa', display: 'block', marginBottom: '4px' }}>Sheet Thickness</label>
-                                <ExpressionEditor 
-                                    value={settings.sheetThicknessExpression} 
-                                    onChange={(val) => updateWaterlineSetting(layer.id, "sheetThicknessExpression", val)} 
-                                    params={params} 
-                                />
-                            </div>
-                            <div style={{ flex: 1 }}>
-                                <label style={{ fontSize: '0.8em', color: '#aaa', display: 'block', marginBottom: '4px' }}>Rounding</label>
-                                <select 
-                                    value={settings.rounding} 
-                                    onChange={(e) => updateWaterlineSetting(layer.id, "rounding", e.target.value)}
-                                >
-                                    <option value="Round up">Up</option>
-                                    <option value="Round down">Down</option>
-                                </select>
-                            </div>
-                            <div style={{ flex: 1 }}>
-                                <label style={{ fontSize: '0.8em', color: '#aaa', display: 'block', marginBottom: '4px' }}>Start side</label>
-                                <select 
-                                    value={settings.startSide} 
-                                    onChange={(e) => updateWaterlineSetting(layer.id, "startSide", e.target.value)}
-                                >
-                                    <option value="Cut side">Cut</option>
-                                    <option value="Back side">Back</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #333', paddingTop: '10px' }}>
-                            <div>
-                                <span style={{ color: '#888', fontSize: '0.9em' }}>Required: </span>
-                                <strong style={{ color: '#646cff' }}>{numSheets} sheets</strong>
-                            </div>
-                            <div style={{ textAlign: 'right' }}>
-                                <div style={{ fontSize: '0.9em' }}>
-                                    Stack: <strong>{actualThickness.toFixed(2)}mm</strong>
-                                </div>
-                                <div style={{ fontSize: '0.75em', color: delta > 0 ? '#ffae00' : (delta < 0 ? '#ff4d4d' : '#00ff00') }}>
-                                    {delta === 0 ? "Perfect" : `${delta > 0 ? '+' : ''}${delta.toFixed(2)}mm`}
-                                </div>
-                            </div>
-                        </div>
-                      </div>
-                    )}
-                    {!isWaterline && (
-                        <div style={{ color: '#555', fontSize: '0.85em', paddingTop: '10px' }}>
-                            Standard profile export based on layer manufacturing type.
-                        </div>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-
-        {/* SUMMARY FOOTER */}
-        <div style={{ 
-            marginTop: '30px', 
-            padding: '20px', 
-            background: '#2a2a2a', 
-            borderRadius: '8px', 
-            display: 'flex', 
-            justifyContent: 'space-between', 
-            alignItems: 'center',
-            border: '1px solid #444'
-        }}>
-            <div>
-                <div style={{ fontSize: '1.1em', fontWeight: 'bold' }}>
-                    Exports {totalFiles} files total
-                </div>
-                <div style={{ fontSize: '0.8em', color: '#888' }}>
-                    All files will be generated into a single destination folder.
-                </div>
+            <div className="prop-group">
+                <label>Plan Name</label>
+                <input type="text" value={activePlan.name} onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? {...p, name: e.target.value} : p))} />
             </div>
-            <button 
-                className="primary" 
-                style={{ padding: '12px 24px', fontSize: '1em' }}
-                onClick={() => alert("Fabrication export logic is coming soon!")}
-            >
-                Export fabrication folder
-            </button>
+            <div className="prop-group">
+                <label>Target Footprint</label>
+                <select value={activePlan.footprintId} onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? {...p, footprintId: e.target.value} : p))}>
+                    <option value="" disabled>Select...</option>
+                    {footprints.map(fp => ( <option key={fp.id} value={fp.id}>{fp.name}</option> ))}
+                </select>
+            </div>
+
+            <div className="fab-layers-list">
+                <h3>Layer Strategies</h3>
+                {stackup.map(layer => {
+                    const { method, exportText, numSheets, actualThickness, delta, progThickness } = getLayerStats(layer);
+                    const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
+                    
+                    return (
+                        <div key={layer.id} className="fab-layer-card">
+                            <div className="fab-layer-title">
+                                <div className="layer-color-badge" style={{ backgroundColor: layer.color }} />
+                                <strong>{layer.name}</strong>
+                                <span className="thickness-tag">{progThickness.toFixed(2)}mm</span>
+                            </div>
+
+                            <select 
+                                value={method}
+                                onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? 
+                                    {...p, layerMethods: {...p.layerMethods, [layer.id]: e.target.value as FabricationMethod}} : p))}
+                            >
+                                {layer.type === "Cut" ? <option value="Laser cut">Laser cut</option> : 
+                                <>
+                                    <option value="CNC">CNC</option>
+                                    <option value="Waterline laser cut">Waterline laser cut</option>
+                                    <option value="3D printed">3D printed</option>
+                                </>}
+                            </select>
+
+                            {method === "Waterline laser cut" && (
+                                <div className="waterline-mini-settings">
+                                    <label>Sheet thickness</label>
+                                    <ExpressionEditor 
+                                        value={settings.sheetThicknessExpression} 
+                                        onChange={(val) => updateWaterlineSetting(layer.id, "sheetThicknessExpression", val)} 
+                                        params={params} 
+                                    />
+                                    <div className="waterline-summary">
+                                        {numSheets} sheets → {actualThickness.toFixed(2)}mm 
+                                        <span className={delta < 0 ? "error" : "success"}>({delta >= 0 ? '+' : ''}{delta.toFixed(2)})</span>
+                                    </div>
+                                </div>
+                            )}
+                            <div className="fab-hint">{exportText}</div>
+                        </div>
+                    );
+                })}
+            </div>
+
+            <footer className="fab-footer">
+                <div className="summary">Exports <strong>{totalFiles} files</strong></div>
+                <button className="primary" onClick={() => alert("Bulk export coming soon!")}>Export Folder</button>
+            </footer>
+        </div>
+
+        {/* RIGHT SIDE: 3D Preview */}
+        <div className="fab-preview-panel">
+            {targetFootprint ? (
+                <Footprint3DView 
+                    ref={view3DRef}
+                    footprint={targetFootprint}
+                    allFootprints={footprints}
+                    params={params}
+                    stackup={stackup}
+                    meshAssets={meshAssets}
+                    is3DActive={true}
+                    selectedId={null} // Read-only mode for fab
+                    onSelect={() => {}}
+                    onUpdateMesh={() => {}}
+                />
+            ) : (
+                <div className="empty-preview">
+                    <p>Select a footprint to preview stackup</p>
+                </div>
+            )}
         </div>
       </div>
     );
@@ -304,9 +211,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
           {fabPlans.map((plan, index) => {
             const targetFp = footprints.find(f => f.id === plan.footprintId);
             return (
-              <tr 
-                key={plan.id} 
-                draggable
+              <tr key={plan.id} draggable
                 onDragStart={(e) => { dragItemIndex.current = index; e.dataTransfer.effectAllowed = "move"; }}
                 onDragOver={(e) => { e.preventDefault(); setDragOverIndex(index); }}
                 onDrop={(e) => {
@@ -328,19 +233,6 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
               </tr>
             );
           })}
-          {fabPlans.length > 0 && (
-            <tr
-                onDragOver={(e) => { e.preventDefault(); setDragOverIndex(fabPlans.length); }}
-                onDrop={(e) => {
-                    e.preventDefault();
-                    if (dragItemIndex.current !== null) handleReorder(dragItemIndex.current, fabPlans.length);
-                    setDragOverIndex(null);
-                }}
-                className={`drop-zone-row ${dragOverIndex === fabPlans.length ? "drag-over" : ""}`}
-            >
-                <td colSpan={6}></td>
-            </tr>
-          )}
         </tbody>
       </table>
     </div>

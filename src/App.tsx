@@ -443,13 +443,14 @@ function App() {
         <div className={`tab-pane ${activeTab === "parameters" ? "active" : ""}`}>
           <ParametersEditor params={params} setParams={setParams} />
         </div>
-              <div className={`tab-pane ${activeTab === "fabrication" ? "active" : ""}`}>
+        <div className={`tab-pane ${activeTab === "fabrication" ? "active" : ""}`}>
           <FabricationEditor 
             fabPlans={fabPlans}
             setFabPlans={setFabPlans}
             footprints={footprints}
             stackup={stackup}
             params={params}
+            meshAssets={meshAssets}
           />
         </div>
       </main>

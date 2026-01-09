@@ -79,3 +79,9 @@ export const IconDuplicate = () => (
     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
   </svg>
 );
+
+export const IconGrip = ({ className }: { className?: string }) => (
+    <svg className={className} width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M9 3H11V21H9V3ZM13 3H15V21H13V3Z" />
+    </svg>
+);
