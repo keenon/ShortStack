@@ -60,7 +60,7 @@ const LayerVisibilityPanel = ({
   stackup: StackupLayer[];
   visibility: Record<string, boolean>;
   onToggle: (id: string) => void;
-  onExport: (id: string, type: "SVG" | "DXF" | "STL") => void;
+  onExport: (id: string, type: "SVG_DEPTH" | "SVG_CUT" | "DXF_CUT" | "SVG" | "DXF" | "STL") => void;
   isBoard: boolean;
 }) => {
   const [collapsed, setCollapsed] = useState(false);
@@ -109,7 +109,7 @@ const LayerVisibilityPanel = ({
                     
                     {/* Bottom Row: Export Buttons (aligned left) */}
                     {isBoard && (
-                        <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-start', paddingLeft: '22px' }}>
+                        <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-start', paddingLeft: '22px', flexWrap: 'wrap' }}>
                             {layer.type === "Cut" ? (
                                 <>
                                     <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "SVG")}>SVG</button>
@@ -118,7 +118,9 @@ const LayerVisibilityPanel = ({
                             ) : (
                                 <>
                                     <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "STL")}>STL</button>
-                                    <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "SVG")}>SVG</button>
+                                    <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "SVG_DEPTH")}>SVG</button>
+                                    <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "SVG_CUT")}>SVG Cut</button>
+                                    <button className="vis-toggle-btn" style={{minWidth: '35px'}} onClick={() => onExport(layer.id, "DXF_CUT")}>DXF Cut</button>
                                 </>
                             )}
                         </div>
@@ -2205,11 +2207,16 @@ const handleUngroup = (unionId: string) => {
         }
     };
 
-  const handleExport = async (layerId: string, format: "SVG" | "DXF" | "STL") => {
+const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "DXF_CUT" | "SVG" | "DXF" | "STL") => {
     const layer = stackup.find(l => l.id === layerId);
     if (!layer) return;
 
-    if (format === "STL") {
+    // Determine intended output style
+    const isCutStyle = format === "SVG_CUT" || format === "DXF_CUT" || layer.type === "Cut";
+    const extension = format.startsWith("DXF") ? "dxf" : (format.startsWith("SVG") ? "svg" : "stl");
+    const rustFormat = extension.toUpperCase();
+
+    if (rustFormat === "STL") {
         // Force switch to 3D View if not active to ensure the Mesh Worker and R3F Loop are running.
         // This prevents the "generating high resolution 3D mesh" step from hanging due to paused render loops in 2D mode.
         if (viewMode !== "3D") {
@@ -2233,11 +2240,12 @@ const handleUngroup = (unionId: string) => {
     }
 
     // 1. Open Save Dialog
+    const suffix = (isCutStyle && layer.type !== "Cut") ? "_cut" : (format === "SVG_DEPTH" ? "_depth" : "");
     const path = await save({
-        defaultPath: `${footprint.name.replace(/[^a-zA-Z0-9]/g, '_')}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_${format.toLowerCase()}.${format.toLowerCase()}`,
+        defaultPath: `${footprint.name.replace(/[^a-zA-Z0-9]/g, '_')}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}${suffix}.${extension}`,
         filters: [{
-            name: `${format} File`,
-            extensions: [format.toLowerCase()]
+            name: `${rustFormat} File`,
+            extensions: [extension]
         }]
     });
 
@@ -2265,19 +2273,25 @@ const handleUngroup = (unionId: string) => {
         };
     });
 
+    // Determine effective machining type for the shape collector
+    const effectiveLayer = {
+        ...layer,
+        type: isCutStyle ? "Cut" as const : "Carved/Printed" as const
+    };
+
     const shapes = await collectExportShapesAsync(
         footprint, 
         footprint.shapes, 
         allFootprints,
         params,
-        layer,
+        effectiveLayer,
         layerThickness,
         footprint3DRef.current // Pass view ref to access worker
     );
 
     // 3. Prepare STL Data if needed
     let stlContent: number[] | null = null;
-    if (format === "STL") {
+    if (rustFormat === "STL") {
         const raw = footprint3DRef.current?.getLayerSTL(layerId);
         if (raw) {
             stlContent = Array.from(raw);
@@ -2292,8 +2306,8 @@ const handleUngroup = (unionId: string) => {
         await invoke("export_layer_files", {
             request: {
                 filepath: path,
-                file_type: format,
-                machining_type: layer.type,
+                file_type: rustFormat,
+                machining_type: effectiveLayer.type,
                 cut_direction: layer.carveSide,
                 outline,
                 shapes,
