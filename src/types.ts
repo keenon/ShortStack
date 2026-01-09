@@ -186,5 +186,16 @@ export interface ProjectData {
   params: Parameter[];
   stackup: StackupLayer[];
   footprints: Footprint[];
-  meshes: MeshAsset[]; // NEW: Global library
+  meshes: MeshAsset[]; // NEW: Global library\n  fabPlans?: FabricationPlan[];
+}
+// --- FABRICATION TYPES ---
+export type CutFabricationMethod = "Laser cut";
+export type CarvedFabricationMethod = "CNC" | "Waterline laser cut" | "3D printed";
+export type FabricationMethod = CutFabricationMethod | CarvedFabricationMethod;
+
+export interface FabricationPlan {
+  id: string;
+  name: string;
+  footprintId: string;
+  layerMethods: Record<string, FabricationMethod>;
 }

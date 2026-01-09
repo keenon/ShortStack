@@ -13,13 +13,14 @@ import { resolveParameters } from "./utils/footprintUtils";
 import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
 import FootprintLibrary from "./components/FootprintLibrary";
+import FabricationEditor from "./components/FabricationEditor";
 
 const TABLEAU_10 = [
   "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", 
   "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC"
 ];
 
-type Tab = "stackup" | "footprint" | "layout" | "parameters";
+type Tab = "stackup" | "footprint" | "layout" | "parameters" | "fabrication";
 
 function App() {
   const [currentPath, setCurrentPath] = useState<string | null>(null);
@@ -30,6 +31,7 @@ function App() {
   const [meshAssets, setMeshAssets] = useState<MeshAsset[]>([]);
   
   const [activeTab, setActiveTab] = useState<Tab>("stackup");
+  const [fabPlans, setFabPlans] = useState<any[]>([]);
 
   // --- UPDATER STATE ---
   const [update, setUpdate] = useState<Update | null>(null);
@@ -91,7 +93,7 @@ function App() {
 
     const saveData = async () => {
       try {
-        const projectData: ProjectData = { params, stackup, footprints, meshes: meshAssets };
+        const projectData: ProjectData = { params, stackup, footprints, meshes: meshAssets, fabPlans };
         const content = JSON.stringify(projectData, null, 2);
         await writeTextFile(currentPath, content);
         console.log("Auto-saved to", currentPath);
@@ -117,6 +119,7 @@ function App() {
             stackup: [], 
             footprints: [],
             meshes: [],
+            fabPlans: [],
         };
         await writeTextFile(path, JSON.stringify(initialData));
         setParams([]);
@@ -334,6 +337,7 @@ function App() {
         setStackup(newStackup);
         setFootprints(newFootprints);
         setMeshAssets(rawMeshAssets);
+        setFabPlans(rawData.fabPlans || []);
         setCurrentPath(path as string);
         setActiveTab("stackup");
       }
@@ -412,6 +416,7 @@ function App() {
         <button className={`tab-btn ${activeTab === "stackup" ? "active" : ""}`} onClick={() => setActiveTab("stackup")}>Stackup Editor</button>
         <button className={`tab-btn ${activeTab === "footprint" ? "active" : ""}`} onClick={() => setActiveTab("footprint")}>Footprint Editor</button>
         <button className={`tab-btn ${activeTab === "parameters" ? "active" : ""}`} onClick={() => setActiveTab("parameters")}>Parameters Editor</button>
+        <button className={`tab-btn ${activeTab === "fabrication" ? "active" : ""}`} onClick={() => setActiveTab("fabrication")}>Fabrication Editor</button>
       </nav>
 
       <main>
@@ -434,6 +439,14 @@ function App() {
         </div>
         <div className={`tab-pane ${activeTab === "parameters" ? "active" : ""}`}>
           <ParametersEditor params={params} setParams={setParams} />
+        </div>
+              <div className={`tab-pane ${activeTab === "fabrication" ? "active" : ""}`}>
+          <FabricationEditor 
+            fabPlans={fabPlans}
+            setFabPlans={setFabPlans}
+            footprints={footprints}
+            stackup={stackup}
+          />
         </div>
       </main>
 
