@@ -436,6 +436,8 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
     // Discretize board outline (closed)
     let board_ls = discretize_path_closed(&request.outline);
     let board_poly = Polygon::new(board_ls, vec![]);
+    // Prepare board sketch for clipping
+    let board_sketch = Sketch::from_geo(geo::Geometry::Polygon(board_poly.clone()).into(), None);
 
     // 2. Convert Shapes to Sketch and Union using csgrs
     let mut united_sketch: Option<Sketch<()>> = None;
@@ -456,8 +458,10 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
     
     // 3. Convert Sketch back to MultiPolygon for export
     let united_shapes = if let Some(sketch) = united_sketch {
+        // CLIP: Intersect the unioned shapes with the board outline
+        let clipped_sketch = sketch.intersection(&board_sketch);
         let mut polys = Vec::new();
-        for geom in sketch.geometry {
+        for geom in clipped_sketch.geometry {
             match geom {
                 geo::Geometry::Polygon(p) => polys.push(p),
                 geo::Geometry::MultiPolygon(mp) => polys.extend(mp.0),
@@ -539,6 +543,9 @@ fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::er
         None => return Ok(()),
     };
 
+    // Prepare board sketch for math clipping
+    let board_sketch = Sketch::from_geo(geo::Geometry::Polygon(board_poly_raw.clone()).into(), None);
+
     // Check conditions for flipping X:
     // We flip along the Y-axis (negate X) if we are Carving/Printing from the "Bottom".
     let mirror_x = request.cut_direction == "Bottom";
@@ -595,12 +602,12 @@ fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::er
         depth: f64,
     }
 
-    // A. Merge adjacent shapes with same depth
+    // A. Merge adjacent shapes with same depth AND clip them to board
     let mut layers: Vec<Layer> = Vec::new();
     for (poly_raw, depth) in shapes_raw {
-        let poly = poly_raw.map_coords(transform);
-        let geom = geo::Geometry::Polygon(poly);
-        let sketch = Sketch::from_geo(geom.into(), None);
+        let geom = geo::Geometry::Polygon(poly_raw);
+        // CLIP: Intersect each shape slice with the board outline before it enters the list
+        let sketch = Sketch::from_geo(geom.into(), None).intersection(&board_sketch);
 
         if let Some(last) = layers.last_mut() {
              if (last.depth - depth).abs() < 1e-6 {
@@ -693,10 +700,12 @@ fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::er
                 _ => {}
             }
         }
-        let final_multipoly = MultiPolygon::new(p_list);
+        let final_multipoly_raw = MultiPolygon::new(p_list);
 
-        if !final_multipoly.0.is_empty() {
+        if !final_multipoly_raw.0.is_empty() {
             let mut shapes_data = Data::new();
+            // Transform the geometry to SVG space here
+            let final_multipoly = final_multipoly_raw.map_coords(transform);
             for poly in &final_multipoly.0 {
                 shapes_data = append_polygon_to_data(shapes_data, poly);
             }
