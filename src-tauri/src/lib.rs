@@ -1,11 +1,11 @@
 // src-tauri/src/lib.rs
 use tauri::command;
 use std::f64::consts::PI;
-use geo::{Coord, LineString, MultiPolygon, Polygon};
+use geo::{Coord, LineString, MultiPolygon, Polygon, Intersects, Contains};
 use geo::bounding_rect::BoundingRect;
 use geo::MapCoords;
 use svg::Document;
-use svg::node::element::{Path, Rectangle};
+use svg::node::element::{Path, Rectangle, Circle};
 use svg::node::element::path::Data;
 use std::fs::File;
 use std::io::Write;
@@ -432,31 +432,46 @@ fn get_board_and_shapes_expanded(request: &ExportRequest) -> Option<(Polygon<f64
     Some((board_poly, shape_list))
 }
 
-// Helper to get unioned geometry for profile cuts
-fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiPolygon<f64>)> {
-    println!("DEBUG: Inside get_geometry_unioned");
-    if request.outline.is_empty() { 
-        println!("DEBUG: ⚠️ Request outline is empty! Returning None.");
-        return None; 
-    }
-    
-    // Discretize board outline (closed)
+// Helper to partition semantic circles from those needing CSG unioning
+fn partition_isolated_circles(request: &ExportRequest) -> (Polygon<f64>, Vec<ExportShape>, Vec<ExportShape>) {
     let board_ls = discretize_path_closed(&request.outline);
     let board_poly = Polygon::new(board_ls, vec![]);
-    // Prepare board sketch for clipping
+
+    let mut isolated = Vec::new();
+    let mut csg_pool = Vec::new();
+
+    let shape_polys: Vec<(usize, Polygon<f64>)> = request.shapes.iter().enumerate()
+        .filter_map(|(i, s)| shape_to_polygon(s).map(|p| (i, p)))
+        .collect();
+
+    for (i, shape) in request.shapes.iter().enumerate() {
+        let mut is_isolated = false;
+        if shape.shape_type == "circle" {
+            if let Some(poly) = shape_to_polygon(shape) {
+                let mut overlaps = false;
+                for (other_idx, other_poly) in &shape_polys {
+                    if i == *other_idx { continue; }
+                    if poly.intersects(other_poly) { overlaps = true; break; }
+                }
+                if !overlaps && board_poly.contains(&poly) { is_isolated = true; }
+            }
+        }
+
+        if is_isolated { isolated.push(shape.clone()); }
+        else { csg_pool.push(shape.clone()); }
+    }
+
+    (board_poly, isolated, csg_pool)
+}
+
+// Helper to get unioned geometry for profile cuts from a specific pool
+fn get_geometry_unioned_from_pool(board_poly: &Polygon<f64>, pool: &[ExportShape]) -> MultiPolygon<f64> {
     let board_sketch = Sketch::from_geo(geo::Geometry::Polygon(board_poly.clone()).into(), None);
-
-    // 2. Convert Shapes to Sketch and Union using csgrs
     let mut united_sketch: Option<Sketch<()>> = None;
-    let mut shape_count = 0;
 
-    for shape in &request.shapes {
+    for shape in pool {
         if let Some(poly) = shape_to_polygon(shape) {
-            shape_count += 1;
-            // Convert geo::Polygon to Sketch
-            let geom = geo::Geometry::Polygon(poly);
-            let shape_sketch = Sketch::from_geo(geom.into(), None); 
-
+            let shape_sketch = Sketch::from_geo(geo::Geometry::Polygon(poly).into(), None); 
             if let Some(current) = united_sketch {
                 united_sketch = Some(current.union(&shape_sketch));
             } else {
@@ -465,39 +480,26 @@ fn get_geometry_unioned(request: &ExportRequest) -> Option<(Polygon<f64>, MultiP
         }
     }
     
-    println!("DEBUG: Processed {} valid shapes for union.", shape_count);
-    
-    // 3. Convert Sketch back to MultiPolygon for export
-    let united_shapes = if let Some(sketch) = united_sketch {
-        println!("DEBUG: Clipping united shapes to board outline...");
-        // CLIP: Intersect the unioned shapes with the board outline
+    if let Some(sketch) = united_sketch {
         let clipped_sketch = sketch.intersection(&board_sketch);
         let mut polys = Vec::new();
         for geom in clipped_sketch.geometry {
             match geom {
                 geo::Geometry::Polygon(p) => polys.push(p),
                 geo::Geometry::MultiPolygon(mp) => polys.extend(mp.0),
-                _ => {} // Ignore other geometry types if any
+                _ => {}
             }
         }
         MultiPolygon::new(polys)
     } else {
-        println!("DEBUG: No united shapes created (list is empty or all invalid).");
         MultiPolygon::new(vec![])
-    };
-    
-    Some((board_poly, united_shapes))
+    }
 }
 
 fn generate_profile_svg(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
     println!("DEBUG: Starting generate_profile_svg...");
-    let (board_poly_raw, united_shapes_raw) = match get_geometry_unioned(request) {
-        Some(g) => g,
-        None => {
-            println!("DEBUG: ⚠️ get_geometry_unioned returned None. No file will be saved.");
-            return Ok(());
-        },
-    };
+    let (board_poly_raw, isolated_circles, pool) = partition_isolated_circles(request);
+    let united_shapes_raw = get_geometry_unioned_from_pool(&board_poly_raw, &pool);
 
     println!("DEBUG: Geometry generated. Outline valid. Shape count: {}", united_shapes_raw.0.len());
 
@@ -547,6 +549,19 @@ fn generate_profile_svg(request: &ExportRequest) -> Result<(), Box<dyn std::erro
             .set("stroke-width", "0.1mm")
             .set("d", shapes_data);
         document = document.add(shapes_path);
+    }
+
+    // Isolated Circles (Parametric)
+    for circle in isolated_circles {
+        let r = circle.diameter.unwrap_or(0.0) / 2.0;
+        let c_node = Circle::new()
+            .set("cx", circle.x)
+            .set("cy", -circle.y)
+            .set("r", r)
+            .set("fill", "none")
+            .set("stroke", "red")
+            .set("stroke-width", "0.1mm");
+        document = document.add(c_node);
     }
 
     println!("DEBUG: Saving SVG to {}", request.filepath);
@@ -751,10 +766,8 @@ fn generate_depth_map_svg(request: &ExportRequest) -> Result<(), Box<dyn std::er
 }
 
 fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error>> {
-    let (board_poly, united_shapes) = match get_geometry_unioned(request) {
-        Some(g) => g,
-        None => return Ok(()),
-    };
+    let (board_poly, isolated_circles, pool) = partition_isolated_circles(request);
+    let united_shapes = get_geometry_unioned_from_pool(&board_poly, &pool);
 
     let mut file = File::create(&request.filepath)?;
 
@@ -770,6 +783,17 @@ fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
     // Shapes: Layer CUTS, Color 1 (Red)
     for poly in &united_shapes.0 {
         write_dxf_polygon(&mut file, poly, "CUTS", 1)?;
+    }
+
+    // Isolated Circles: Parametric
+    for circle in isolated_circles {
+        let r = circle.diameter.unwrap_or(0.0) / 2.0;
+        writeln!(file, "  0\nCIRCLE")?;
+        writeln!(file, "  8\nCUTS")?;
+        writeln!(file, " 62\n1")?;
+        writeln!(file, " 10\n{:.4}", circle.x)?;
+        writeln!(file, " 20\n{:.4}", circle.y)?;
+        writeln!(file, " 40\n{:.4}", r)?;
     }
 
     writeln!(file, "  0\nENDSEC\n  0\nEOF")?;
