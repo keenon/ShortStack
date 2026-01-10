@@ -104,7 +104,7 @@ function App() {
     
     const timer = setTimeout(saveData, 500);
     return () => clearTimeout(timer);
-  }, [params, stackup, footprints, meshAssets, currentPath]);
+  }, [params, stackup, footprints, meshAssets, fabPlans, currentPath]);
 
   // CREATE PROJECT
   async function createProject() {
@@ -342,6 +342,7 @@ function App() {
         setMeshAssets(rawMeshAssets);
         setFabPlans((rawData.fabPlans || []).map((p: any) => ({
             ...p,
+            layerMethods: p.layerMethods || {},
             waterlineSettings: p.waterlineSettings || {}
         })));
         setCurrentPath(path as string);

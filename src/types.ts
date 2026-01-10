@@ -186,7 +186,7 @@ export interface ProjectData {
   params: Parameter[];
   stackup: StackupLayer[];
   footprints: Footprint[];
-  meshes: MeshAsset[]; // NEW: Global library\n  fabPlans?: FabricationPlan[];
+  meshes: MeshAsset[];
   fabPlans?: FabricationPlan[];
 }
 // --- FABRICATION TYPES ---
