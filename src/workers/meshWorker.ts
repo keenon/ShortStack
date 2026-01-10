@@ -1132,15 +1132,18 @@ function generateProceduralTool(
     
     let effTopR = topRadius;
     let effBottomR = bottomRadius;
-    const totalR = effTopR + effBottomR;
-    // Ensure strictly less than depth to avoid Manifold self-intersection issues on thin walls
-    const maxR = depth - 0.001; 
+    
+    // Constraint: Sum of radii must fit in depth (minus epsilon for manifold safety)
+    const maxTotal = depth - 0.001; 
 
-    if (totalR > maxR && maxR > 0) {
-        const scale = maxR / totalR;
-        effTopR *= scale;
-        effBottomR *= scale;
-    } else if (maxR <= 0) {
+    // If they overlap, clamp any radius larger than half-depth to half-depth.
+    // This allows a small radius + large radius to simply cap the large one,
+    // rather than shrinking both proportionally.
+    if (effTopR + effBottomR > maxTotal && maxTotal > 0) {
+        const halfDepth = maxTotal / 2;
+        if (effTopR > halfDepth) effTopR = halfDepth;
+        if (effBottomR > halfDepth) effBottomR = halfDepth;
+    } else if (maxTotal <= 0) {
         effTopR = 0;
         effBottomR = 0;
     }
