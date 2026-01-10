@@ -775,7 +775,7 @@ self.onmessage = async (e: MessageEvent) => {
                         }
 
                         // Fillet/Chamfer Tool Subtraction
-                        if (shouldGenTool && !isRestorative) {
+                        if (shouldGenTool) {
                             // Report Tool Op
                             report(`Generating tool for ${itemStr} on ${layerStr}...`, basePercent + 0.05);
 
