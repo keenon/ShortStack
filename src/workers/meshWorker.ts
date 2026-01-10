@@ -1321,14 +1321,11 @@ function generateProceduralTool(
         };
 
         // --- 3. GENERATE CONTOURS ---
-        
-        // Helper to get contour for a specific offset
         const getContourFromShape = (offset: number): THREE.Vector2[] => {
             let rawPoints: THREE.Vector2[] = [];
             
             if (shape.type === "circle") {
                 const d = evaluateExpression((shape as any).diameter, params);
-                // offset > 0 (shrink), offset < 0 (grow)
                 const r = Math.max(0.001, d/2 - offset); 
                 const segments = resolution;
                 for(let i=0; i<segments; i++) {
@@ -1387,7 +1384,6 @@ function generateProceduralTool(
             }
 
             if (rawPoints.length > 0) {
-                // Ensure CCW
                 const clean: THREE.Vector2[] = [rawPoints[0]];
                 for(let i=1; i<rawPoints.length; i++) clean.push(rawPoints[i]);
                 let area = 0;
@@ -1402,8 +1398,6 @@ function generateProceduralTool(
         };
 
         // --- 4. PREPARE LAYERS ---
-        
-        // Determine boundary based on minimum offset (widest point)
         let minOffset = 0;
         steps.forEach(s => minOffset = Math.min(minOffset, s.offset));
 
@@ -1423,294 +1417,286 @@ function generateProceduralTool(
             }
         }
 
-        const layerData: { z: number, contours: THREE.Vector2[][], startIdx: number }[] = [];
-        let totalVerts = 0;
-
-        steps.forEach(step => {
-            let processedPolys: THREE.Vector2[][] = [];
-            
+        // --- WRAP MANUAL STRATEGY IN TRY BLOCK FOR FALLBACK ---
+        try {
+            // --- CRITICAL CHECK FOR INTERNAL ISLANDS ---
             if (baseCSforComplex) {
-                // Complex shape logic
-                let cs = baseCSforComplex;
-                if (Math.abs(step.offset) > 0.001) {
-                    // If negative offset (input), Miter is better. If positive (ball), Round might be better, 
-                    // but usually Miter is cleaner for general offsets.
-                    cs = collectLocal(baseCSforComplex.offset(-step.offset, "Miter", 2.0));
-                } else {
-                    cs = collectLocal(baseCSforComplex.offset(0, "Miter", 2.0));
+                const polys = baseCSforComplex.toPolygons();
+                // If the cross-section has more than one polygon, it implies internal holes or disjoint parts
+                // which manual triangulation handles poorly. Fallback to stairstep.
+                if (polys.length > 1) {
+                    throw new Error("Internal islands detected; forcing stairstep fallback.");
                 }
+            }
+
+            const layerData: { z: number, contours: THREE.Vector2[][], startIdx: number }[] = [];
+            let totalVerts = 0;
+
+            steps.forEach(step => {
+                let processedPolys: THREE.Vector2[][] = [];
                 
-                const rawPolys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
-                processedPolys = rawPolys.map((poly: any) => {
-                    const clean = [poly[0]];
-                    for(let i=1; i<poly.length; i++) {
-                        if(poly[i].distanceToSquared(clean[clean.length-1]) > 1e-9) clean.push(poly[i]);
-                    }
-                    if(clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) clean.pop();
-                    let area = 0;
-                    for (let i = 0; i < clean.length; i++) {
-                        const j = (i + 1) % clean.length;
-                        area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
+                if (baseCSforComplex) {
+                    // Complex shape logic
+                    let cs = baseCSforComplex;
+                    if (Math.abs(step.offset) > 0.001) {
+                        cs = collectLocal(baseCSforComplex.offset(-step.offset, "Miter", 2.0));
+                    } else {
+                        cs = collectLocal(baseCSforComplex.offset(0, "Miter", 2.0));
                     }
                     
-                    // Keep holes (negative area) so islands are preserved.
-                    // Only discard degenerate/zero-area polygons.
-                    if (Math.abs(area) < 0.00001) return null;
-
-                    // Do NOT reverse here. If it was positive (solid), keep it.
-                    return clean;
-                }).filter((p: any) => p !== null && p.length >= 3);
-            } else {
-                const contour = getContourFromShape(step.offset);
-                if (contour.length > 0) processedPolys = [contour];
-            }
-
-            layerData.push({ z: step.z, contours: processedPolys, startIdx: totalVerts });
-            processedPolys.forEach((contour: THREE.Vector2[]) => {
-                contour.forEach(p => { rawVertices.push(p.x, step.z, -p.y); totalVerts++; });
-            });
-        });
-
-        // Helper for point-in-polygon check
-        const isPointInPoly = (pt: THREE.Vector2, poly: THREE.Vector2[]) => {
-            let inside = false;
-            for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-                const xi = poly[i].x, yi = poly[i].y;
-                const xj = poly[j].x, yj = poly[j].y;
-                const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
-                    (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
-                if (intersect) inside = !inside;
-            }
-            return inside;
-        };
-
-        // Helper to get signed area (Positive=CCW/Solid, Negative=CW/Hole)
-        const getSignedArea = (poly: THREE.Vector2[]) => {
-            let area = 0;
-            for (let i = 0; i < poly.length; i++) {
-                const j = (i + 1) % poly.length;
-                area += poly[i].x * poly[j].y - poly[j].x * poly[i].y;
-            }
-            return area * 0.5;
-        };
-
-        const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
-            // 1. Calculate global index offsets for each contour
-            const contourOffsets: number[] = [];
-            let runningOffset = startIdx;
-            contours.forEach(c => {
-                contourOffsets.push(runningOffset);
-                runningOffset += c.length;
-            });
-
-            // 2. Classify Contours into Solids and Holes
-            const solids: { poly: THREE.Vector2[], idx: number }[] = [];
-            const holes: { poly: THREE.Vector2[], idx: number }[] = [];
-
-            contours.forEach((c, i) => {
-                if (getSignedArea(c) > 0) {
-                    solids.push({ poly: c, idx: i });
+                    const rawPolys = cs.toPolygons().map((p: any) => p.map((pt: any) => new THREE.Vector2(pt[0], pt[1])));
+                    processedPolys = rawPolys.map((poly: any) => {
+                        const clean = [poly[0]];
+                        for(let i=1; i<poly.length; i++) {
+                            if(poly[i].distanceToSquared(clean[clean.length-1]) > 1e-9) clean.push(poly[i]);
+                        }
+                        if(clean.length > 2 && clean[clean.length-1].distanceToSquared(clean[0]) < 1e-9) clean.pop();
+                        let area = 0;
+                        for (let i = 0; i < clean.length; i++) {
+                            const j = (i + 1) % clean.length;
+                            area += clean[i].x * clean[j].y - clean[j].x * clean[i].y;
+                        }
+                        if (Math.abs(area) < 0.00001) return null;
+                        return clean;
+                    }).filter((p: any) => p !== null && p.length >= 3);
                 } else {
-                    // Ensure holes are actually holes (Three.js expects holes to be CW usually, 
-                    // but ShapeUtils is robust. We just need to separate them).
-                    holes.push({ poly: c, idx: i });
+                    const contour = getContourFromShape(step.offset);
+                    if (contour.length > 0) processedPolys = [contour];
                 }
-            });
 
-            // 3. Assign holes to their parent solids
-            // (Simple heuristic: checking if the first point of the hole is inside the solid)
-            solids.forEach(solid => {
-                const myHoles = holes.filter(h => isPointInPoly(h.poly[0], solid.poly));
-                
-                // Format for ShapeUtils: [Solid, Hole1, Hole2...] (points only)
-                const holeArrays = myHoles.map(h => h.poly);
-                
-                // Triangulate
-                const tris = THREE.ShapeUtils.triangulateShape(solid.poly, holeArrays);
-                
-                // 4. Map resulting local indices back to global mesh indices
-                tris.forEach(t => {
-                    const getGlobalIndex = (localIdx: number) => {
-                        // Index is in the Solid
-                        if (localIdx < solid.poly.length) {
-                            return contourOffsets[solid.idx] + localIdx;
-                        }
-                        
-                        // Index is in one of the Holes
-                        let remaining = localIdx - solid.poly.length;
-                        for (let k = 0; k < myHoles.length; k++) {
-                            const hLen = myHoles[k].poly.length;
-                            if (remaining < hLen) {
-                                return contourOffsets[myHoles[k].idx] + remaining;
-                            }
-                            remaining -= hLen;
-                        }
-                        return 0; // Should never happen
-                    };
-
-                    const a = getGlobalIndex(t[0]);
-                    const b = getGlobalIndex(t[1]);
-                    const c = getGlobalIndex(t[2]);
-
-                    if (reverse) rawIndices.push(a, c, b);
-                    else rawIndices.push(a, b, c);
+                layerData.push({ z: step.z, contours: processedPolys, startIdx: totalVerts });
+                processedPolys.forEach((contour: THREE.Vector2[]) => {
+                    contour.forEach(p => { rawVertices.push(p.x, step.z, -p.y); totalVerts++; });
                 });
             });
-        };
-        // Top cap
-        if (layerData.length > 0) {
-            triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
-            // Bottom cap
-            triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
-        }
 
-        for(let l=0; l<layerData.length-1; l++) {
-            const up = layerData[l];
-            const low = layerData[l+1];
-            
-            const upToLow = new Map<number, number[]>();
-            for(let i=0; i<up.contours.length; i++) upToLow.set(i, []);
+            // Helper for point-in-polygon check
+            const isPointInPoly = (pt: THREE.Vector2, poly: THREE.Vector2[]) => {
+                let inside = false;
+                for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+                    const xi = poly[i].x, yi = poly[i].y;
+                    const xj = poly[j].x, yj = poly[j].y;
+                    const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
+                        (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+                    if (intersect) inside = !inside;
+                }
+                return inside;
+            };
 
-            low.contours.forEach((lowPoly, iLow) => {
-                const lowCenter = new THREE.Vector2();
-                lowPoly.forEach(p => lowCenter.add(p));
-                lowCenter.divideScalar(lowPoly.length);
+            // Helper to get signed area (Positive=CCW/Solid, Negative=CW/Hole)
+            const getSignedArea = (poly: THREE.Vector2[]) => {
+                let area = 0;
+                for (let i = 0; i < poly.length; i++) {
+                    const j = (i + 1) % poly.length;
+                    area += poly[i].x * poly[j].y - poly[j].x * poly[i].y;
+                }
+                return area * 0.5;
+            };
 
-                let bestUp = -1;
-                let minDist = Infinity;
+            const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
+                // 1. Calculate global index offsets for each contour
+                const contourOffsets: number[] = [];
+                let runningOffset = startIdx;
+                contours.forEach(c => {
+                    contourOffsets.push(runningOffset);
+                    runningOffset += c.length;
+                });
 
-                up.contours.forEach((upPoly, iUp) => {
-                    const upCenter = new THREE.Vector2();
-                    upPoly.forEach(p => upCenter.add(p));
-                    upCenter.divideScalar(upPoly.length);
-                    const d = upCenter.distanceToSquared(lowCenter);
-                    
-                    if (d < minDist) {
-                        minDist = d;
-                        bestUp = iUp;
+                // 2. Classify Contours into Solids and Holes
+                const solids: { poly: THREE.Vector2[], idx: number }[] = [];
+                const holes: { poly: THREE.Vector2[], idx: number }[] = [];
+
+                contours.forEach((c, i) => {
+                    if (getSignedArea(c) > 0) {
+                        solids.push({ poly: c, idx: i });
+                    } else {
+                        holes.push({ poly: c, idx: i });
                     }
                 });
 
-                if (bestUp !== -1) {
-                    upToLow.get(bestUp)!.push(iLow);
-                }
-            });
-
-            upToLow.forEach((childIndices, iUp) => {
-                const upPoly = up.contours[iUp];
-                
-                if (childIndices.length === 1) {
-                    const iLow = childIndices[0];
-                    const lowPoly = low.contours[iLow];
-                    
-                    let sA = up.startIdx; 
-                    for(let k=0; k<iUp; k++) sA += up.contours[k].length;
-                    
-                    let sB = low.startIdx; 
-                    for(let k=0; k<iLow; k++) sB += low.contours[k].length;
-                    
-                    triangulateRobust(upPoly, lowPoly, sA, sB);
-
-                } else if (childIndices.length === 0) {
-                     let sA = up.startIdx; 
-                     for(let k=0; k<iUp; k++) sA += up.contours[k].length;
-
-                     const tris = THREE.ShapeUtils.triangulateShape(upPoly, []);
-                     tris.forEach(t => {
-                         rawIndices.push(sA + t[0], sA + t[2], sA + t[1]);
-                     });
-
-                } else {
-                    const holes = childIndices.map(i => low.contours[i]);
-                    const holesReversed = holes.map(h => [...h].reverse());
-
-                    const tris = THREE.ShapeUtils.triangulateShape(upPoly, holesReversed);
-                    
-                    let sA = up.startIdx; 
-                    for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+                // 3. Assign holes to their parent solids
+                solids.forEach(solid => {
+                    const myHoles = holes.filter(h => isPointInPoly(h.poly[0], solid.poly));
+                    const holeArrays = myHoles.map(h => h.poly);
+                    const tris = THREE.ShapeUtils.triangulateShape(solid.poly, holeArrays);
                     
                     tris.forEach(t => {
-                        const resolve = (localIdx: number) => {
-                            if (localIdx < upPoly.length) {
-                                return sA + localIdx;
-                            } else {
-                                let rem = localIdx - upPoly.length;
-                                for(let c=0; c<childIndices.length; c++) {
-                                    const hLen = holes[c].length;
-                                    if (rem < hLen) {
-                                        const realChildIdx = childIndices[c];
-                                        let sB = low.startIdx;
-                                        for(let k=0; k<realChildIdx; k++) sB += low.contours[k].length;
-                                        return sB + ((hLen - 1) - rem);
-                                    }
-                                    rem -= hLen;
-                                }
+                        const getGlobalIndex = (localIdx: number) => {
+                            if (localIdx < solid.poly.length) return contourOffsets[solid.idx] + localIdx;
+                            let remaining = localIdx - solid.poly.length;
+                            for (let k = 0; k < myHoles.length; k++) {
+                                const hLen = myHoles[k].poly.length;
+                                if (remaining < hLen) return contourOffsets[myHoles[k].idx] + remaining;
+                                remaining -= hLen;
                             }
-                            return sA; 
+                            return 0;
                         };
-                        
-                        rawIndices.push(resolve(t[0]), resolve(t[2]), resolve(t[1]));
+                        const a = getGlobalIndex(t[0]);
+                        const b = getGlobalIndex(t[1]);
+                        const c = getGlobalIndex(t[2]);
+                        if (reverse) rawIndices.push(a, c, b);
+                        else rawIndices.push(a, b, c);
                     });
-                }
-            });
-        }
+                });
+            };
 
-        const uniqueVerts: number[] = [];
-        const vertMap = new Map<string, number>();
-        const oldToNew = new Int32Array(rawVertices.length / 3);
-        const PRECISION = 1e-5;
-        const decimalShift = 1 / PRECISION;
+            // Top cap
+            if (layerData.length > 0) {
+                triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
+                // Bottom cap
+                triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
+            }
 
-        for(let i=0; i<rawVertices.length / 3; i++) {
-            const x = rawVertices[i*3], y = rawVertices[i*3+1], z = rawVertices[i*3+2];
-            const key = `${Math.round(x*decimalShift)}_${Math.round(y*decimalShift)}_${Math.round(z*decimalShift)}`;
-            if (vertMap.has(key)) oldToNew[i] = vertMap.get(key)!;
-            else { const newIdx = uniqueVerts.length / 3; uniqueVerts.push(x, y, z); vertMap.set(key, newIdx); oldToNew[i] = newIdx; }
-        }
-        const finalIndices: number[] = [];
-        for(let i=0; i<rawIndices.length; i+=3) {
-            const a = oldToNew[rawIndices[i]], b = oldToNew[rawIndices[i+1]], c = oldToNew[rawIndices[i+2]];
-            if (a === b || b === c || a === c) continue;
-            finalIndices.push(a, b, c);
-        }
+            for(let l=0; l<layerData.length-1; l++) {
+                const up = layerData[l];
+                const low = layerData[l+1];
+                
+                const upToLow = new Map<number, number[]>();
+                for(let i=0; i<up.contours.length; i++) upToLow.set(i, []);
 
-        const vertProperties = new Float32Array(uniqueVerts);
-        const triVerts = new Uint32Array(finalIndices);
+                low.contours.forEach((lowPoly, iLow) => {
+                    const lowCenter = new THREE.Vector2();
+                    lowPoly.forEach(p => lowCenter.add(p));
+                    lowCenter.divideScalar(lowPoly.length);
 
-        try {
+                    let bestUp = -1;
+                    let minDist = Infinity;
+
+                    up.contours.forEach((upPoly, iUp) => {
+                        const upCenter = new THREE.Vector2();
+                        upPoly.forEach(p => upCenter.add(p));
+                        upCenter.divideScalar(upPoly.length);
+                        const d = upCenter.distanceToSquared(lowCenter);
+                        
+                        if (d < minDist) {
+                            minDist = d;
+                            bestUp = iUp;
+                        }
+                    });
+
+                    if (bestUp !== -1) {
+                        upToLow.get(bestUp)!.push(iLow);
+                    }
+                });
+
+                upToLow.forEach((childIndices, iUp) => {
+                    const upPoly = up.contours[iUp];
+                    
+                    if (childIndices.length === 1) {
+                        const iLow = childIndices[0];
+                        const lowPoly = low.contours[iLow];
+                        
+                        let sA = up.startIdx; 
+                        for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+                        
+                        let sB = low.startIdx; 
+                        for(let k=0; k<iLow; k++) sB += low.contours[k].length;
+                        
+                        triangulateRobust(upPoly, lowPoly, sA, sB);
+
+                    } else if (childIndices.length === 0) {
+                        let sA = up.startIdx; 
+                        for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+
+                        const tris = THREE.ShapeUtils.triangulateShape(upPoly, []);
+                        tris.forEach(t => {
+                            rawIndices.push(sA + t[0], sA + t[2], sA + t[1]);
+                        });
+
+                    } else {
+                        const holes = childIndices.map(i => low.contours[i]);
+                        const holesReversed = holes.map(h => [...h].reverse());
+
+                        const tris = THREE.ShapeUtils.triangulateShape(upPoly, holesReversed);
+                        
+                        let sA = up.startIdx; 
+                        for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+                        
+                        tris.forEach(t => {
+                            const resolve = (localIdx: number) => {
+                                if (localIdx < upPoly.length) {
+                                    return sA + localIdx;
+                                } else {
+                                    let rem = localIdx - upPoly.length;
+                                    for(let c=0; c<childIndices.length; c++) {
+                                        const hLen = holes[c].length;
+                                        if (rem < hLen) {
+                                            const realChildIdx = childIndices[c];
+                                            let sB = low.startIdx;
+                                            for(let k=0; k<realChildIdx; k++) sB += low.contours[k].length;
+                                            return sB + ((hLen - 1) - rem);
+                                        }
+                                        rem -= hLen;
+                                    }
+                                }
+                                return sA; 
+                            };
+                            
+                            rawIndices.push(resolve(t[0]), resolve(t[2]), resolve(t[1]));
+                        });
+                    }
+                });
+            }
+
+            const uniqueVerts: number[] = [];
+            const vertMap = new Map<string, number>();
+            const oldToNew = new Int32Array(rawVertices.length / 3);
+            const PRECISION = 1e-5;
+            const decimalShift = 1 / PRECISION;
+
+            for(let i=0; i<rawVertices.length / 3; i++) {
+                const x = rawVertices[i*3], y = rawVertices[i*3+1], z = rawVertices[i*3+2];
+                const key = `${Math.round(x*decimalShift)}_${Math.round(y*decimalShift)}_${Math.round(z*decimalShift)}`;
+                if (vertMap.has(key)) oldToNew[i] = vertMap.get(key)!;
+                else { const newIdx = uniqueVerts.length / 3; uniqueVerts.push(x, y, z); vertMap.set(key, newIdx); oldToNew[i] = newIdx; }
+            }
+            const finalIndices: number[] = [];
+            for(let i=0; i<rawIndices.length; i+=3) {
+                const a = oldToNew[rawIndices[i]], b = oldToNew[rawIndices[i+1]], c = oldToNew[rawIndices[i+2]];
+                if (a === b || b === c || a === c) continue;
+                finalIndices.push(a, b, c);
+            }
+
+            const vertProperties = new Float32Array(uniqueVerts);
+            const triVerts = new Uint32Array(finalIndices);
+
             const mesh = new manifoldModule.Mesh();
             mesh.numProp = 3;
             mesh.vertProperties = vertProperties;
             mesh.triVerts = triVerts;
             return { manifold: new manifoldModule.Manifold(mesh), vertProperties, triVerts };
+
         } catch (e) { 
-            console.warn(`[MeshWorker] Manual tool failed, attempting Stairstep Fallback.`);
+            console.warn(`[MeshWorker] Manual tool failed or fallback forced: ${e}`);
             
             // --- FALLBACK: STAIRSTEP EXTRUSION ---
             const parts: any[] = [];
             
-            for (let i = 0; i < steps.length - 1; i++) {
-                const topZ = steps[i].z;
-                const bottomZ = steps[i + 1].z;
+            // Safety re-calc of steps if they are empty
+            let fallbackSteps = steps;
+            if (!fallbackSteps || fallbackSteps.length === 0) {
+                 // Should not happen if steps init was successful
+            }
+
+            for (let i = 0; i < fallbackSteps.length - 1; i++) {
+                const topZ = fallbackSteps[i].z;
+                const bottomZ = fallbackSteps[i + 1].z;
                 const height = topZ - bottomZ; // steps go 0 -> negative, so Top > Bottom.
 
                 if (height <= 0.00001) continue;
 
-                // For cutting tools (negative volume), using the top offset (wider) ensures we clear enough material
-                const offset = steps[i].offset; 
+                const offset = fallbackSteps[i].offset; 
 
                 let cs;
                 if (baseCSforComplex) {
                     if (Math.abs(offset) > 0.001) {
                         cs = collectLocal(baseCSforComplex.offset(-offset, "Miter", 2.0));
                     } else {
-                        // Offset 0 creates a clean copy
                         cs = collectLocal(baseCSforComplex.offset(0, "Miter", 2.0));
                     }
                 } else {
                     const pts = getContourFromShape(offset);
                     if (pts.length < 3) continue;
-                    // Manifold expects Array of Array of [x,y]
                     const polyArr = pts.map(p => [p.x, p.y]);
                     cs = collectLocal(new manifoldModule.CrossSection([polyArr], "EvenOdd"));
                 }
@@ -1719,31 +1705,20 @@ function generateProceduralTool(
                 const slab = collectLocal(cs.extrude(height));
                 
                 // Translate: We want this slab to exist between bottomZ and topZ.
-                // slab is currently [0 ... height]. 
-                // We move it to [bottomZ ... bottomZ + height] == [bottomZ ... topZ]
                 const moved = collectLocal(slab.translate([0, 0, bottomZ]));
                 parts.push(moved);
             }
 
             if (parts.length > 0) {
-                // Union all slabs
                 let result = parts[0];
                 for(let k = 1; k < parts.length; k++) {
                     const next = collectLocal(result.add(parts[k]));
                     result = next;
                 }
 
-                // COORDINATE FIX:
-                // Manual Mesh was constructed as (x, z, -y)
-                // Manifold Extrusion is (x, y, z)
-                // To align Fallback with Manual (so consumer code works), we rotate -90 on X.
-                // (x, y, z) -> (x, z, -y)
                 const finalAligned = collectLocal(result.rotate([-90, 0, 0]));
-
-                // Retrieve mesh from valid manifold for valid return types
                 const fallbackMesh = finalAligned.getMesh();
                 
-                // Ensure the result isn't deleted by local garbage collection
                 const idx = localGarbage.indexOf(finalAligned);
                 if (idx > -1) localGarbage.splice(idx, 1);
 
@@ -1754,7 +1729,7 @@ function generateProceduralTool(
                 };
             }
 
-            return { manifold: null, vertProperties, triVerts };
+            return { manifold: null, vertProperties: new Float32Array(), triVerts: new Uint32Array() };
         }
 
     } finally {
