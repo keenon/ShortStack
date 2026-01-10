@@ -1247,8 +1247,8 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                           newPoints[pointIdx] = { 
                               ...startPt, 
                               snapTo: undefined, 
-                              x: currentMouseLocalX.toFixed(4), 
-                              y: currentMouseLocalY.toFixed(4) 
+                              x: modifyExpression(startPt.x, dxWorld), 
+                              y: modifyExpression(startPt.y, dyWorldMath) 
                           };
                           setSnapPreview(null);
                       }

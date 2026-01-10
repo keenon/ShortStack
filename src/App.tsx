@@ -234,8 +234,8 @@ function App() {
               name: s.name || "Unnamed Shape",
               locked: !!s.locked,
               assignedLayers: assignedLayers,
-              x: s.x ?? "0",
-              y: s.y ?? "0",
+              x: String(s.x ?? "0"),
+              y: String(s.y ?? "0"),
             };
 
             if (s.type === "rect") {

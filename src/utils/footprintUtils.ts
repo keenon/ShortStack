@@ -40,13 +40,15 @@ math.import({
     }
 }, { override: true });
 
-export function modifyExpression(expression: string, delta: number): string {
-  if (delta === 0) return expression;
+export function modifyExpression(expression: string | undefined | null, delta: number): string {
+  // If no change or delta is negligible, return original
+  if (Math.abs(delta) < 0.0001) return expression || "0";
   
-  let trimmed = expression ? expression.trim() : "0";
+  // Robustly handle empty, null, or undefined expressions
+  let trimmed = (expression || "0").trim();
   if (trimmed === "") trimmed = "0";
 
-  // Check for simple number (integer or float)
+  // 1. Check for simple numeric strings (e.g., "10.5")
   if (/^[-+]?[0-9]*\.?[0-9]+$/.test(trimmed)) {
       const val = parseFloat(trimmed);
       if (!isNaN(val)) {
@@ -54,50 +56,29 @@ export function modifyExpression(expression: string, delta: number): string {
       }
   }
 
-  // Check for ends with "+ number"
+  // 2. Check if expression ends with "+ [number]" (e.g., "Width + 10")
   const plusMatch = trimmed.match(/^(.*)\+\s*([0-9]*\.?[0-9]+)$/);
   if (plusMatch) {
       const prefix = plusMatch[1];
-      const numStr = plusMatch[2];
-      const val = parseFloat(numStr);
-      if (!isNaN(val)) {
-          const newVal = val + delta;
-          if (newVal >= 0) {
-              return `${prefix}+ ${parseFloat(newVal.toFixed(4))}`;
-          } else {
-              return `${prefix}- ${parseFloat(Math.abs(newVal).toFixed(4))}`;
-          }
-      }
+      const val = parseFloat(plusMatch[2]) + delta;
+      return val >= 0 
+        ? `${prefix}+ ${parseFloat(val.toFixed(4))}` 
+        : `${prefix}- ${parseFloat(Math.abs(val).toFixed(4))}`;
   }
 
-  // Check for ends with "- number"
+  // 3. Check if expression ends with "- [number]" (e.g., "Width - 5")
   const minusMatch = trimmed.match(/^(.*)\-\s*([0-9]*\.?[0-9]+)$/);
   if (minusMatch) {
       const prefix = minusMatch[1];
-      const numStr = minusMatch[2];
-      const val = parseFloat(numStr);
-      if (!isNaN(val)) {
-          // Expression: prefix - val
-          // New: prefix - val + delta  => prefix - (val - delta)
-          const newVal = val - delta;
-          if (newVal >= 0) {
-               return `${prefix}- ${parseFloat(newVal.toFixed(4))}`;
-          } else {
-               // val - delta is negative (e.g. 5 - 10 = -5).
-               // prefix - (-5) => prefix + 5
-               return `${prefix}+ ${parseFloat(Math.abs(newVal).toFixed(4))}`;
-          }
-      }
+      const val = parseFloat(minusMatch[2]) - delta; 
+      return val >= 0 
+        ? `${prefix}- ${parseFloat(val.toFixed(4))}` 
+        : `${prefix}+ ${parseFloat(Math.abs(val).toFixed(4))}`;
   }
 
-  // Fallback: Append + delta
-  const absDelta = Math.abs(delta);
-  const fmtDelta = parseFloat(absDelta.toFixed(4));
-  if (delta >= 0) {
-      return `${trimmed} + ${fmtDelta}`;
-  } else {
-      return `${trimmed} - ${fmtDelta}`;
-  }
+  // 4. Fallback: Parametric append (e.g., "Width/2" -> "Width/2 + 5")
+  const fmtDelta = parseFloat(Math.abs(delta).toFixed(4));
+  return delta >= 0 ? `${trimmed} + ${fmtDelta}` : `${trimmed} - ${fmtDelta}`;
 }
 
 // Evaluate math expressions to numbers (for visualization only)
