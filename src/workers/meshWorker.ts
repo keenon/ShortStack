@@ -321,7 +321,7 @@ function flattenShapes(
                                 params, 
                                 { x: tdGlobalX, y: tdGlobalY, rotation: tdGlobalRot }, 
                                 depth + 1, 
-                                currentUnionId,
+                                undefined,
                                 { x: 0, y: 0, rotation: 0 }
                             );
                             result = result.concat(children);
