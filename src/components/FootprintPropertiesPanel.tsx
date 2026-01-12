@@ -745,6 +745,31 @@ const FootprintPropertiesPanel = ({
                       <ExpressionEditor value={mesh.rotationZ} onChange={(val) => updateMesh(mesh.id, "rotationZ", val)} params={params} placeholder="0" />
                   </div>
               </div>
+
+              <div className="prop-section">
+                  <h4>BOM Tracking</h4>
+                  <div className="prop-group">
+                      <label className="checkbox-label">
+                          <input 
+                              type="checkbox" 
+                              checked={!!mesh.includeInBom} 
+                              onChange={(e) => updateMesh(mesh.id, "includeInBom", e.target.checked)} 
+                          />
+                          Include in BOM as component
+                      </label>
+                  </div>
+                  {mesh.includeInBom && (
+                      <div className="prop-group">
+                          <label>BOM Notes</label>
+                          <textarea 
+                              value={mesh.bomNotes || ""} 
+                              onChange={(e) => updateMesh(mesh.id, "bomNotes", e.target.value)}
+                              style={{ width: '100%', background: '#111', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '5px' }}
+                              placeholder="Part number, vendor, etc."
+                          />
+                      </div>
+                  )}
+              </div>
           </div>
       );
   }
@@ -1159,6 +1184,31 @@ const FootprintPropertiesPanel = ({
                 </div>
             </div>
             
+            <div className="prop-section">
+                <h4>BOM Tracking</h4>
+                <div className="prop-group">
+                    <label className="checkbox-label">
+                        <input 
+                            type="checkbox" 
+                            checked={!!(shape as any).includeInBom} 
+                            onChange={(e) => updateShape(shape.id, "includeInBom", e.target.checked)} 
+                        />
+                        Include in BOM as wire
+                    </label>
+                </div>
+                {(shape as any).includeInBom && (
+                    <div className="prop-group">
+                        <label>BOM Notes</label>
+                        <textarea 
+                            value={(shape as any).bomNotes || ""} 
+                            onChange={(e) => updateShape(shape.id, "bomNotes", e.target.value)}
+                            style={{ width: '100%', background: '#111', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '5px' }}
+                            placeholder="e.g. 22AWG Red Silicone"
+                        />
+                    </div>
+                )}
+            </div>
+
             <div className="prop-group">
                 <label>Points</label>
                 <div className="points-list-container">

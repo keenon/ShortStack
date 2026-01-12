@@ -39,6 +39,8 @@ export interface BaseShape {
   // We include 'string' in the type for backward compatibility during load, 
   // but it is normalized to LayerAssignment in the app.
   assignedLayers: Record<string, LayerAssignment | string>;
+  includeInBom?: boolean;
+  bomNotes?: string;
 }
 
 export interface FootprintCircle extends BaseShape {
@@ -157,6 +159,8 @@ export interface FootprintMesh {
   rotationX: string; 
   rotationY: string; 
   rotationZ: string;
+  includeInBom?: boolean;
+  bomNotes?: string;
 }
 
 export interface Footprint {

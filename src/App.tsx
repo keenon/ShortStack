@@ -233,6 +233,8 @@ function App() {
               id: s.id || crypto.randomUUID(),
               name: s.name || "Unnamed Shape",
               locked: !!s.locked,
+              includeInBom: !!s.includeInBom,
+              bomNotes: s.bomNotes || "",
               assignedLayers: assignedLayers,
               x: String(s.x ?? "0"),
               y: String(s.y ?? "0"),
@@ -314,7 +316,7 @@ function App() {
                       assetMap.set(m.content, assetId);
                   }
                   const { content, format, ...instance } = m;
-                  return { ...instance, meshId: assetId };
+                  return { ...instance, meshId: assetId, includeInBom: !!m.includeInBom, bomNotes: m.bomNotes || "" };
               }
               return m;
           });
