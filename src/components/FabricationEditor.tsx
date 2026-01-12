@@ -11,11 +11,13 @@ import {
     Parameter, 
     WaterlineSettings, 
     MeshAsset, 
-    FootprintBoardOutline 
+    FootprintBoardOutline, 
+    FootprintLine, 
+    FootprintReference 
 } from "../types";
 import { IconOutline, IconGrip } from "./Icons";
 import ExpressionEditor from "./ExpressionEditor";
-import { evaluateExpression, resolvePoint } from "../utils/footprintUtils";
+import { evaluateExpression, resolvePoint, getLineLength } from "../utils/footprintUtils";
 import { collectExportShapesAsync, sliceExportShapes } from "../utils/exportUtils";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import "./FabricationEditor.css";
@@ -39,9 +41,68 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   const dragItemIndex = useRef<number | null>(null);
   const view3DRef = useRef<Footprint3DViewHandle>(null);
 
+  const getLayerStats = (layer: StackupLayer) => {
+    if (!activePlan) return { method: "Laser cut" as FabricationMethod, numFiles: 1, exportText: "", numSheets: 0, actualThickness: 0, delta: 0, progThickness: 0, sheetThickness: 0 };
+    const method = activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC");
+    const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
+    const progThickness = evaluateExpression(layer.thicknessExpression, params);
+    const sheetThickness = evaluateExpression(settings.sheetThicknessExpression, params);
+    
+    let numSheets = 0;
+    if (method === "Waterline laser cut" && sheetThickness > 0) {
+        const ratio = progThickness / sheetThickness;
+        numSheets = settings.rounding === "Round up" ? Math.ceil(ratio) : Math.floor(ratio);
+    }
+    
+    const actualThickness = numSheets * sheetThickness;
+    const delta = actualThickness - progThickness;
+    let numFiles = method === "Waterline laser cut" ? numSheets : 1;
+    
+    let exportText = "Single file";
+    if (method === "Waterline laser cut") exportText = `Exports ${numSheets} DXF cuts`;
+    else if (method === "CNC") exportText = "Exports SVG depth map";
+    else if (method === "3D printed") exportText = "Exports STL mesh";
+    
+    return { method, numFiles, exportText, numSheets, actualThickness, delta, progThickness, sheetThickness };
+  };
+
   const targetFootprint = useMemo(() => {
     return footprints.find(fp => fp.id === activePlan?.footprintId);
   }, [activePlan, footprints]);
+  // --- BOM COLLECTION LOGIC ---
+  const bomEntries = useMemo(() => {
+    if (!targetFootprint || !activePlan) return [];
+    const entries: { name: string; notes: string }[] = [];
+
+    // 1. Add Layers
+    stackup.forEach(layer => {
+      const { method } = getLayerStats(layer);
+      entries.push({ name: `Layer: ${layer.name}`, notes: `Method: ${method}` });
+    });
+
+    // 2. Recursive items
+    const collectRecursive = (fp: Footprint) => {
+      fp.shapes.forEach(shape => {
+        if (shape.type === "line" && (shape as any).includeInBom) {
+          const line = shape as FootprintLine;
+          const length = getLineLength(line, params, fp, footprints);
+          const customNotes = (line as any).bomNotes ? ` - ${(line as any).bomNotes}` : "";
+          entries.push({ name: line.name, notes: `Length: ${length.toFixed(2)}mm${customNotes}` });
+        } else if (shape.type === "footprint") {
+          const child = footprints.find(f => f.id === (shape as FootprintReference).footprintId);
+          if (child) collectRecursive(child);
+        }
+      });
+      (fp.meshes || []).forEach(mesh => {
+        if (mesh.includeInBom) {
+          entries.push({ name: mesh.name, notes: mesh.bomNotes || "No notes" });
+        }
+      });
+    };
+
+    collectRecursive(targetFootprint);
+    return entries;
+  }, [targetFootprint, activePlan, footprints, params, stackup]);
 
   const addPlan = () => {
     const newPlan: FabricationPlan = { 
@@ -69,30 +130,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     setFabPlans(prev => prev.map(p => p.id === activePlan.id ? updatedPlan : p));
   };
 
-  const getLayerStats = (layer: StackupLayer) => {
-    if (!activePlan) return { method: "Laser cut" as FabricationMethod, numFiles: 1, exportText: "", numSheets: 0, actualThickness: 0, delta: 0, progThickness: 0, sheetThickness: 0 };
-    const method = activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC");
-    const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
-    const progThickness = evaluateExpression(layer.thicknessExpression, params);
-    const sheetThickness = evaluateExpression(settings.sheetThicknessExpression, params);
-    
-    let numSheets = 0;
-    if (method === "Waterline laser cut" && sheetThickness > 0) {
-        const ratio = progThickness / sheetThickness;
-        numSheets = settings.rounding === "Round up" ? Math.ceil(ratio) : Math.floor(ratio);
-    }
-    
-    const actualThickness = numSheets * sheetThickness;
-    const delta = actualThickness - progThickness;
-    let numFiles = method === "Waterline laser cut" ? numSheets : 1;
-    
-    let exportText = "Single file";
-    if (method === "Waterline laser cut") exportText = `Exports ${numSheets} DXF cuts`;
-    else if (method === "CNC") exportText = "Exports SVG depth map";
-    else if (method === "3D printed") exportText = "Exports STL mesh";
-    
-    return { method, numFiles, exportText, numSheets, actualThickness, delta, progThickness, sheetThickness };
-  };
+
 
   const totalFiles = useMemo(() => {
     if (!activePlan) return 0;
@@ -274,6 +312,26 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     <option value="" disabled>Select...</option>
                     {footprints.map(fp => ( <option key={fp.id} value={fp.id}>{fp.name}</option> ))}
                 </select>
+            </div>
+            <div className="prop-section" style={{ marginTop: '20px' }}>
+                <h4>Bill of Materials (BOM)</h4>
+                <table className="unified-editor-table" style={{ fontSize: '0.85em' }}>
+                    <thead>
+                        <tr>
+                            <th style={{ width: '40%' }}>Item</th>
+                            <th>Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {bomEntries.map((item, idx) => (
+                            <tr key={idx}>
+                                <td style={{ whiteSpace: 'normal', fontWeight: 'bold' }}>{item.name}</td>
+                                <td style={{ whiteSpace: 'normal', color: '#aaa' }}>{item.notes}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+                {bomEntries.length === 0 && <div className="empty-hint" style={{textAlign:'center', padding:'10px'}}>No items marked for BOM.</div>}
             </div>
 
             <div className="fab-layers-list">
