@@ -85,7 +85,8 @@ export interface Point {
   y: string;
   // Control points are relative to the anchor point (x, y)
   handleIn?: { x: string; y: string };  // "Left" / Incoming handle
-  handleOut?: { x: string; y: string }; // "Right" / Outgoing handle
+  handleOut?: { x: string; y: string };
+  handleMode?: "independent" | "symmetrical" | "angle"; // "Right" / Outgoing handle
   snapTo?: string; // ID path to a Wire Guide (e.g., "refId:guideId")
   flipDirection?: boolean; // NEW: Invert the flow direction from the guide
   junctionOffset?: string; // NEW: Offset perpendicular to flow (for junctions)

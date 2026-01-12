@@ -281,6 +281,22 @@ const FootprintPropertiesPanel = ({
                         </label>
                     </div>
 
+                    {/* NEW: Symmetry Mode Dropdown */}
+                    {(p.handleIn || p.handleOut) && !isHandleForced && (
+                        <div style={{ marginTop: '8px' }}>
+                            <div style={{ fontSize: '0.75em', color: '#888', marginBottom: '2px' }}>Handle Symmetry</div>
+                            <select 
+                                value={p.handleMode || "independent"}
+                                onChange={(e) => updateFn({ ...p, handleMode: e.target.value as any })}
+                                style={{ width: '100%', background: '#333', border: '1px solid #555', color: '#ddd' }}
+                            >
+                                <option value="independent">Independent</option>
+                                <option value="symmetrical">Symmetrical</option>
+                                <option value="angle">Symmetrical Angle (Independent Length)</option>
+                            </select>
+                        </div>
+                    )}
+
                     {!isHandleForced && p.handleIn && (
                         <div className="handle-sub-block">
                              <div className="sub-label">Handle In (Relative)</div>

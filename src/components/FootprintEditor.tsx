@@ -1198,15 +1198,63 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                   const newPoints = [...(startShape as any).points];
                   const startPt = startShape.points[pointIdx];
 
-                  if (handleType === 'symmetric') {
-                      newPoints[pointIdx] = { ...newPoints[pointIdx], 
-                          handleOut: { x: dxWorld.toFixed(4), y: dyWorldMath.toFixed(4) },
-                          handleIn: { x: (-dxWorld).toFixed(4), y: (-dyWorldMath).toFixed(4) } 
+                  // Handle Dragging
+                  if (handleType) {
+                      // We are dragging a Bezier Handle (In or Out)
+                      const mode = startPt.handleMode || "independent";
+                      
+                      const draggedHandleKey = handleType === 'in' ? 'handleIn' : 'handleOut';
+                      const otherHandleKey = handleType === 'in' ? 'handleOut' : 'handleIn';
+                      
+                      const startDraggedHandle = startPt[draggedHandleKey] || { x: "0", y: "0" };
+                      const startOtherHandle = startPt[otherHandleKey];
+
+                      // 1. Update the dragged handle using delta relative to start
+                      // Use modifyExpression to preserve user's formula if possible
+                      const newDraggedHandle = { 
+                          x: modifyExpression(startDraggedHandle.x, dxWorld), 
+                          y: modifyExpression(startDraggedHandle.y, dyWorldMath) 
                       };
-                  } else if (handleType) {
-                      const p = newPoints[pointIdx];
-                      if (handleType === 'in' && p.handleIn) newPoints[pointIdx] = { ...p, handleIn: { x: modifyExpression(p.handleIn.x, dxWorld), y: modifyExpression(p.handleIn.y, dyWorldMath) } };
-                      else if (handleType === 'out' && p.handleOut) newPoints[pointIdx] = { ...p, handleOut: { x: modifyExpression(p.handleOut.x, dxWorld), y: modifyExpression(p.handleOut.y, dyWorldMath) } };
+
+                      // Evaluate numeric values for math calculation
+                      const numDraggedX = evaluateExpression(startDraggedHandle.x, params) + dxWorld;
+                      const numDraggedY = evaluateExpression(startDraggedHandle.y, params) + dyWorldMath;
+
+                      let newOtherHandle = startOtherHandle ? { ...startOtherHandle } : undefined;
+
+                      if (startOtherHandle) {
+                          const numOtherX = evaluateExpression(startOtherHandle.x, params);
+                          const numOtherY = evaluateExpression(startOtherHandle.y, params);
+
+                          if (mode === 'symmetrical') {
+                              // Symmetrical: Other = -Dragged
+                              newOtherHandle = {
+                                  x: (-numDraggedX).toFixed(4),
+                                  y: (-numDraggedY).toFixed(4)
+                              };
+                          } else if (mode === 'angle') {
+                              // Angle: Other aligned with -Dragged, but keeps own length
+                              const draggedLen = Math.sqrt(numDraggedX * numDraggedX + numDraggedY * numDraggedY);
+                              const otherLen = Math.sqrt(numOtherX * numOtherX + numOtherY * numOtherY);
+                              
+                              if (draggedLen > 0.001) {
+                                  const nx = numDraggedX / draggedLen;
+                                  const ny = numDraggedY / draggedLen;
+                                  newOtherHandle = {
+                                      x: (-nx * otherLen).toFixed(4),
+                                      y: (-ny * otherLen).toFixed(4)
+                                  };
+                              }
+                          }
+                          // Independent: Do nothing to other handle
+                      }
+
+                      newPoints[pointIdx] = { 
+                          ...startPt, 
+                          [draggedHandleKey]: newDraggedHandle,
+                          [otherHandleKey]: newOtherHandle
+                      };
+
                   } else {
                       // DRAGGING THE ANCHOR POINT
                       const SNAP_DISTANCE = 10 * scaleX; // 10 pixels threshold
