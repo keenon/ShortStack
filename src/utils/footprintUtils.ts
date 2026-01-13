@@ -1712,3 +1712,67 @@ export function repairBoardAssignments(
 
     return modified ? { ...footprint, boardOutlineAssignments: newAssignments } : footprint;
 }
+
+
+// --- NEW: Convert Export/Sliced Shape back to FootprintShape ---
+export function convertExportShapeToFootprintShape(exportShape: any): FootprintShape {
+    const base = {
+        id: crypto.randomUUID(),
+        name: "Sliced Shape",
+        assignedLayers: {}, // No assignment needed, layer is explicit in the stack context
+        locked: true
+    };
+
+    const fmt = (n: number) => n.toFixed(4);
+
+    if (exportShape.shape_type === "rect") {
+        return {
+            ...base,
+            type: "rect",
+            x: fmt(exportShape.x),
+            y: fmt(exportShape.y),
+            width: fmt(exportShape.width),
+            height: fmt(exportShape.height),
+            angle: fmt(exportShape.angle || 0),
+            cornerRadius: fmt(exportShape.corner_radius || 0)
+        } as FootprintRect;
+    } 
+    else if (exportShape.shape_type === "circle") {
+        return {
+            ...base,
+            type: "circle",
+            x: fmt(exportShape.x),
+            y: fmt(exportShape.y),
+            diameter: fmt(exportShape.diameter)
+        } as FootprintCircle;
+    }
+    else if (exportShape.shape_type === "polygon") {
+        const points: Point[] = (exportShape.points || []).map((p: any) => ({
+            id: crypto.randomUUID(),
+            x: fmt(p.x),
+            y: fmt(p.y),
+            handleIn: p.handle_in ? { x: fmt(p.handle_in.x), y: fmt(p.handle_in.y) } : undefined,
+            handleOut: p.handle_out ? { x: fmt(p.handle_out.x), y: fmt(p.handle_out.y) } : undefined
+        }));
+        
+        return {
+            ...base,
+            type: "polygon",
+            x: "0", y: "0", // Points are already absolute in export shape
+            points
+        } as FootprintPolygon;
+    }
+    
+    // Fallback for lines or unknown, treat as polygon if points exist
+    if (exportShape.points) {
+         const points: Point[] = (exportShape.points || []).map((p: any) => ({
+            id: crypto.randomUUID(),
+            x: fmt(p.x),
+            y: fmt(p.y)
+        }));
+        return { ...base, type: "polygon", x: "0", y: "0", points } as FootprintPolygon;
+    }
+
+    throw new Error(`Unknown export shape type: ${exportShape.shape_type}`);
+}
+

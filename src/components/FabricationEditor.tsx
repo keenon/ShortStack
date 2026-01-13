@@ -1,5 +1,5 @@
 // src/components/FabricationEditor.tsx
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { join } from "@tauri-apps/api/path";
@@ -17,7 +17,7 @@ import {
 } from "../types";
 import { IconOutline, IconGrip } from "./Icons";
 import ExpressionEditor from "./ExpressionEditor";
-import { evaluateExpression, resolvePoint, getLineLength } from "../utils/footprintUtils";
+import { evaluateExpression, resolvePoint, getLineLength, convertExportShapeToFootprintShape } from "../utils/footprintUtils";
 import { collectExportShapesAsync, sliceExportShapes } from "../utils/exportUtils";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import "./FabricationEditor.css";
@@ -49,6 +49,10 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
   const [layerVolumes, setLayerVolumes] = useState<Record<string, number>>({});
+  
+  // NEW: Visual Stack State
+  const [visualStack, setVisualStack] = useState<{ layer: StackupLayer, footprint: Footprint }[] | undefined>(undefined);
+  const [isComputingVisuals, setIsComputingVisuals] = useState(false);
   
 
   const toggleLayerVisibility = (id: string) => {
@@ -333,6 +337,121 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     }
   };
 
+    // NEW: Calculate Visual Stackup for Waterline Cuts
+  useEffect(() => {
+    if (!activePlan || !targetFootprint) {
+        setVisualStack(undefined);
+        return;
+    }
+
+    let isMounted = true;
+    const computeVisuals = async () => {
+        setIsComputingVisuals(true);
+        const newStack: { layer: StackupLayer, footprint: Footprint }[] = [];
+        
+        // We iterate the original stackup
+        for (const layer of stackup) {
+            const method = activePlan.layerMethods[layer.id];
+            
+            if (method === "Waterline laser cut") {
+                const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
+                const progThickness = evaluateExpression(layer.thicknessExpression, params);
+                const sheetThickness = evaluateExpression(settings.sheetThicknessExpression, params);
+
+                if (sheetThickness <= 0.001) {
+                    newStack.push({ layer, footprint: targetFootprint });
+                    continue;
+                }
+
+                const ratio = progThickness / sheetThickness;
+                const numSheets = settings.rounding === "Round up" ? Math.ceil(ratio) : Math.floor(ratio);
+
+                // Collect RAW export shapes
+                const rawShapes = await collectExportShapesAsync(
+                    targetFootprint,
+                    targetFootprint.shapes,
+                    footprints,
+                    params,
+                    { ...layer, type: "Carved/Printed" }, 
+                    progThickness,
+                    view3DRef.current
+                );
+
+                console.log('RAW SHAPES FOR VISUALS:', rawShapes);
+
+                const invertOrder = settings.startSide === "Back side";
+
+                for (let i = 0; i < numSheets; i++) {
+                    const sheetIndex = invertOrder ? (numSheets - 1 - i) : i;
+                    const sliceZ = sheetIndex * sheetThickness;
+
+                    const slicedExportShapes = sliceExportShapes(rawShapes, sliceZ, sheetThickness);
+                    // console.log(`Sliced Shapes for Layer ${layer.name} Sheet ${i+1}:`, slicedExportShapes);
+                    const tempShapes = slicedExportShapes.map(s => convertExportShapeToFootprintShape(s));
+
+                    const sheetLayerId = `${layer.id}_sheet_${i}`;
+                    
+                    // Inherit Board Outlines
+                    let sheetShapes = [...tempShapes];
+                    let sheetAssignments: Record<string, string> = {};
+
+                    if (targetFootprint.isBoard) {
+                        const sourceOutlines = targetFootprint.shapes.filter(s => s.type === "boardOutline");
+                        if (sourceOutlines.length > 0) {
+                             sheetShapes = [...sheetShapes, ...sourceOutlines];
+                             sheetAssignments[sheetLayerId] = sourceOutlines[0].id;
+                        }
+                    }
+
+                    const sheetFp: Footprint = {
+                        id: `temp_fp_${layer.id}_${i}`,
+                        name: `${targetFootprint.name} (Sheet ${i+1})`,
+                        shapes: sheetShapes,
+                        isBoard: targetFootprint.isBoard,
+                        boardOutlineAssignments: sheetAssignments
+                    };
+
+                    const sheetLayer: StackupLayer = {
+                        ...layer,
+                        id: sheetLayerId,
+                        name: `${layer.name} [Sheet ${i+1}]`,
+                        type: "Cut",
+                        thicknessExpression: String(sheetThickness),
+                    };
+
+                    newStack.push({ layer: sheetLayer, footprint: sheetFp });
+                }
+            } else {
+                newStack.push({ layer, footprint: targetFootprint });
+            }
+        }
+        
+        if (isMounted) {
+            setVisualStack(newStack);
+            setIsComputingVisuals(false);
+        }
+    };
+
+    const timer = setTimeout(computeVisuals, 200);
+    return () => { isMounted = false; clearTimeout(timer); };
+  }, [activePlan, stackup, targetFootprint, params, footprints]);
+
+    // NEW: Map visibility of generated sheets to their parents
+  const mappedVisibleLayers = useMemo(() => {
+    if (!visualStack) return layerVisibility;
+    const res = { ...layerVisibility };
+    visualStack.forEach(({ layer }) => {
+        const parts = layer.id.split("_sheet_");
+        if (parts.length > 1) {
+             const parentId = parts[0];
+             if (layerVisibility[parentId] === false) {
+                 res[layer.id] = false;
+             }
+        }
+    });
+    return res;
+  }, [layerVisibility, visualStack]);
+
   if (activePlan) {
     return (
       <div className="fab-editor-layout">
@@ -489,20 +608,31 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
 
         <div className="fab-preview-panel">
             {targetFootprint ? (
-                <Footprint3DView 
-                    ref={view3DRef}
-                    footprint={targetFootprint}
-                    allFootprints={footprints}
-                    params={params}
-                    stackup={stackup}
-                    meshAssets={meshAssets}
-                    is3DActive={true}
-                    visibleLayers={layerVisibility}
-                    selectedId={null} 
-                    onSelect={() => {}}
-                    onUpdateMesh={() => {}}
-                    onLayerVolumeCalculated={(id, vol) => setLayerVolumes(prev => ({...prev, [id]: vol}))}
-                />
+                <>
+                    {isComputingVisuals && (
+                        <div style={{
+                            position: 'absolute', top: 20, right: 20, zIndex: 10,
+                            background: 'rgba(0,0,0,0.6)', color: 'white', padding: '5px 10px', borderRadius: '4px'
+                        }}>
+                            Updating Preview...
+                        </div>
+                    )}
+                    <Footprint3DView 
+                        ref={view3DRef}
+                        footprint={targetFootprint}
+                        allFootprints={footprints}
+                        params={params}
+                        stackup={stackup}
+                        meshAssets={meshAssets}
+                        is3DActive={true}
+                        visibleLayers={mappedVisibleLayers}
+                        selectedId={null} 
+                        onSelect={() => {}}
+                        onUpdateMesh={() => {}}
+                        onLayerVolumeCalculated={(id, vol) => setLayerVolumes(prev => ({...prev, [id]: vol}))}
+                        customStack={visualStack}
+                    />
+                </>
             ) : (
                 <div className="empty-preview">
                     <p>Select a target footprint to preview the stackup</p>

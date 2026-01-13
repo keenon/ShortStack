@@ -29,6 +29,8 @@ interface Props {
   onSelect: (id: string) => void;
   onUpdateMesh: (id: string, field: string, val: any) => void;
   onLayerVolumeCalculated?: (layerId: string, volumeMm3: number) => void;
+  // NEW: Optional Custom Stackup for Waterline Visualization
+  customStack?: { layer: StackupLayer, footprint: Footprint }[];
 }
 
 export interface Footprint3DViewHandle {
@@ -608,7 +610,7 @@ const MeshObject = ({
     );
 };
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh, onLayerVolumeCalculated }, ref) => {
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh, onLayerVolumeCalculated, customStack }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
   const assetRefs = useRef<Record<string, THREE.Mesh>>({});
@@ -628,12 +630,16 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
   
   // Calculate expected layer count for auto-framing
   const expectedLayerCount = useMemo(() => {
-    return stackup.filter(l => {
+    const sourceList = customStack 
+        ? customStack.map(i => i.layer) 
+        : stackup;
+
+    return sourceList.filter(l => {
       const isVisible = visibleLayers ? visibleLayers[l.id] !== false : true;
       const thickness = evaluateExpression(l.thicknessExpression, params);
       return isVisible && thickness > 0.0001;
     }).length;
-  }, [stackup, visibleLayers, params]);
+  }, [stackup, customStack, visibleLayers, params]);
 
   // Progress State
   const progressStatus = useRef(new Map<string, number>());
@@ -963,7 +969,11 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
         <group>
           {(() => {
             let currentZ = 0; 
-            return [...stackup].reverse().map((layer, idx) => {
+            // NEW: Determine which stack to render
+            const layersToRender = customStack || stackup.map(l => ({ layer: l, footprint: footprint }));
+
+            return [...layersToRender].reverse().map((item, idx) => {
+              const { layer, footprint: layerFootprint } = item;
               const thickness = evaluateExpression(layer.thicknessExpression, params);
               
               const isVisible = visibleLayers ? visibleLayers[layer.id] !== false : true;
@@ -972,14 +982,14 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                 <LayerSolid 
                   key={layer.id}
                   layer={layer}
-                  footprint={footprint}
+                  footprint={layerFootprint}
                   allFootprints={allFootprints}
                   params={params}
                   bottomZ={currentZ}
                   thickness={thickness}
                   bounds={bounds}
                   layerIndex={idx}
-                  totalLayers={stackup.length}
+                  totalLayers={layersToRender.length}
                   resolution={resolution} // PASS RESOLUTION
                   onProgress={handleProgress}
                   registerMesh={(id, mesh) => { 
