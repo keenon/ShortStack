@@ -648,30 +648,55 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
 
   // Unified Progress Handler
   const handleProgress = useCallback((id: string, percent: number, message: string) => {
-      progressStatus.current.set(id, percent);
-      
-      const visibleMeshCount = flattenedMeshes.filter(m => m.mesh.renderingType !== 'hidden').length;
-      const totalTasks = stackup.length + visibleMeshCount;
-      
-      let sum = 0;
-      progressStatus.current.forEach(v => sum += v);
-      
-      // Calculate overall percent
-      const overall = sum / Math.max(1, totalTasks);
-      
-      setProgress(() => {
-          return { active: true, text: message, percent: overall };
-      });
+    progressStatus.current.set(id, percent);
+    
+    const activeLayers = customStack ? customStack.map(i => i.layer) : stackup;
+    const totalTasks = activeLayers.length + flattenedMeshes.length;
+    
+    if (totalTasks === 0) return;
 
-      // Cleanup Logic
-      if (progressTimeout.current) clearTimeout(progressTimeout.current);
-      
-      if (overall >= 0.999) {
-          progressTimeout.current = window.setTimeout(() => {
-              setProgress(p => ({ ...p, active: false }));
-          }, 800);
+    let sum = 0;
+    activeLayers.forEach(l => {
+      sum += progressStatus.current.get(l.id) || 0;
+    });
+    flattenedMeshes.forEach(m => {
+      sum += progressStatus.current.get(m.uniqueId) || 0;
+    });
+    
+    const overall = sum / totalTasks;
+    
+    setProgress({ 
+      active: true, 
+      text: message, 
+      percent: overall 
+    });
+
+    if (progressTimeout.current) clearTimeout(progressTimeout.current);
+    if (overall >= 0.999) {
+      progressTimeout.current = window.setTimeout(() => {
+        setProgress(p => ({ ...p, active: false }));
+      }, 800);
+    }
+  }, [stackup, flattenedMeshes, customStack]);
+
+  useEffect(() => {
+    // Mark skipped items as 100% done so the progress bar math remains consistent
+    const sourceList = customStack ? customStack.map(i => i.layer) : stackup;
+    
+    sourceList.forEach(l => {
+      const isVisible = visibleLayers ? visibleLayers[l.id] !== false : true;
+      const thickness = evaluateExpression(l.thicknessExpression, params);
+      if (!isVisible || thickness <= 0.0001) {
+        progressStatus.current.set(l.id, 1.0);
       }
-  }, [stackup.length, flattenedMeshes]); // Dependency on task count
+    });
+
+    flattenedMeshes.forEach(m => {
+      if (m.mesh.renderingType === 'hidden') {
+        progressStatus.current.set(m.uniqueId, 1.0);
+      }
+    });
+  }, [stackup, visibleLayers, params, flattenedMeshes, customStack]);
 
   // Completion Handler for LayerSolids
   const handleLayerLoad = useCallback((layerId: string) => {
