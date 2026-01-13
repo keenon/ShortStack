@@ -260,7 +260,6 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     
                     // Generate Sliced Shapes
                     const slicedShapes = sliceExportShapes(rawShapes, sliceZ, sheetThickness);
-                    console.log(`Sliced Shapes for Layer ${layer.name} Sheet ${i+1}:`, slicedShapes);
                     
                     const fileName = `${planName}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_Sheet${i+1}.dxf`;
                     const fullPath = await join(folderPath as string, fileName);
