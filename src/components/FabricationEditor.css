@@ -89,3 +89,16 @@
     color: #444;
     font-size: 1.2em;
 }
+
+/* Visibility Toggle Styles */
+.fab-layer-title .vis-toggle-btn {
+    border: none;
+    border-radius: 3px;
+    color: white;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.fab-layer-title .vis-toggle-btn:hover {
+    filter: brightness(1.2);
+}

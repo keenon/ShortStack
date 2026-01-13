@@ -36,6 +36,14 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState("");
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
+
+  const toggleLayerVisibility = (id: string) => {
+    setLayerVisibility(prev => ({ 
+        ...prev, 
+        [id]: prev[id] === undefined ? false : !prev[id] 
+    }));
+  };
   
   const activePlan = fabPlans.find(p => p.id === activePlanId);
   const dragItemIndex = useRef<number | null>(null);
@@ -340,12 +348,25 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     const { method, exportText, numSheets, actualThickness, delta, progThickness } = getLayerStats(layer);
                     const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
                     
+                    const isVisible = layerVisibility[layer.id] !== false;
                     return (
-                        <div key={layer.id} className="fab-layer-card">
+                        <div key={layer.id} className="fab-layer-card" style={{ opacity: isVisible ? 1 : 0.6 }}>
                             <div className="fab-layer-title">
                                 <div className="layer-color-badge" style={{ backgroundColor: layer.color }} />
                                 <strong>{layer.name}</strong>
                                 <span className="thickness-tag">{progThickness.toFixed(2)}mm</span>
+                                <button 
+                                    className="vis-toggle-btn" 
+                                    style={{ 
+                                        marginLeft: '10px', 
+                                        padding: '2px 8px', 
+                                        fontSize: '0.7em',
+                                        backgroundColor: isVisible ? '#3b5b9d' : '#444'
+                                    }}
+                                    onClick={() => toggleLayerVisibility(layer.id)}
+                                >
+                                    {isVisible ? "Hide" : "Show"}
+                                </button>
                             </div>
 
                             <select 
@@ -416,6 +437,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     stackup={stackup}
                     meshAssets={meshAssets}
                     is3DActive={true}
+                    visibleLayers={layerVisibility}
                     selectedId={null} 
                     onSelect={() => {}}
                     onUpdateMesh={() => {}}
