@@ -770,64 +770,116 @@ fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
     let united_shapes = get_geometry_unioned_from_pool(&board_poly, &pool);
 
     let mut file = File::create(&request.filepath)?;
-    let mut handle_count = 1;
-
-    // Helper to get next hex handle
+    
+    // Handle Management
+    // AC1015 requires a logical hierarchy. We'll reserve low handles for system objects.
+    let mut handle_counter = 0x30; // Start entity handles after system objects
     let mut next_handle = || {
-        handle_count += 1;
-        format!("{:X}", handle_count)
+        handle_counter += 1;
+        format!("{:X}", handle_counter)
     };
+
+    // Constant handles for the mandatory structural objects
+    let h_root_dict = "10";
+    let h_layout_dict = "11";
+    let h_ms_br = "12"; // Model Space Block Record
+    let h_ps_br = "13"; // Paper Space Block Record
+    let h_ms_layout = "14"; // Model Space Layout Object
+    let h_ps_layout = "15"; // Paper Space Layout Object
 
     // 1. HEADER SECTION
     writeln!(file, "  0\nSECTION\n  2\nHEADER")?;
-    writeln!(file, "  9\n$ACADVER\n  1\nAC1021")?; // Set to DXF 2007
-    writeln!(file, "  9\n$INSUNITS\n 70\n4")?;    // Set units to Millimeters
+    writeln!(file, "  9\n$ACADVER\n  1\nAC1015")?;    // Target DXF 2000
+    writeln!(file, "  9\n$DWGCODEPAGE\n  3\nANSI_1252")?; // Essential for AC1015
+    writeln!(file, "  9\n$INSUNITS\n 70\n4")?;       // Millimeters
+    writeln!(file, "  9\n$MEASUREMENT\n 70\n1")?;    // Metric
+    // $HANDSEED must be higher than the last handle used in the file
+    writeln!(file, "  9\n$HANDSEED\n  5\nFFFF")?; 
     writeln!(file, "  0\nENDSEC")?;
 
-    // 2. TABLES SECTION (Required for Model Space Ownership)
-    let model_space_handle = "1F"; // We'll hardcode a standard handle for Model Space
+    // 2. TABLES SECTION
     writeln!(file, "  0\nSECTION\n  2\nTABLES")?;
-    writeln!(file, "  0\nTABLE\n  2\nBLOCK_RECORD\n  5\n1\n100\nAcDbSymbolTable")?;
-    writeln!(file, "  0\nBLOCK_RECORD\n  5\n{}\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n  2\n*MODEL_SPACE", model_space_handle)?;
-    writeln!(file, "  0\nENDTAB\n  0\nENDSEC")?;
+    
+    // Block Record Table (Mandatory for AC1015)
+    writeln!(file, "  0\nTABLE\n  2\nBLOCK_RECORD\n  5\n1\n100\nAcDbSymbolTable\n 70\n2")?;
+    
+    // Model Space Record
+    writeln!(file, "  0\nBLOCK_RECORD\n  5\n{}\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n  2\n*MODEL_SPACE", h_ms_br)?;
+    writeln!(file, "340\n{}", h_ms_layout)?; // Pointer to Layout Object
+    
+    // Paper Space Record
+    writeln!(file, "  0\nBLOCK_RECORD\n  5\n{}\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n  2\n*PAPER_SPACE", h_ps_br)?;
+    writeln!(file, "340\n{}", h_ps_layout)?; // Pointer to Layout Object
+    
+    writeln!(file, "  0\nENDTAB")?;
+    
+    // Minimal Layer Table
+    writeln!(file, "  0\nTABLE\n  2\nLAYER\n  5\n2\n100\nAcDbSymbolTable\n 70\n2")?;
+    writeln!(file, "  0\nLAYER\n  5\n16\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n  2\n0\n 70\n0\n 62\n7\n  6\nContinuous")?;
+    writeln!(file, "  0\nENDTAB")?;
+    
+    writeln!(file, "  0\nENDSEC")?;
 
     // 3. BLOCKS SECTION
+    // Definitions for the Model and Paper space containers
     writeln!(file, "  0\nSECTION\n  2\nBLOCKS")?;
-    writeln!(file, "  0\nBLOCK\n  5\n{}\n330\n{}\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockBegin\n  2\n*MODEL_SPACE\n 70\n0\n 10\n0\n 20\n0\n 30\n0\n  3\n*MODEL_SPACE", next_handle(), model_space_handle)?;
-    writeln!(file, "  0\nENDBLK\n  5\n{}\n330\n{}\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockEnd", next_handle(), model_space_handle)?;
+    
+    // Model Space Block Definition
+    writeln!(file, "  0\nBLOCK\n  5\n17\n330\n{}\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockBegin\n  2\n*MODEL_SPACE\n 70\n0\n 10\n0\n 20\n0\n 30\n0\n  3\n*MODEL_SPACE", h_ms_br)?;
+    writeln!(file, "  0\nENDBLK\n  5\n18\n330\n{}\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockEnd", h_ms_br)?;
+    
+    // Paper Space Block Definition
+    writeln!(file, "  0\nBLOCK\n  5\n19\n330\n{}\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockBegin\n  2\n*PAPER_SPACE\n 70\n0\n 10\n0\n 20\n0\n 30\n0\n  3\n*PAPER_SPACE", h_ps_br)?;
+    writeln!(file, "  0\nENDBLK\n  5\n1A\n330\n{}\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockEnd", h_ps_br)?;
+    
     writeln!(file, "  0\nENDSEC")?;
 
     // 4. ENTITIES SECTION
     writeln!(file, "  0\nSECTION\n  2\nENTITIES")?;
 
-    // Outline
-    write_dxf_polygon(&mut file, &board_poly, "OUTLINE", 7, model_space_handle, &mut next_handle)?;
+    // Note: All entities in AC1015 should point to h_ms_br (Model Space) as owner
+    write_dxf_polygon(&mut file, &board_poly, "OUTLINE", 7, h_ms_br, &mut next_handle)?;
 
-    // Shapes
     for poly in &united_shapes.0 {
-        write_dxf_polygon(&mut file, poly, "CUTS", 1, model_space_handle, &mut next_handle)?;
+        write_dxf_polygon(&mut file, poly, "CUTS", 1, h_ms_br, &mut next_handle)?;
     }
 
-    // Isolated Circles
     for circle in isolated_circles {
         let r = circle.diameter.unwrap_or(0.0) / 2.0;
         writeln!(file, "  0\nCIRCLE")?;
-        writeln!(file, "  5\n{}", next_handle())?;           // Handle
-        writeln!(file, "330\n{}", model_space_handle)?;     // Owner (Model Space)
-        writeln!(file, "100\nAcDbEntity")?;                 // Base Class
-        writeln!(file, "  8\nCUTS")?;
-        writeln!(file, " 62\n1")?;
-        writeln!(file, "100\nAcDbCircle")?;                 // Circle Class
-        writeln!(file, " 10\n{:.4}", circle.x)?;
-        writeln!(file, " 20\n{:.4}", circle.y)?;
-        writeln!(file, " 30\n0.0")?;
+        writeln!(file, "  5\n{}", next_handle())?;
+        writeln!(file, "330\n{}", h_ms_br)?; 
+        writeln!(file, "100\nAcDbEntity\n  8\nCUTS\n 62\n1\n100\nAcDbCircle")?;
+        writeln!(file, " 10\n{:.4}\n 20\n{:.4}\n 30\n0.0", circle.x, circle.y)?;
         writeln!(file, " 40\n{:.4}", r)?;
     }
 
     writeln!(file, "  0\nENDSEC")?;
 
-    // 5. Update HANDSEED and EOF
-    // (Optional: write actual handseed in header, but most parsers accept this structure)
+    // 5. OBJECTS SECTION (The critical addition for AC1015 compatibility)
+    writeln!(file, "  0\nSECTION\n  2\nOBJECTS")?;
+    
+    // Root Dictionary
+    writeln!(file, "  0\nDICTIONARY\n  5\n{}\n100\nAcDbDictionary\n  3\nACAD_LAYOUT", h_root_dict)?;
+    writeln!(file, "350\n{}", h_layout_dict)?;
+    
+    // Layout Dictionary
+    writeln!(file, "  0\nDICTIONARY\n  5\n{}\n330\n{}\n100\nAcDbDictionary", h_layout_dict, h_root_dict)?;
+    writeln!(file, "  3\nModel\n350\n{}", h_ms_layout)?;
+    writeln!(file, "  3\nLayout1\n350\n{}", h_ps_layout)?;
+    
+    // Model Space Layout Object
+    writeln!(file, "  0\nLAYOUT\n  5\n{}\n330\n{}\n100\nAcDbPlotSettings\n100\nAcDbLayout", h_ms_layout, h_layout_dict)?;
+    writeln!(file, "  1\nModel\n 70\n1\n 71\n0")?; // Layout name and flags
+    writeln!(file, "330\n{}", h_ms_br)?; // Pointer back to Block Record (Bidirectional)
+
+    // Paper Space Layout Object
+    writeln!(file, "  0\nLAYOUT\n  5\n{}\n330\n{}\n100\nAcDbPlotSettings\n100\nAcDbLayout", h_ps_layout, h_layout_dict)?;
+    writeln!(file, "  1\nLayout1\n 70\n1\n 71\n1")?;
+    writeln!(file, "330\n{}", h_ps_br)?; // Pointer back to Block Record (Bidirectional)
+    
+    writeln!(file, "  0\nENDSEC")?;
+
     writeln!(file, "  0\nEOF")?;
 
     Ok(())
