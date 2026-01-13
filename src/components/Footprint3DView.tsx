@@ -28,6 +28,7 @@ interface Props {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onUpdateMesh: (id: string, field: string, val: any) => void;
+  onLayerVolumeCalculated?: (layerId: string, volumeMm3: number) => void;
 }
 
 export interface Footprint3DViewHandle {
@@ -154,7 +155,8 @@ const LayerSolid = ({
   resolution, // NEW: Prop
   onProgress,
   registerMesh,
-  onLoad // NEW: Completion callback
+  onLoad, // NEW: Completion callback
+  onVolumeCalculated
 }: {
   layer: StackupLayer;
   footprint: Footprint;
@@ -169,6 +171,7 @@ const LayerSolid = ({
   onProgress: (id: string, percent: number, msg: string) => void;
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
   onLoad?: (id: string) => void;
+  onVolumeCalculated?: (layerId: string, volume: number) => void;
 }) => {
   // UPDATED: Origin Logic
   // We force center to 0,0 to match the 2D View's origin (0,0).
@@ -232,6 +235,9 @@ const LayerSolid = ({
             geom.setIndex(new THREE.BufferAttribute(data.triVerts, 1));
             geom.computeVertexNormals();
             setGeometry(geom);
+            if (data.volume !== undefined && onVolumeCalculated) {
+                onVolumeCalculated(layer.id, data.volume);
+            }
         } else {
             setGeometry(null);
         }
@@ -492,6 +498,9 @@ const MeshObject = ({
                 if (!data.normal) geom.computeVertexNormals();
                 
                 setGeometry(geom);
+            if (data.volume !== undefined && onVolumeCalculated) {
+                onVolumeCalculated(layer.id, data.volume);
+            }
                 onProgress(uniqueId, 1.0, `Loaded ${meshName}`);
             })
             .catch(err => {
@@ -602,7 +611,7 @@ const MeshObject = ({
     );
 };
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh }, ref) => {
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh, onLayerVolumeCalculated }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
   const assetRefs = useRef<Record<string, THREE.Mesh>>({});
@@ -984,6 +993,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                       }
                   }}
                   onLoad={handleLayerLoad} // COMPLETE CALLBACK
+                  onVolumeCalculated={onLayerVolumeCalculated}
                 />
               ) : null;
 

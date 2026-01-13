@@ -840,17 +840,46 @@ self.onmessage = async (e: MessageEvent) => {
                 });
 
                 // --- FINAL CLIPPING STEP ---
-                // This ensures any "leaking" geometry from fillets or re-adds 
-                // is perfectly trimmed to the original board outline.
                 report(`Clipping to board boundary...`, 0.92);
                 base = collect(manifoldModule.Manifold.intersection(base, boundaryMask));
 
                 report(`Finalizing mesh for ${layerStr}...`, 0.95);
 
                 const mesh = base.getMesh();
+
+                // NEW: Calculate Volume manually (Signed Tetrahedron Volume)
+                // This calculates 6x the volume of the tetrahedrons formed by each triangle and the origin (0,0,0).
+                let volume = 0;
+                const numProp = mesh.numProp || 3;
                 
+                for (let i = 0; i < mesh.triVerts.length; i += 3) {
+                    const i1 = mesh.triVerts[i] * numProp;
+                    const i2 = mesh.triVerts[i+1] * numProp;
+                    const i3 = mesh.triVerts[i+2] * numProp;
+                    
+                    const v1x = mesh.vertProperties[i1];
+                    const v1y = mesh.vertProperties[i1+1];
+                    const v1z = mesh.vertProperties[i1+2];
+                    
+                    const v2x = mesh.vertProperties[i2];
+                    const v2y = mesh.vertProperties[i2+1];
+                    const v2z = mesh.vertProperties[i2+2];
+                    
+                    const v3x = mesh.vertProperties[i3];
+                    const v3y = mesh.vertProperties[i3+1];
+                    const v3z = mesh.vertProperties[i3+2];
+                    
+                    // Dot(Cross(p2, p3), p1) = Determinant/Scalar Triple Product
+                    volume += v1x * (v2y * v3z - v2z * v3y) + 
+                              v1y * (v2z * v3x - v2x * v3z) + 
+                              v1z * (v2x * v3y - v2y * v3x);
+                }
+                
+                // Final volume is sum / 6
+                volume = Math.abs(volume) / 6.0;
+
                 // DEBUG: Final Result
-                console.log(`[Worker] Final Mesh "${layer.name}": ${mesh.vertProperties.length} verts, ${mesh.triVerts.length} tris`);
+                console.log(`[Worker] Final Mesh "${layer.name}": ${mesh.vertProperties.length} verts, ${mesh.triVerts.length} tris, Vol: ${volume.toFixed(2)}`);
 
                 report(`Layer ${layer.name}: Complete`, 1.0);
 
@@ -858,7 +887,8 @@ self.onmessage = async (e: MessageEvent) => {
                     id, type: "success", 
                     payload: { 
                         vertProperties: mesh.vertProperties, 
-                        triVerts: mesh.triVerts 
+                        triVerts: mesh.triVerts,
+                        volume: volume
                     } 
                 });
 

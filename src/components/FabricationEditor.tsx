@@ -22,6 +22,13 @@ import { collectExportShapesAsync, sliceExportShapes } from "../utils/exportUtil
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import "./FabricationEditor.css";
 
+const MATERIALS = {
+    "PLA (10% Infill)": 0.124,
+    "PLA (100% Infill)": 1.24,
+    "Carbon Fiber": 1.7,
+    "XPS Foam": 0.045
+};
+
 interface Props {
   fabPlans: FabricationPlan[];
   setFabPlans: React.Dispatch<React.SetStateAction<FabricationPlan[]>>;
@@ -37,6 +44,8 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   const [exportProgress, setExportProgress] = useState("");
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
+  const [layerVolumes, setLayerVolumes] = useState<Record<string, number>>({});
+  const [layerMaterials, setLayerMaterials] = useState<Record<string, keyof typeof MATERIALS>>({});
 
   const toggleLayerVisibility = (id: string) => {
     setLayerVisibility(prev => ({ 
@@ -349,6 +358,13 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     const settings = activePlan.waterlineSettings[layer.id] || { sheetThicknessExpression: "3", startSide: "Cut side", rounding: "Round up" };
                     
                     const isVisible = layerVisibility[layer.id] !== false;
+                    
+                    // NEW: Calculate Mass
+                    const volMm3 = layerVolumes[layer.id] || 0;
+                    const volCm3 = volMm3 / 1000;
+                    const selectedMat = layerMaterials[layer.id] || "PLA (10% Infill)";
+                    const density = MATERIALS[selectedMat];
+                    const massG = volCm3 * density;
                     return (
                         <div key={layer.id} className="fab-layer-card" style={{ opacity: isVisible ? 1 : 0.6 }}>
                             <div className="fab-layer-title">
@@ -407,6 +423,25 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                     </div>
                                 </div>
                             )}
+                            <div style={{ 
+                                marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #444', 
+                                display: 'flex', flexDirection: 'column', gap: '5px', fontSize: '0.9em' 
+                            }}>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                                    <span style={{color:'#888'}}>Volume:</span>
+                                    <span style={{fontFamily:'monospace'}}>{volCm3.toFixed(2)} cm³</span>
+                                </div>
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                                    <select 
+                                        value={selectedMat}
+                                        onChange={(e) => setLayerMaterials(prev => ({...prev, [layer.id]: e.target.value as any}))}
+                                        style={{ width: '60%', padding: '2px', fontSize: '0.9em', background: '#222', border: '1px solid #555', color: '#ccc' }}
+                                    >
+                                        {Object.keys(MATERIALS).map(m => <option key={m} value={m}>{m}</option>)}
+                                    </select>
+                                    <span style={{fontWeight:'bold', color: '#646cff'}}>{massG.toFixed(1)} g</span>
+                                </div>
+                            </div>
                             <div className="fab-hint">{exportText}</div>
                         </div>
                     );
@@ -441,6 +476,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     selectedId={null} 
                     onSelect={() => {}}
                     onUpdateMesh={() => {}}
+                    onLayerVolumeCalculated={(id, vol) => setLayerVolumes(prev => ({...prev, [id]: vol}))}
                 />
             ) : (
                 <div className="empty-preview">
