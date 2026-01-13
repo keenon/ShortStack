@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import { create, all } from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine, FootprintPolygon, FootprintCircle } from "../types";
 
 // --- CUSTOM MATHJS INSTANCE ---
 export const math = create(all);
@@ -1745,6 +1745,23 @@ export function convertExportShapeToFootprintShape(exportShape: any): FootprintS
             y: fmt(exportShape.y),
             diameter: fmt(exportShape.diameter)
         } as FootprintCircle;
+    }
+    else if (exportShape.shape_type === "line") {
+        const points: Point[] = (exportShape.points || []).map((p: any) => ({
+            id: crypto.randomUUID(),
+            x: fmt(p.x),
+            y: fmt(p.y),
+            handleIn: p.handle_in ? { x: fmt(p.handle_in.x), y: fmt(p.handle_in.y) } : undefined,
+            handleOut: p.handle_out ? { x: fmt(p.handle_out.x), y: fmt(p.handle_out.y) } : undefined
+        }));
+        
+        return {
+            ...base,
+            type: "line",
+            x: "0", y: "0",
+            thickness: fmt(exportShape.thickness || 0.1),
+            points
+        } as FootprintLine;
     }
     else if (exportShape.shape_type === "polygon") {
         const points: Point[] = (exportShape.points || []).map((p: any) => ({
