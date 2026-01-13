@@ -245,7 +245,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     targetFootprint.shapes, 
                     footprints,
                     params,
-                    { ...layer, type: "Carved/Printed" }, // Force carved to get depths
+                    layer,
                     layerThickness,
                     view3DRef.current
                 );
@@ -260,6 +260,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     
                     // Generate Sliced Shapes
                     const slicedShapes = sliceExportShapes(rawShapes, sliceZ, sheetThickness);
+                    console.log(`Sliced Shapes for Layer ${layer.name} Sheet ${i+1}:`, slicedShapes);
                     
                     const fileName = `${planName}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_Sheet${i+1}.dxf`;
                     const fullPath = await join(folderPath as string, fileName);
@@ -372,7 +373,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     targetFootprint.shapes,
                     footprints,
                     params,
-                    { ...layer, type: "Carved/Printed" }, 
+                    layer, 
                     progThickness,
                     view3DRef.current
                 );
@@ -386,10 +387,14 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     const sliceZ = sheetIndex * sheetThickness;
 
                     const slicedExportShapes = sliceExportShapes(rawShapes, sliceZ, sheetThickness);
-                    // console.log(`Sliced Shapes for Layer ${layer.name} Sheet ${i+1}:`, slicedExportShapes);
-                    const tempShapes = slicedExportShapes.map(s => convertExportShapeToFootprintShape(s));
-
                     const sheetLayerId = `${layer.id}_sheet_${i}`;
+
+                    const tempShapes = slicedExportShapes.map(s => {
+                        const shape = convertExportShapeToFootprintShape(s);
+                        // FIX: Explicitly assign shape to this sheet layer so the worker picks it up
+                        shape.assignedLayers = { [sheetLayerId]: String(sheetThickness) };
+                        return shape;
+                    });
                     
                     // Inherit Board Outlines
                     let sheetShapes = [...tempShapes];
