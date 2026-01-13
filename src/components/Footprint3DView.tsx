@@ -498,9 +498,6 @@ const MeshObject = ({
                 if (!data.normal) geom.computeVertexNormals();
                 
                 setGeometry(geom);
-            if (data.volume !== undefined && onVolumeCalculated) {
-                onVolumeCalculated(layer.id, data.volume);
-            }
                 onProgress(uniqueId, 1.0, `Loaded ${meshName}`);
             })
             .catch(err => {
