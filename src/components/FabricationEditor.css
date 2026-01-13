@@ -102,3 +102,31 @@
 .fab-layer-title .vis-toggle-btn:hover {
     filter: brightness(1.2);
 }
+
+.cnc-parameters-grid {
+    margin-top: 10px;
+    padding: 10px;
+    background: #1a1a1a;
+    border-radius: 4px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.cnc-prop {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.cnc-prop label {
+    font-size: 0.75em;
+    color: #888;
+    text-transform: uppercase;
+    font-weight: bold;
+}
+
+.cnc-prop .expression-input {
+    font-size: 12px;
+    padding: 4px 8px;
+}

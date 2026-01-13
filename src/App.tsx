@@ -345,7 +345,8 @@ function App() {
         setFabPlans((rawData.fabPlans || []).map((p: any) => ({
             ...p,
             layerMethods: p.layerMethods || {},
-            waterlineSettings: p.waterlineSettings || {}
+            waterlineSettings: p.waterlineSettings || {},
+            cncSettings: p.cncSettings || {}
         })));
         setCurrentPath(path as string);
         setActiveTab("stackup");

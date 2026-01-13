@@ -9,7 +9,7 @@ import {
     StackupLayer, 
     FabricationMethod, 
     Parameter, 
-    WaterlineSettings, 
+    WaterlineSettings, CNCSettings, 
     MeshAsset, 
     FootprintBoardOutline, 
     FootprintLine, 
@@ -63,6 +63,31 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   };
   
   const activePlan = fabPlans.find(p => p.id === activePlanId);
+
+  const DEFAULT_CNC: CNCSettings = {
+    stockDepthExpression: "10",
+    toolDiameterExpression: "3.175",
+    toolLengthExpression: "20",
+    chuckDiameterExpression: "15",
+    stepDownExpression: "1",
+    stepOverExpression: "1.2",
+    feedrateExpression: "1000",
+    spindleRpmExpression: "18000"
+  };
+
+  const updateCNCSetting = (layerId: string, field: keyof CNCSettings, value: string) => {
+    if (!activePlan) return;
+    const existing = activePlan.cncSettings?.[layerId] || { ...DEFAULT_CNC };
+    const updatedPlan = {
+        ...activePlan,
+        cncSettings: { 
+            ...(activePlan.cncSettings || {}), 
+            [layerId]: { ...existing, [field]: value } 
+        }
+    };
+    setFabPlans(prev => prev.map(p => p.id === activePlan.id ? updatedPlan : p));
+  };
+
   const dragItemIndex = useRef<number | null>(null);
   const view3DRef = useRef<Footprint3DViewHandle>(null);
 
@@ -136,7 +161,8 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
         footprintId: footprints.length > 0 ? footprints[0].id : "", 
         layerMethods: {},
         waterlineSettings: {},
-        layerMaterials: {} 
+        layerMaterials: {},
+        cncSettings: {}
     };
     setFabPlans([...fabPlans, newPlan]);
     setActivePlanId(newPlan.id);
@@ -533,11 +559,80 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                             >
                                 {layer.type === "Cut" ? <option value="Laser cut">Laser cut (DXF)</option> : 
                                 <>
-                                    <option value="CNC">CNC (SVG Depth Map)</option>
+                                    <option value="CNC">CNC</option>
                                     <option value="Waterline laser cut">Waterline laser cut</option>
                                     <option value="3D printed">3D printed (STL)</option>
                                 </>}
                             </select>
+
+                            {method === "CNC" && (
+                                <div className="cnc-parameters-grid">
+                                    <div className="cnc-prop">
+                                        <label>Stock Depth</label>
+                                        <ExpressionEditor 
+                                            value={activePlan.cncSettings?.[layer.id]?.stockDepthExpression || DEFAULT_CNC.stockDepthExpression} 
+                                            onChange={(val) => updateCNCSetting(layer.id, "stockDepthExpression", val)} 
+                                            params={params} 
+                                        />
+                                    </div>
+                                    <div className="cnc-prop">
+                                        <label>Tool Dia</label>
+                                        <ExpressionEditor 
+                                            value={activePlan.cncSettings?.[layer.id]?.toolDiameterExpression || DEFAULT_CNC.toolDiameterExpression} 
+                                            onChange={(val) => updateCNCSetting(layer.id, "toolDiameterExpression", val)} 
+                                            params={params} 
+                                        />
+                                    </div>
+                                    <div className="cnc-prop">
+                                        <label>Tool Length</label>
+                                        <ExpressionEditor 
+                                            value={activePlan.cncSettings?.[layer.id]?.toolLengthExpression || DEFAULT_CNC.toolLengthExpression} 
+                                            onChange={(val) => updateCNCSetting(layer.id, "toolLengthExpression", val)} 
+                                            params={params} 
+                                        />
+                                    </div>
+                                    <div className="cnc-prop">
+                                        <label>Chuck Dia</label>
+                                        <ExpressionEditor 
+                                            value={activePlan.cncSettings?.[layer.id]?.chuckDiameterExpression || DEFAULT_CNC.chuckDiameterExpression} 
+                                            onChange={(val) => updateCNCSetting(layer.id, "chuckDiameterExpression", val)} 
+                                            params={params} 
+                                        />
+                                    </div>
+                                    <div className="cnc-prop">
+                                        <label>Step-down</label>
+                                        <ExpressionEditor 
+                                            value={activePlan.cncSettings?.[layer.id]?.stepDownExpression || DEFAULT_CNC.stepDownExpression} 
+                                            onChange={(val) => updateCNCSetting(layer.id, "stepDownExpression", val)} 
+                                            params={params} 
+                                        />
+                                    </div>
+                                    <div className="cnc-prop">
+                                        <label>Step-over</label>
+                                        <ExpressionEditor 
+                                            value={activePlan.cncSettings?.[layer.id]?.stepOverExpression || DEFAULT_CNC.stepOverExpression} 
+                                            onChange={(val) => updateCNCSetting(layer.id, "stepOverExpression", val)} 
+                                            params={params} 
+                                        />
+                                    </div>
+                                    <div className="cnc-prop">
+                                        <label>Feedrate</label>
+                                        <ExpressionEditor 
+                                            value={activePlan.cncSettings?.[layer.id]?.feedrateExpression || DEFAULT_CNC.feedrateExpression} 
+                                            onChange={(val) => updateCNCSetting(layer.id, "feedrateExpression", val)} 
+                                            params={params} 
+                                        />
+                                    </div>
+                                    <div className="cnc-prop">
+                                        <label>Spindle RPM</label>
+                                        <ExpressionEditor 
+                                            value={activePlan.cncSettings?.[layer.id]?.spindleRpmExpression || DEFAULT_CNC.spindleRpmExpression} 
+                                            onChange={(val) => updateCNCSetting(layer.id, "spindleRpmExpression", val)} 
+                                            params={params} 
+                                        />
+                                    </div>
+                                </div>
+                            )}
 
                             {method === "Waterline laser cut" && (
                                 <div className="waterline-mini-settings">

@@ -208,11 +208,23 @@ export interface WaterlineSettings {
   rounding: WaterlineRounding;
 }
 
+export interface CNCSettings {
+  stockDepthExpression: string;
+  toolDiameterExpression: string;
+  toolLengthExpression: string;
+  chuckDiameterExpression: string;
+  stepDownExpression: string;
+  stepOverExpression: string;
+  feedrateExpression: string;
+  spindleRpmExpression: string;
+}
+
 export interface FabricationPlan {
   id: string;
   name: string;
   footprintId: string;
   layerMethods: Record<string, FabricationMethod>;
   waterlineSettings: Record<string, WaterlineSettings>;
+  cncSettings: Record<string, CNCSettings>;
   layerMaterials: Record<string, string>;
 }
