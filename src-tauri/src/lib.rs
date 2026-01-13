@@ -770,60 +770,108 @@ fn generate_dxf(request: &ExportRequest) -> Result<(), Box<dyn std::error::Error
     let united_shapes = get_geometry_unioned_from_pool(&board_poly, &pool);
 
     let mut file = File::create(&request.filepath)?;
+    let mut handle_count = 1;
 
-    // Minimal DXF Header
-    writeln!(file, "  0\nSECTION\n  2\nHEADER\n  0\nENDSEC")?;
-    
-    // Entities Section
+    // Helper to get next hex handle
+    let mut next_handle = || {
+        handle_count += 1;
+        format!("{:X}", handle_count)
+    };
+
+    // 1. HEADER SECTION
+    writeln!(file, "  0\nSECTION\n  2\nHEADER")?;
+    writeln!(file, "  9\n$ACADVER\n  1\nAC1021")?; // Set to DXF 2007
+    writeln!(file, "  9\n$INSUNITS\n 70\n4")?;    // Set units to Millimeters
+    writeln!(file, "  0\nENDSEC")?;
+
+    // 2. TABLES SECTION (Required for Model Space Ownership)
+    let model_space_handle = "1F"; // We'll hardcode a standard handle for Model Space
+    writeln!(file, "  0\nSECTION\n  2\nTABLES")?;
+    writeln!(file, "  0\nTABLE\n  2\nBLOCK_RECORD\n  5\n1\n100\nAcDbSymbolTable")?;
+    writeln!(file, "  0\nBLOCK_RECORD\n  5\n{}\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n  2\n*MODEL_SPACE", model_space_handle)?;
+    writeln!(file, "  0\nENDTAB\n  0\nENDSEC")?;
+
+    // 3. BLOCKS SECTION
+    writeln!(file, "  0\nSECTION\n  2\nBLOCKS")?;
+    writeln!(file, "  0\nBLOCK\n  5\n{}\n330\n{}\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockBegin\n  2\n*MODEL_SPACE\n 70\n0\n 10\n0\n 20\n0\n 30\n0\n  3\n*MODEL_SPACE", next_handle(), model_space_handle)?;
+    writeln!(file, "  0\nENDBLK\n  5\n{}\n330\n{}\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockEnd", next_handle(), model_space_handle)?;
+    writeln!(file, "  0\nENDSEC")?;
+
+    // 4. ENTITIES SECTION
     writeln!(file, "  0\nSECTION\n  2\nENTITIES")?;
 
-    // Outline: Layer OUTLINE, Color 7 (Black/White)
-    write_dxf_polygon(&mut file, &board_poly, "OUTLINE", 7)?;
+    // Outline
+    write_dxf_polygon(&mut file, &board_poly, "OUTLINE", 7, model_space_handle, &mut next_handle)?;
 
-    // Shapes: Layer CUTS, Color 1 (Red)
+    // Shapes
     for poly in &united_shapes.0 {
-        write_dxf_polygon(&mut file, poly, "CUTS", 1)?;
+        write_dxf_polygon(&mut file, poly, "CUTS", 1, model_space_handle, &mut next_handle)?;
     }
 
-    // Isolated Circles: Parametric
+    // Isolated Circles
     for circle in isolated_circles {
         let r = circle.diameter.unwrap_or(0.0) / 2.0;
         writeln!(file, "  0\nCIRCLE")?;
+        writeln!(file, "  5\n{}", next_handle())?;           // Handle
+        writeln!(file, "330\n{}", model_space_handle)?;     // Owner (Model Space)
+        writeln!(file, "100\nAcDbEntity")?;                 // Base Class
         writeln!(file, "  8\nCUTS")?;
         writeln!(file, " 62\n1")?;
+        writeln!(file, "100\nAcDbCircle")?;                 // Circle Class
         writeln!(file, " 10\n{:.4}", circle.x)?;
         writeln!(file, " 20\n{:.4}", circle.y)?;
+        writeln!(file, " 30\n0.0")?;
         writeln!(file, " 40\n{:.4}", r)?;
     }
 
-    writeln!(file, "  0\nENDSEC\n  0\nEOF")?;
+    writeln!(file, "  0\nENDSEC")?;
+
+    // 5. Update HANDSEED and EOF
+    // (Optional: write actual handseed in header, but most parsers accept this structure)
+    writeln!(file, "  0\nEOF")?;
 
     Ok(())
 }
 
-fn write_dxf_polygon(file: &mut File, poly: &Polygon<f64>, layer: &str, color: i32) -> std::io::Result<()> {
-    write_dxf_polyline(file, poly.exterior(), layer, color)?;
+fn write_dxf_polygon(
+    file: &mut File, 
+    poly: &Polygon<f64>, 
+    layer: &str, 
+    color: i32, 
+    owner: &str,
+    next_handle: &mut dyn FnMut() -> String
+) -> std::io::Result<()> {
+    write_dxf_polyline(file, poly.exterior(), layer, color, owner, next_handle)?;
     for interior in poly.interiors() {
-        write_dxf_polyline(file, interior, layer, color)?;
+        write_dxf_polyline(file, interior, layer, color, owner, next_handle)?;
     }
     Ok(())
 }
 
-fn write_dxf_polyline(file: &mut File, ls: &LineString<f64>, layer: &str, color: i32) -> std::io::Result<()> {
+fn write_dxf_polyline(
+    file: &mut File, 
+    ls: &LineString<f64>, 
+    layer: &str, 
+    color: i32, 
+    owner: &str,
+    next_handle: &mut dyn FnMut() -> String
+) -> std::io::Result<()> {
     let mut coords = &ls.0[..];
-    if coords.is_empty() {
-        return Ok(());
-    }
-    // For LWPOLYLINE with closed flag (70=1), if the last point duplicates the first, we can skip it.
+    if coords.is_empty() { return Ok(()); }
+    
     if coords.len() > 1 && coords.first() == coords.last() {
         coords = &coords[..coords.len() - 1];
     }
 
     writeln!(file, "  0\nLWPOLYLINE")?;
-    writeln!(file, "  8\n{}", layer)?; // Layer Name
-    writeln!(file, " 62\n{}", color)?; // Color Number
-    writeln!(file, " 90\n{}", coords.len())?; // Number of vertices
-    writeln!(file, " 70\n1")?; // Flag 1 = Closed
+    writeln!(file, "  5\n{}", next_handle())?;       // Unique Handle
+    writeln!(file, "330\n{}", owner)?;               // Ownership link
+    writeln!(file, "100\nAcDbEntity")?;             // Subclass marker
+    writeln!(file, "  8\n{}", layer)?;
+    writeln!(file, " 62\n{}", color)?;
+    writeln!(file, "100\nAcDbPolyline")?;           // Class-specific marker
+    writeln!(file, " 90\n{}", coords.len())?;
+    writeln!(file, " 70\n1")?;                      // Flag 1 = Closed loop
     
     for coord in coords {
         writeln!(file, " 10\n{:.4}", coord.x)?;
