@@ -214,4 +214,5 @@ export interface FabricationPlan {
   footprintId: string;
   layerMethods: Record<string, FabricationMethod>;
   waterlineSettings: Record<string, WaterlineSettings>;
+  layerMaterials: Record<string, string>;
 }

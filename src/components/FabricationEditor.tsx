@@ -22,11 +22,15 @@ import { collectExportShapesAsync, sliceExportShapes } from "../utils/exportUtil
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import "./FabricationEditor.css";
 
-const MATERIALS = {
-    "PLA (10% Infill)": 0.124,
-    "PLA (100% Infill)": 1.24,
-    "Carbon Fiber": 1.7,
-    "XPS Foam": 0.045
+const MATERIAL_DATA: Record<string, { density: number; methods: string[] }> = {
+    "PLA (10% Infill)": { density: 0.124, methods: ["3D printed"] },
+    "PLA (100% Infill)": { density: 1.24, methods: ["3D printed"] },
+    "Balsa Wood": { density: 0.14, methods: ["CNC", "Laser cut", "Waterline laser cut"] },
+    "Aluminum": { density: 2.66, methods: ["CNC", "Laser cut", "Waterline laser cut"] },
+    "XPS Foam": { density: 0.045, methods: ["CNC"] },
+    "Delrin": { density: 1.41, methods: ["Laser cut", "Waterline laser cut"] },
+    "Plexiglass": { density: 1.2, methods: ["Laser cut", "Waterline laser cut"] },
+    "Carbon Fiber": { density: 1.7, methods: ["Laser cut", "Waterline laser cut"] },
 };
 
 interface Props {
@@ -45,7 +49,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
   const [layerVolumes, setLayerVolumes] = useState<Record<string, number>>({});
-  const [layerMaterials, setLayerMaterials] = useState<Record<string, keyof typeof MATERIALS>>({});
+  
 
   const toggleLayerVisibility = (id: string) => {
     setLayerVisibility(prev => ({ 
@@ -127,7 +131,8 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
         name: "New Fabrication Plan", 
         footprintId: footprints.length > 0 ? footprints[0].id : "", 
         layerMethods: {},
-        waterlineSettings: {} 
+        waterlineSettings: {},
+        layerMaterials: {} 
     };
     setFabPlans([...fabPlans, newPlan]);
     setActivePlanId(newPlan.id);
@@ -145,6 +150,24 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
         waterlineSettings: { ...activePlan.waterlineSettings, [layerId]: { ...existing, [field]: value } }
     };
     setFabPlans(prev => prev.map(p => p.id === activePlan.id ? updatedPlan : p));
+  };
+
+  const updatePlanLayer = (layerId: string, field: "layerMethods" | "layerMaterials", value: string) => {
+    if (!activePlan) return;
+    let updatedMethods = { ...activePlan.layerMethods };
+    let updatedMaterials = { ...activePlan.layerMaterials || {} };
+    if (field === "layerMethods") {
+        updatedMethods[layerId] = value as any;
+        const validMaterials = Object.keys(MATERIAL_DATA).filter(m => MATERIAL_DATA[m].methods.includes(value));
+        if (!validMaterials.includes(updatedMaterials[layerId])) {
+            updatedMaterials[layerId] = validMaterials[0] || "";
+        }
+    } else {
+        updatedMaterials[layerId] = value;
+    }
+    setFabPlans(prev => prev.map(p => p.id === activePlan.id ? {
+        ...p, layerMethods: updatedMethods, layerMaterials: updatedMaterials 
+    } : p));
   };
 
 
@@ -359,12 +382,8 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     
                     const isVisible = layerVisibility[layer.id] !== false;
                     
-                    // NEW: Calculate Mass
                     const volMm3 = layerVolumes[layer.id] || 0;
                     const volCm3 = volMm3 / 1000;
-                    const selectedMat = layerMaterials[layer.id] || "PLA (10% Infill)";
-                    const density = MATERIALS[selectedMat];
-                    const massG = volCm3 * density;
                     return (
                         <div key={layer.id} className="fab-layer-card" style={{ opacity: isVisible ? 1 : 0.6 }}>
                             <div className="fab-layer-title">
@@ -387,8 +406,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
 
                             <select 
                                 value={method}
-                                onChange={(e) => setFabPlans(prev => prev.map(p => p.id === activePlan.id ? 
-                                    {...p, layerMethods: {...p.layerMethods, [layer.id]: e.target.value as FabricationMethod}} : p))}
+                                onChange={(e) => updatePlanLayer(layer.id, "layerMethods", e.target.value)}
                             >
                                 {layer.type === "Cut" ? <option value="Laser cut">Laser cut (DXF)</option> : 
                                 <>
@@ -423,25 +441,32 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                     </div>
                                 </div>
                             )}
-                            <div style={{ 
-                                marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #444', 
-                                display: 'flex', flexDirection: 'column', gap: '5px', fontSize: '0.9em' 
-                            }}>
-                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
-                                    <span style={{color:'#888'}}>Volume:</span>
-                                    <span style={{fontFamily:'monospace'}}>{volCm3.toFixed(2)} cm³</span>
-                                </div>
-                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
-                                    <select 
-                                        value={selectedMat}
-                                        onChange={(e) => setLayerMaterials(prev => ({...prev, [layer.id]: e.target.value as any}))}
-                                        style={{ width: '60%', padding: '2px', fontSize: '0.9em', background: '#222', border: '1px solid #555', color: '#ccc' }}
-                                    >
-                                        {Object.keys(MATERIALS).map(m => <option key={m} value={m}>{m}</option>)}
-                                    </select>
-                                    <span style={{fontWeight:'bold', color: '#646cff'}}>{massG.toFixed(1)} g</span>
-                                </div>
-                            </div>
+                            {(() => {
+                                const currentMaterial = activePlan.layerMaterials?.[layer.id] || 
+                                    Object.keys(MATERIAL_DATA).find(m => MATERIAL_DATA[m].methods.includes(method)) || "";
+                                const availableMaterials = Object.keys(MATERIAL_DATA).filter(m => MATERIAL_DATA[m].methods.includes(method));
+                                const density = MATERIAL_DATA[currentMaterial]?.density || 0;
+                                const mass = volCm3 * density;
+                                
+                                return (
+                                    <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #444', display: 'flex', flexDirection: 'column', gap: '5px', fontSize: '0.9em' }}>
+                                        <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                                            <span style={{color:'#888'}}>Volume:</span>
+                                            <span style={{fontFamily:'monospace'}}>{volCm3.toFixed(2)} cm³</span>
+                                        </div>
+                                        <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+                                            <select 
+                                                value={currentMaterial}
+                                                onChange={(e) => updatePlanLayer(layer.id, "layerMaterials", e.target.value)}
+                                                style={{ width: '60%', padding: '2px', fontSize: '0.9em', background: '#222', border: '1px solid #555', color: '#ccc' }}
+                                            >
+                                                {availableMaterials.map(m => <option key={m} value={m}>{m}</option>)}
+                                            </select>
+                                            <span style={{fontWeight:'bold', color: '#646cff'}}>{mass.toFixed(1)} g</span>
+                                        </div>
+                                    </div>
+                                );
+                            })()}
                             <div className="fab-hint">{exportText}</div>
                         </div>
                     );
