@@ -23,7 +23,7 @@ interface Props {
   stackup: StackupLayer[];
   meshAssets: MeshAsset[];
   visibleLayers?: Record<string, boolean>;
-  is3DActive: boolean;
+  is3DActive: boolean; toolpaths?: number[][];
   // NEW: Selection Props
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -86,7 +86,7 @@ function getWorker() {
     return sharedWorker;
 }
 
-async function callWorker(type: string, payload: any, onProgress?: (p: any) => void): Promise<any> {
+export async function callWorker(type: string, payload: any, onProgress?: (p: any) => void): Promise<any> {
     const worker = getWorker();
     
     // WAIT FOR INIT TO COMPLETE
@@ -610,7 +610,7 @@ const MeshObject = ({
     );
 };
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh, onLayerVolumeCalculated, customStack }, ref) => {
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh, onLayerVolumeCalculated, customStack, toolpaths }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
   const assetRefs = useRef<Record<string, THREE.Mesh>>({});
@@ -1028,6 +1028,19 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
             ))}
         </group>
 
+        {toolpaths?.map((path, idx) => (
+            <line key={idx}>
+                <bufferGeometry attach="geometry">
+                    <bufferAttribute 
+                        attach="attributes-position" 
+                        count={path.length / 3} 
+                        array={new Float32Array(path)} 
+                        itemSize={3} 
+                    />
+                </bufferGeometry>
+                <lineBasicMaterial attach="material" color="#00ff00" linewidth={2} transparent opacity={0.8} />
+            </line>
+        ))}
         <Grid infiniteGrid fadeDistance={500} sectionColor="#444" cellColor="#222" position={[0, 0, 0]} />
         <OrbitControls makeDefault ref={controlsRef} />
         <GizmoHelper alignment="bottom-right" margin={[80, 80]}>

@@ -1046,6 +1046,67 @@ self.onmessage = async (e: MessageEvent) => {
                 { binary: true }
             );
         }
+        
+        // --- 5. COMPUTE CNC TOOLPATH ---
+        else if (type === "computeToolpath") {
+            if (!manifoldModule) throw new Error("Manifold not initialized");
+            const { shapes, params, contextFp, allFootprints, settings, layerThickness, layerId, bottomZ, carveSide, resolution = 32 } = payload;
+            const { CrossSection } = manifoldModule;
+            const toolpaths: number[][] = [];
+            
+            const toolRadius = evaluateExpression(settings.toolDiameterExpression, params) / 2;
+            const stepDown = Math.max(0.1, evaluateExpression(settings.stepDownExpression, params));
+
+            const flatShapes = flattenShapes(contextFp, contextFp, shapes, allFootprints, params);
+
+            flatShapes.forEach(item => {
+                const s = item.shape;
+                if (!s.assignedLayers || s.assignedLayers[layerId] === undefined) return;
+                
+                const assignment = s.assignedLayers[layerId];
+                const depthExpr = (typeof assignment === "object") ? assignment.depth : assignment;
+                const totalDepth = Math.min(layerThickness, evaluateExpression(depthExpr, params));
+                
+                if (totalDepth <= 0.01) return;
+
+                let cs: any = null;
+                if (s.type === "circle") {
+                    const d = evaluateExpression((s as any).diameter, params);
+                    cs = CrossSection.circle(d/2, resolution);
+                } else if (s.type === "rect") {
+                    const w = evaluateExpression((s as any).width, params);
+                    const h = evaluateExpression((s as any).height, params);
+                    cs = CrossSection.square([w, h], true);
+                }
+
+                if (cs) {
+                    const toolCS = cs.rotate(item.rotation).translate([item.x, -item.y]).offset(-toolRadius, "Round");
+                    const polys = toolCS.toPolygons();
+                    
+                    polys.forEach((poly: number[][]) => {
+                        if (poly.length < 2) return;
+                        
+                        let cutProg = 0;
+                        const surfaceZ = (carveSide === "Top") ? (bottomZ + layerThickness) : bottomZ;
+                        const direction = (carveSide === "Top") ? -1 : 1;
+
+                        while (cutProg < totalDepth + 0.01) {
+                            const z = surfaceZ + (direction * Math.min(cutProg, totalDepth));
+                            const line: number[] = [];
+                            poly.forEach(pt => line.push(pt[0], z, pt[1]));
+                            line.push(poly[0][0], z, poly[0][1]); // Close loop
+                            toolpaths.push(line);
+                            if (cutProg >= totalDepth) break;
+                            cutProg += stepDown;
+                        }
+                    });
+                    cs.delete();
+                    toolCS.delete();
+                }
+            });
+
+            self.postMessage({ id, type: "success", payload: toolpaths });
+        }
 
     } catch (err: any) {
         self.postMessage({ id, type: "error", error: err.message || "Unknown worker error" });

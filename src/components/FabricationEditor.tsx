@@ -19,7 +19,7 @@ import { IconOutline, IconGrip } from "./Icons";
 import ExpressionEditor from "./ExpressionEditor";
 import { evaluateExpression, resolvePoint, getLineLength, convertExportShapeToFootprintShape } from "../utils/footprintUtils";
 import { collectExportShapesAsync, sliceExportShapes } from "../utils/exportUtils";
-import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
+import Footprint3DView, { Footprint3DViewHandle, callWorker } from "./Footprint3DView";
 import "./FabricationEditor.css";
 
 const MATERIAL_DATA: Record<string, { density: number; methods: string[] }> = {
@@ -49,6 +49,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [layerVisibility, setLayerVisibility] = useState<Record<string, boolean>>({});
   const [layerVolumes, setLayerVolumes] = useState<Record<string, number>>({});
+  const [activeToolpaths, setActiveToolpaths] = useState<Record<string, number[][]>>({});
   
   // NEW: Visual Stack State
   const [visualStack, setVisualStack] = useState<{ layer: StackupLayer, footprint: Footprint }[] | undefined>(undefined);
@@ -153,7 +154,6 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     collectRecursive(targetFootprint);
     return entries;
   }, [targetFootprint, activePlan, footprints, params, stackup]);
-
   const addPlan = () => {
     const newPlan: FabricationPlan = { 
         id: crypto.randomUUID(), 
@@ -467,6 +467,33 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   }, [activePlan, stackup, targetFootprint, params, footprints]);
 
     // NEW: Map visibility of generated sheets to their parents
+  useEffect(() => {
+    if (!activePlan || !targetFootprint) { setActiveToolpaths({}); return; }
+    let currentZAccum = 0;
+    stackup.forEach(layer => {
+        const thickness = evaluateExpression(layer.thicknessExpression, params);
+        const method = activePlan.layerMethods[layer.id];
+        if (method === "CNC") {
+            const settings = activePlan.cncSettings[layer.id] || DEFAULT_CNC;
+            callWorker("computeToolpath", {
+                shapes: targetFootprint.shapes,
+                layerId: layer.id,
+                params,
+                contextFp: targetFootprint,
+                allFootprints: footprints,
+                settings,
+                layerThickness: thickness,
+                bottomZ: currentZAccum,
+                carveSide: layer.carveSide
+            }).then(paths => {
+                setActiveToolpaths(prev => ({ ...prev, [layer.id]: paths }));
+            });
+        } else {
+            setActiveToolpaths(prev => { const n = {...prev}; delete n[layer.id]; return n; });
+        }
+        currentZAccum += thickness;
+    });
+  }, [activePlan, targetFootprint, params, stackup]);
   const mappedVisibleLayers = useMemo(() => {
     if (!visualStack) return layerVisibility;
     const res = { ...layerVisibility };
@@ -729,6 +756,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                         onSelect={() => {}}
                         onUpdateMesh={() => {}}
                         onLayerVolumeCalculated={(id, vol) => setLayerVolumes(prev => ({...prev, [id]: vol}))}
+                        toolpaths={Object.values(activeToolpaths).flat()}
                         customStack={visualStack}
                     />
                 </>
