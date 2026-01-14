@@ -827,7 +827,7 @@ export function findSafeSplitLine(
     bedSize?: { width: number, height: number },
     options: { searchRadius: number, angleRange: number } = { searchRadius: 20, angleRange: 5 },
     ignoredLayerIds: string[] = []
-): { result: { start: {x:number, y:number}, end: {x:number, y:number}, count: number } | null, debugLines: any[] } {
+): { result: { start: {x:number, y:number}, end: {x:number, y:number}, count: number, width: number } | null, debugLines: any[] } {
     
     // 1. Collect all obstacles & Outline
     const obstacles = collectGlobalObstacles(footprint.shapes, params, allFootprints, stackup, {x:0, y:0, angle:0}, footprint, ignoredLayerIds);
@@ -842,7 +842,7 @@ export function findSafeSplitLine(
     const midY = (startUser.y + endUser.y) / 2;
 
     let bestScore = -Infinity;
-    let bestResult: { start: {x:number, y:number}, end: {x:number, y:number}, count: number } | null = null;
+    let bestResult: { start: {x:number, y:number}, end: {x:number, y:number}, count: number, width: number } | null = null;
     const debugLines: any[] = [];
 
     // Helper: Distance from segment AB to Point P
@@ -900,7 +900,10 @@ export function findSafeSplitLine(
     // Optimization: Pre-calculate bounding box center of outline for rough rejection? 
     // Not needed, outline intersection check is fast enough for <1k iterations.
 
+    const widths = [20, 15, 10]; // Prefer wider dovetails
+    
     for (let c = 1; c <= 3; c++) {
+      for (const width of widths) {
         for (let a = -angleStepsCount; a <= angleStepsCount; a++) {
             const angOffset = a * angleStep;
             const candAngle = angleBase + angOffset;
@@ -967,14 +970,11 @@ export function findSafeSplitLine(
                     if (axisClearance < 0.5) continue; 
 
                     // 4. CHECK DOVETAILS
-                    const width = 10; 
+                    // Use loop variable 'width'
                     const pts = generateDovetailPoints(cStart.x, cStart.y, cEnd.x, cEnd.y, c, width);
                     
                     // CRITICAL FIX: Ensure dovetail pattern resides INSIDE the board outline
-                    // We check the "extremes" of the dovetails (points that stick out)
                     let allInside = true;
-                    // Dovetail points structure: [Start, NeckStart, HeadOut, HeadIn, NeckEnd, ... , End]
-                    // We check HeadOut/HeadIn points which are at indices 2, 3, 6, 7, etc.
                     for (let pIdx = 2; pIdx < pts.length - 1; pIdx += 4) {
                         if (!isPointInPolygon(pts[pIdx], outlinePoints) || !isPointInPolygon(pts[pIdx+1], outlinePoints)) {
                             allInside = false; 
@@ -996,18 +996,20 @@ export function findSafeSplitLine(
                     if (valid) {
                         let score = (dovetailClearance === Infinity ? 20 : Math.min(dovetailClearance, 20)) * 5;
                         score -= c * 40; 
+                        score += width * 2; // Reward larger dovetails
                         score -= Math.abs(offDist) * 1.0; 
                         score -= Math.abs(sDist) * 0.8;
                         score -= Math.abs(a) * 10; 
                         
                         if (score > bestScore) {
                             bestScore = score;
-                            bestResult = { start: cStart, end: cEnd, count: c };
+                            bestResult = { start: cStart, end: cEnd, count: c, width: width };
                         }
                     }
                 }
             }
         }
+      }
     }
 
     return { result: bestResult, debugLines };
@@ -1071,7 +1073,7 @@ export function autoComputeSplit(
                 name: "Auto Split",
                 x: r.start.x.toFixed(4), y: r.start.y.toFixed(4),
                 endX: (r.end.x - r.start.x).toFixed(4), endY: (r.end.y - r.start.y).toFixed(4),
-                dovetailCount: r.count.toString(), dovetailWidth: "10",
+                dovetailCount: r.count.toString(), dovetailWidth: r.width.toString(),
                 assignedLayers: {},
                 ignoredLayerIds: ignoredLayerIds
             } as any;

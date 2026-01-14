@@ -698,17 +698,49 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                     };
                 }
 
-                // 6. Handle Split Line Vector Rotation
+                // 6. Handle Split Line Vector Rotation with Snapping
                 if (s.type === "splitLine") {
                     const ex = evaluateExpression((startState as any).endX, params);
                     const ey = evaluateExpression((startState as any).endY, params);
                     
-                    // Rotate the relative vector (Standard Math rotation, note hCos/hSin uses negative angle)
+                    // Rotate the relative vector
                     const nex = ex * hCos - ey * hSin;
                     const ney = ex * hSin + ey * hCos;
                     
+                    // Tentative Position (Geometry only)
                     newProps.endX = modifyExpression((startState as any).endX, nex - ex);
                     newProps.endY = modifyExpression((startState as any).endY, ney - ey);
+
+                    // Perform Snap Check
+                    // Evaluate current tentative Global Start
+                    const currentX = evaluateExpression(newProps.x, params);
+                    const currentY = evaluateExpression(newProps.y, params);
+                    
+                    // Run Snapping Search
+                    const snapRes = findSafeSplitLine(
+                        footprintRef.current, allFootprints, params, stackup, 
+                        {x: currentX, y: currentY}, 
+                        {x: currentX + nex, y: currentY + ney},
+                        bedSize,
+                        { searchRadius: 10, angleRange: 5 }, // Tight snapping corridor
+                        (startState as any).ignoredLayerIds
+                    );
+
+                    if (snapRes.result) {
+                        // Override with Snapped Geometry
+                        // We need to calculate deltas relative to StartState to preserve expression structure
+                        const startXVal = evaluateExpression(startState.x, params);
+                        const startYVal = evaluateExpression(startState.y, params);
+                        
+                        newProps.x = modifyExpression(startState.x, snapRes.result.start.x - startXVal);
+                        newProps.y = modifyExpression(startState.y, snapRes.result.start.y - startYVal);
+                        
+                        const newDX = snapRes.result.end.x - snapRes.result.start.x;
+                        const newDY = snapRes.result.end.y - snapRes.result.start.y;
+                        
+                        newProps.endX = modifyExpression((startState as any).endX, newDX - ex);
+                        newProps.endY = modifyExpression((startState as any).endY, newDY - ey);
+                    }
                 }
 
                 return { ...s, ...newProps };
@@ -951,7 +983,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
               endX: (result.end.x - result.start.x).toFixed(4),
               endY: (result.end.y - result.start.y).toFixed(4),
               dovetailCount: result.count.toString(),
-              dovetailWidth: "10", // Default width
+              dovetailWidth: result.width.toString(),
               assignedLayers: {},
               // Apply current tool options
               ignoredLayerIds: splitToolOptions.ignoredLayerIds
@@ -2817,16 +2849,18 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                             
                             setProcessingMessage(null);
                             
-                            if (res.success && res.shapes && res.shapes.length > 0) {
-                                // Add all generated split lines
-                                const newIds = res.shapes.map(s => s.id);
-                                updateHistory({ 
-                                    footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
-                                    selectedShapeIds: newIds
-                                });
+                            if (res.success) {
+                                if (res.shapes && res.shapes.length > 0) {
+                                    const newIds = res.shapes.map(s => s.id);
+                                    updateHistory({ 
+                                        footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                                        selectedShapeIds: newIds
+                                    });
+                                } else {
+                                    alert("No split needed! The footprint already fits within the bed dimensions.");
+                                }
                             } else {
                                 if (res.shapes && res.shapes.length > 0) {
-                                     // Use browser confirm (blocking but safe here)
                                      const confirm = window.confirm(`Could not find a perfect fit (Excess: ${res.maxExcess?.toFixed(1)}mm). Add best approximation?`);
                                      if (confirm) {
                                         const newIds = res.shapes.map(s => s.id);
@@ -2836,7 +2870,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                                         });
                                      }
                                 } else {
-                                    alert("Global search failed completely.");
+                                    alert("Global search failed completely. Check obstacle layers or try increasing bed size.");
                                 }
                             }
                             if (res.debugLines) setDebugLines(res.debugLines);
