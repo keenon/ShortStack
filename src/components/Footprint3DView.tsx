@@ -31,12 +31,13 @@ interface Props {
   onLayerVolumeCalculated?: (layerId: string, volumeMm3: number) => void;
   // NEW: Optional Custom Stackup for Waterline Visualization
   customStack?: { layer: StackupLayer, footprint: Footprint }[];
-  layerSplitSettings?: Record<string, { enabled: boolean, lineIds?: string[] }>;
+  layerSplitSettings?: Record<string, { enabled: boolean, lineIds?: string[], kerf?: string }>;
 }
 
 export interface Footprint3DViewHandle {
     resetCamera: () => void;
     getLayerSTL: (layerId: string) => Uint8Array | null;
+    getLayerSTLs: (layerId: string) => Uint8Array[];
     processDroppedFile: (file: File) => Promise<FootprintMesh | null>;
     convertMeshToGlb: (mesh: FootprintMesh) => Promise<FootprintMesh | null>;
     computeUnionOutline: (shapes: FootprintShape[], params: Parameter[], contextFp: Footprint, allFootprints: Footprint[], transform: {x:number, y:number, rotation:number}) => Promise<{x:number, y:number}[][]>;
@@ -176,7 +177,7 @@ const LayerSolid = ({
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
   onLoad?: (id: string) => void;
   onVolumeCalculated?: (layerId: string, volume: number) => void;
-  layerSplitSettings?: Record<string, { enabled: boolean, lineIds?: string[] }>;
+  layerSplitSettings?: Record<string, { enabled: boolean, lineIds?: string[], kerf?: string }>;
 }) => {
   // UPDATED: Origin Logic
   // We force center to 0,0 to match the 2D View's origin (0,0).
@@ -217,7 +218,8 @@ const LayerSolid = ({
         totalLayers,
         resolution,
         enableSplit: splitSettings?.enabled || false,
-        splitLineIds: splitSettings?.lineIds
+        splitLineIds: splitSettings?.lineIds,
+        splitKerf: splitSettings?.kerf ? parseFloat(splitSettings.kerf) : 0.5
     }, (p) => {
         if (!cancelled && onProgress) {
              onProgress(layer.id, p.percent, p.message);
@@ -822,25 +824,37 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
     getLayerSTL: (layerId: string) => {
         const mesh = meshRefs.current[layerId];
         if (!mesh || !mesh.geometry) return null;
-
         let geom = mesh.geometry.clone();
         mesh.updateMatrixWorld();
         geom.applyMatrix4(mesh.matrixWorld);
-
         geom.deleteAttribute('uv');
         geom.deleteAttribute('normal');
-
-        try {
-            geom = mergeVertices(geom, 1e-4);
-        } catch (e) {
-            console.warn("Vertex merge failed", e);
-        }
-
+        try { geom = mergeVertices(geom, 1e-4); } catch (e) {}
         geom.computeVertexNormals();
         const data = geometryToSTL(geom);
         geom.dispose();
-        
         return data;
+    },
+    getLayerSTLs: (layerId: string) => {
+        const mesh = meshRefs.current[layerId];
+        if (!mesh || !mesh.geometry) return [];
+        
+        let geom = mesh.geometry.clone();
+        mesh.updateMatrixWorld();
+        geom.applyMatrix4(mesh.matrixWorld);
+        
+        // Separate loose parts
+        const parts = separateGeometries(geom);
+        
+        const results = parts.map(part => {
+            part.computeVertexNormals();
+            const data = geometryToSTL(part);
+            part.dispose();
+            return data;
+        });
+        
+        geom.dispose();
+        return results;
     },
     processDroppedFile: async (file: File): Promise<FootprintMesh | null> => {
         const ext = file.name.split('.').pop()?.toLowerCase();
@@ -1163,6 +1177,88 @@ function geometryToSTL(geometry: THREE.BufferGeometry): Uint8Array {
     }
 
     return new Uint8Array(buffer);
+}
+
+
+function separateGeometries(geometry: THREE.BufferGeometry): THREE.BufferGeometry[] {
+    if (!geometry.index) return [geometry.clone()]; // Non-indexed not supported for now
+    
+    const indices = geometry.index.array;
+    const positions = geometry.attributes.position.array;
+    const numTriangles = indices.length / 3;
+    
+    // 1. Build Adjacency Graph (Triangle -> Triangle)
+    // Map Vertex Index -> List of Triangle Indices
+    const vertToTris = new Map<number, number[]>();
+    
+    for (let t = 0; t < numTriangles; t++) {
+        const a = indices[t*3];
+        const b = indices[t*3+1];
+        const c = indices[t*3+2];
+        
+        if(!vertToTris.has(a)) vertToTris.set(a, []); vertToTris.get(a)!.push(t);
+        if(!vertToTris.has(b)) vertToTris.set(b, []); vertToTris.get(b)!.push(t);
+        if(!vertToTris.has(c)) vertToTris.set(c, []); vertToTris.get(c)!.push(t);
+    }
+    
+    const visited = new Uint8Array(numTriangles);
+    const groups: number[][] = [];
+    
+    for (let t = 0; t < numTriangles; t++) {
+        if (visited[t]) continue;
+        
+        // BFS to find connected component
+        const component: number[] = [];
+        const stack = [t];
+        visited[t] = 1;
+        
+        while (stack.length > 0) {
+            const curr = stack.pop()!;
+            component.push(curr);
+            
+            // Check neighbors via vertices
+            const va = indices[curr*3];
+            const vb = indices[curr*3+1];
+            const vc = indices[curr*3+2];
+            
+            [va, vb, vc].forEach(vIdx => {
+                const neighbors = vertToTris.get(vIdx);
+                if (neighbors) {
+                    for(const n of neighbors) {
+                        if (!visited[n]) {
+                            visited[n] = 1;
+                            stack.push(n);
+                        }
+                    }
+                }
+            });
+        }
+        groups.push(component);
+    }
+    
+    // 2. Reconstruct Geometries
+    return groups.map(group => {
+        const newGeo = new THREE.BufferGeometry();
+        // Naive reconstruction: just grab triangles, flatten, no index sharing optimization 
+        // (Manifold output is usually efficient but separating might duplicate verts if we don't re-map)
+        
+        const newPos: number[] = [];
+        // Map old vertex index to new flat index
+        
+        group.forEach(tIdx => {
+            const a = indices[tIdx*3];
+            const b = indices[tIdx*3+1];
+            const c = indices[tIdx*3+2];
+            
+            newPos.push(positions[a*3], positions[a*3+1], positions[a*3+2]);
+            newPos.push(positions[b*3], positions[b*3+1], positions[b*3+2]);
+            newPos.push(positions[c*3], positions[c*3+1], positions[c*3+2]);
+        });
+        
+        newGeo.setAttribute('position', new THREE.Float32BufferAttribute(newPos, 3));
+        newGeo.computeVertexNormals();
+        return newGeo;
+    });
 }
 
 export default Footprint3DView;
