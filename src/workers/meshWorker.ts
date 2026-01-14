@@ -1147,58 +1147,64 @@ self.onmessage = async (e: MessageEvent) => {
             // 1.5. Surfacing (Facing) Pass
             // If the stock is higher than the layer top, we must face it off first.
             if (Math.abs(localStockTopZ - localLayerTopZ) > 0.01) {
-                // Calculate Bounding Box of the Board
-                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-                
-                const allPoints: Point[] = [];
-                // Collect points from flattened shapes to determine bounds correctly
-                flatShapes.forEach((item) => {
-                    const s = item.shape;
-                    if ((s as any).points) allPoints.push(...(s as any).points);
-                    if (s.type === 'rect') {
-                        const w = evaluateExpression((s as FootprintRect).width, params);
-                        const h = evaluateExpression((s as FootprintRect).height, params);
+                               let surfCS: any = null;
+                // Margin Logic: same as board outline cuts (Chuck Radius + Padding, or Tool Radius)
+                const surfMargin = Math.max(toolRadius, chuckRadius + 2.0);
+
+                // 1. Try to use Board Outline
+                if (contextFp.isBoard) {
+                    const assignments = contextFp.boardOutlineAssignments || {};
+                    const assignedId = assignments[layerId];
+                    let outlineShape = contextFp.shapes.find((s: any) => s.id === assignedId) as any;
+                    if (!outlineShape) outlineShape = contextFp.shapes.find((s: any) => s.type === "boardOutline") as any;
+                    
+                    if (outlineShape) {
+                        const originX = evaluateExpression(outlineShape.x, params);
+                        const originY = evaluateExpression(outlineShape.y, params);
+                        const pts = getPolyOutlinePoints(outlineShape.points, 0, 0, params, contextFp, allFootprints, resolution);
+                        const absPts = pts.map(p => [p.x + originX, p.y + originY]);
                         
-                        // Use Resolved Global Transforms from flatShapes
-                        const x = item.x;
-                        const y = item.y;
-                        const r = item.rotation * (Math.PI / 180);
-                        
-                        const cos = Math.cos(r);
-                        const sin = Math.sin(r);
-                        const hw = w/2; 
-                        const hh = h/2;
-                        
-                        // Relative corners
-                        const corners = [
-                           {x: -hw, y: -hh}, {x: hw, y: -hh},
-                           {x: hw, y: hh}, {x: -hw, y: hh}
-                        ];
-                        
-                        corners.forEach(c => {
-                           // Rotate then Translate
-                           const rx = x + (c.x * cos - c.y * sin);
-                           const ry = y + (c.x * sin + c.y * cos);
-                           minX = Math.min(minX, rx); maxX = Math.max(maxX, rx);
-                           minY = Math.min(minY, ry); maxY = Math.max(maxY, ry);
-                        });
+                        if (absPts.length > 2) {
+                            const baseCS = collect(new CrossSection([absPts], "EvenOdd"));
+                            surfCS = collect(baseCS.offset(surfMargin, "Round"));
+                        }
                     }
-                });
-                
-                // If checking points
-                if (minX === Infinity) { minX = 0; maxX = 100; minY = 0; maxY = 100; }
-                
-                // Add margins for the surfacing block
-                const margin = toolDiameter * 2;
-                minX -= margin; maxX += margin; minY -= margin; maxY += margin;
-                
-                // Create Surfacing Shape (Rectangle)
-                const width = maxX - minX;
-                const height = maxY - minY;
-                
-                // Use Manifold to generate pocketing for this rect
-                let surfCS = collect(CrossSection.square([width, height], true));
-                surfCS = collect(surfCS.translate([(minX + maxX)/2, (minY + maxY)/2])); // Center it (Note Y flip for Manifold logic)
+                }
+
+                // 2. Fallback to Bounding Box
+                if (!surfCS) {
+                    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+                    flatShapes.forEach((item) => {
+                        const s = item.shape;
+                        const x = item.x; 
+                        const y = item.y;
+                        if (s.type === 'rect') {
+                            const w = evaluateExpression((s as FootprintRect).width, params);
+                            const h = evaluateExpression((s as FootprintRect).height, params);
+                            const r = item.rotation * (Math.PI/180);
+                            const cos = Math.cos(r), sin = Math.sin(r);
+                            const hw = w/2, hh = h/2;
+                            [{x:-hw, y:-hh}, {x:hw, y:-hh}, {x:hw, y:hh}, {x:-hw, y:hh}].forEach(p => {
+                                const px = x + p.x*cos - p.y*sin;
+                                const py = y + p.x*sin + p.y*cos;
+                                minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+                                minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+                            });
+                        } else {
+                            minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                            minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                        }
+                    });
+                    if (minX === Infinity) { minX = 0; maxX = 100; minY = 0; maxY = 100; }
+                    
+                    minX -= surfMargin; maxX += surfMargin; 
+                    minY -= surfMargin; maxY += surfMargin;
+                    
+                    const width = maxX - minX;
+                    const height = maxY - minY;
+                    surfCS = collect(CrossSection.square([width, height], true));
+                    surfCS = collect(surfCS.translate([(minX + maxX)/2, (minY + maxY)/2]));
+                }
 
                 // Generate Surfacing Toolpaths
                 // We cut from StockTop down to LayerTop
