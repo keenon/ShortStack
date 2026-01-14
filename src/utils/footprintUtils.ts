@@ -293,7 +293,9 @@ export function generateDovetailPoints(
     startX: number, startY: number, 
     endX: number, endY: number, 
     count: number, 
-    width: number
+    width: number,
+    heightOverride?: number,
+    flip?: boolean
 ): {x: number, y: number}[] {
     const dx = endX - startX;
     const dy = endY - startY;
@@ -302,18 +304,18 @@ export function generateDovetailPoints(
 
     const ux = dx / len;
     const uy = dy / len;
-    // Perpendicular vector
-    const px = -uy;
-    const py = ux;
+    
+    // Perpendicular vector (Flip support)
+    const px = flip ? uy : -uy;
+    const py = flip ? -ux : ux;
 
     const points = [];
     points.push({x: startX, y: startY});
 
     // Dovetail geometric constants
-    // Trapezoid shape: Neck width 'width', Head width 'width * 1.5', Height 'width * 0.8'
     const neckW = width;
     const headW = width * 1.5;
-    const height = width * 0.8;
+    const height = heightOverride !== undefined ? heightOverride : width * 0.8;
     const segmentLen = len / count;
 
     for (let i = 0; i < count; i++) {
@@ -583,15 +585,15 @@ export function checkSplitPartSizes(
     params: Parameter[],
     allFootprints: Footprint[],
     bedSize: { width: number, height: number }
-): { parts: { valid: boolean, corners: {x:number, y:number}[], hull: {x:number, y:number}[] }[] } {
+): { parts: { valid: boolean, excess: number, corners: {x:number, y:number}[], hull: {x:number, y:number}[] }[], maxExcess: number } {
     
     // 1. Get Board Outline Points
     const outlinePoints = getTessellatedBoardOutline(footprint, params, allFootprints);
-    if (outlinePoints.length < 3) return { parts: [] };
+    if (outlinePoints.length < 3) return { parts: [], maxExcess: 0 };
 
     // 2. Identify All Split Lines
     const splitLines = footprint.shapes.filter(s => s.type === "splitLine") as FootprintSplitLine[];
-    if (splitLines.length === 0) return { parts: [] };
+    if (splitLines.length === 0) return { parts: [], maxExcess: 0 };
 
     // Pre-calculate line definitions (Start, Vector, Dovetail Points, Boundary Points)
     const lineDefs = splitLines.map(sl => {
@@ -601,6 +603,9 @@ export function checkSplitPartSizes(
         const ey = sy + evaluateExpression(sl.endY, params);
         const count = Math.round(evaluateExpression(sl.dovetailCount, params));
         const width = evaluateExpression(sl.dovetailWidth, params);
+        const height = evaluateExpression((sl as any).dovetailHeight, params) || (width * 0.8);
+        const flip = !!(sl as any).flip;
+
         const dx = ex - sx; 
         const dy = ey - sy;
         const len = Math.sqrt(dx*dx + dy*dy);
@@ -608,7 +613,7 @@ export function checkSplitPartSizes(
         const axisY = len > 0 ? dy/len : 0;
         
         // Generate cut geometry (dovetail points)
-        const dovetailPts = generateDovetailPoints(sx, sy, ex, ey, count, width);
+        const dovetailPts = generateDovetailPoints(sx, sy, ex, ey, count, width, height, flip);
         
         const boundaryPoints: {x:number, y:number}[] = [];
 
@@ -734,13 +739,16 @@ export function checkSplitPartSizes(
             }
         }
 
-        const fits = (bestW <= bedSize.width + 1 && bestH <= bedSize.height + 1) || 
-                     (bestW <= bedSize.height + 1 && bestH <= bedSize.width + 1);
+        const fitNormal = Math.max(0, bestW - bedSize.width) + Math.max(0, bestH - bedSize.height);
+        const fitRotated = Math.max(0, bestW - bedSize.height) + Math.max(0, bestH - bedSize.width);
+        const excess = Math.min(fitNormal, fitRotated);
+        const fits = excess < 1.0; // 1mm tolerance
 
-        results.push({ valid: fits, corners: bestCorners, hull });
+        results.push({ valid: fits, excess, corners: bestCorners, hull });
     });
 
-    return { parts: results };
+    const maxExcess = results.reduce((max, p) => Math.max(max, p.excess), 0);
+    return { parts: results, maxExcess };
 }
 
 // Helper to find intersection point of two line segments
@@ -961,11 +969,25 @@ export function findSafeSplitLine(
                     // 4. CHECK DOVETAILS
                     const width = 10; 
                     const pts = generateDovetailPoints(cStart.x, cStart.y, cEnd.x, cEnd.y, c, width);
+                    
+                    // CRITICAL FIX: Ensure dovetail pattern resides INSIDE the board outline
+                    // We check the "extremes" of the dovetails (points that stick out)
+                    let allInside = true;
+                    // Dovetail points structure: [Start, NeckStart, HeadOut, HeadIn, NeckEnd, ... , End]
+                    // We check HeadOut/HeadIn points which are at indices 2, 3, 6, 7, etc.
+                    for (let pIdx = 2; pIdx < pts.length - 1; pIdx += 4) {
+                        if (!isPointInPolygon(pts[pIdx], outlinePoints) || !isPointInPolygon(pts[pIdx+1], outlinePoints)) {
+                            allInside = false; 
+                            break; 
+                        }
+                    }
+                    if (!allInside) continue;
+
                     let dovetailClearance = Infinity;
                     let valid = true;
 
                     for(let k=0; k<pts.length-1; k++) {
-                        if (k % 4 === 0) continue; // Skip straight segments
+                        if (k % 4 === 0) continue; // Skip straight segments along the axis
                         const cl = checkClearance(pts[k], pts[k+1], true); 
                         if (cl < 0.5) { valid = false; break; }
                         dovetailClearance = Math.min(dovetailClearance, cl);
@@ -989,6 +1011,110 @@ export function findSafeSplitLine(
     }
 
     return { result: bestResult, debugLines };
+}
+
+export function autoComputeSplit(
+    footprint: Footprint,
+    allFootprints: Footprint[],
+    params: Parameter[],
+    stackup: StackupLayer[],
+    bedSize: { width: number, height: number },
+    options: { clearance: number, desiredCuts: number } = { clearance: 2.0, desiredCuts: 1 },
+    ignoredLayerIds: string[] = []
+): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, debugLines?: any[] } {
+    
+    const debugLines: any[] = [];
+    const generatedShapes: FootprintSplitLine[] = [];
+
+    // 1. CALCULATE BOUNDS
+    const outlinePoints = getTessellatedBoardOutline(footprint, params, allFootprints);
+    let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+    outlinePoints.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); });
+    
+    const width = maxX - minX;
+    const height = maxY - minY;
+    
+    // Safety margin
+    const bedW = bedSize.width - 5;
+    const bedH = bedSize.height - 5;
+
+    // Calculate needed cuts (Ceiling - 1)
+    const cutsX = Math.max(0, Math.ceil(width / bedW) - 1);
+    const cutsY = Math.max(0, Math.ceil(height / bedH) - 1);
+
+    console.log(`Auto-Split: Size ${width.toFixed(1)}x${height.toFixed(1)}. Need ${cutsX} vertical and ${cutsY} horizontal cuts.`);
+
+    // 2. GENERATE IDEAL POSITIONS AND OPTIMIZE
+    const optimizeCut = (centerX: number, centerY: number, isVertical: boolean) => {
+        const ux = isVertical ? 0 : 1;
+        const uy = isVertical ? 1 : 0;
+        
+        // Define Infinite Line
+        const startNode = { x: centerX - ux * 2000, y: centerY - uy * 2000 };
+        const endNode = { x: centerX + ux * 2000, y: centerY + uy * 2000 };
+
+        // Search Radius: Half the segment width to allow wiggling around obstacles
+        const searchRadius = isVertical ? (width / (cutsX + 1)) / 2.5 : (height / (cutsY + 1)) / 2.5;
+
+        // Run Optimizer
+        const searchRes = findSafeSplitLine(
+            footprint, allFootprints, params, stackup,
+            startNode, endNode, bedSize,
+            { searchRadius: Math.max(10, searchRadius), angleRange: 0 }, 
+            ignoredLayerIds
+        );
+
+        if (searchRes.result) {
+            const r = searchRes.result;
+            const newShape: FootprintSplitLine = {
+                id: crypto.randomUUID(), type: "splitLine",
+                name: "Auto Split",
+                x: r.start.x.toFixed(4), y: r.start.y.toFixed(4),
+                endX: (r.end.x - r.start.x).toFixed(4), endY: (r.end.y - r.start.y).toFixed(4),
+                dovetailCount: r.count.toString(), dovetailWidth: "10",
+                assignedLayers: {},
+                ignoredLayerIds: ignoredLayerIds
+            } as any;
+            
+            generatedShapes.push(newShape);
+            debugLines.push({ x1: r.start.x, y1: r.start.y, x2: r.end.x, y2: r.end.y, color: "rgba(0,255,0,0.5)" });
+        } else {
+            // Failed to place cut
+            debugLines.push({ x1: startNode.x, y1: startNode.y, x2: endNode.x, y2: endNode.y, color: "rgba(255,0,0,0.5)" });
+        }
+    };
+
+    // Process Vertical Cuts
+    if (cutsX > 0) {
+        const step = width / (cutsX + 1);
+        for(let i=1; i<=cutsX; i++) {
+            optimizeCut(minX + step * i, (minY + maxY)/2, true);
+        }
+    }
+
+    // Process Horizontal Cuts
+    if (cutsY > 0) {
+        const step = height / (cutsY + 1);
+        for(let i=1; i<=cutsY; i++) {
+            optimizeCut((minX + maxX)/2, minY + step * i, false);
+        }
+    }
+
+    // 3. FINAL VALIDATION
+    if (generatedShapes.length === 0 && (cutsX > 0 || cutsY > 0)) {
+        return { success: false, shapes: [], maxExcess: Infinity, debugLines };
+    }
+
+    // Create mock footprint to check total result
+    const mockFp = { ...footprint, shapes: [...footprint.shapes.filter(s=>s.type==="boardOutline"), ...generatedShapes] };
+    const sizeCheck = checkSplitPartSizes(mockFp, params, allFootprints, bedSize);
+
+    return { 
+        success: sizeCheck.maxExcess < 1.0, 
+        shapes: generatedShapes, 
+        maxExcess: sizeCheck.maxExcess,
+        debugLines 
+    };
 }
 
 export interface Rect { x1: number, y1: number, x2: number, y2: number }

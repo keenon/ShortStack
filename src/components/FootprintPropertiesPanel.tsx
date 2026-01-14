@@ -871,6 +871,20 @@ const FootprintPropertiesPanel = ({
                 <label>Dovetail Width (mm)</label>
                 <ExpressionEditor value={sl.dovetailWidth} onChange={(v) => updateShape(sl.id, "dovetailWidth", v)} params={params} placeholder="10" />
             </div>
+            <div className="prop-group">
+                <label>Dovetail Height (mm)</label>
+                <ExpressionEditor value={(sl as any).dovetailHeight} onChange={(v) => updateShape(sl.id, "dovetailHeight", v)} params={params} placeholder="Auto" />
+            </div>
+            <div className="prop-group">
+                <label className="checkbox-label">
+                    <input 
+                        type="checkbox" 
+                        checked={!!(sl as any).flip} 
+                        onChange={(e) => updateShape(sl.id, "flip", e.target.checked)} 
+                    />
+                    Flip Dovetails
+                </label>
+            </div>
             <div className="prop-section">
                 <h4>Position</h4>
                 <div className="prop-group">

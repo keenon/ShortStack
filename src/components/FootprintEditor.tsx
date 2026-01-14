@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText, FootprintSplitLine } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments , checkSplitPartSizes, findSafeSplitLine, collectGlobalObstacles } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments , checkSplitPartSizes, findSafeSplitLine, collectGlobalObstacles, autoComputeSplit } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
@@ -307,6 +307,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   
   const splitStart = useRef<{x:number, y:number} | null>(null);
   const [splitPreview, setSplitPreview] = useState<{x1:number, y1:number, x2:number, y2:number} | null>(null);
+  const [debugLines, setDebugLines] = useState<any[]>([]); // New Debug State
 
   // Rotation State
   const [rotationGuide, setRotationGuide] = useState<{ center: {x:number, y:number}, current: {x:number, y:number} } | null>(null);
@@ -2086,6 +2087,7 @@ const handleUngroup = (unionId: string) => {
                 setSplitPreview(null);
                 splitStart.current = null;
                 setProcessingMessage(null);
+                setDebugLines([]);
             } else {
                 // Standard behavior: Clear selection if not in tool
                 setSelectedShapeIds([]);
@@ -2797,6 +2799,51 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         onChange={e => handleBedChange('height', e.target.value)} 
                         title="Print Bed Height" 
                     />
+                                        <button 
+                        style={{marginLeft:'10px', fontSize:'0.9em', background: '#2d4b38', border:'1px solid #487e5b'}}
+                        onClick={async () => {
+                            if (!footprint.isBoard) { alert("Please enable 'Standalone Board' first."); return; }
+                            
+                            setProcessingMessage("Running Global Search...");
+                            
+                            // Yield to UI to show spinner
+                            await new Promise(resolve => setTimeout(resolve, 50));
+
+                            const res = autoComputeSplit(
+                                footprint, allFootprints, params, stackup, 
+                                bedSize, { clearance: 2, desiredCuts: 1 }, 
+                                splitToolOptions.ignoredLayerIds
+                            );
+                            
+                            setProcessingMessage(null);
+                            
+                            if (res.success && res.shapes && res.shapes.length > 0) {
+                                // Add all generated split lines
+                                const newIds = res.shapes.map(s => s.id);
+                                updateHistory({ 
+                                    footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                                    selectedShapeIds: newIds
+                                });
+                            } else {
+                                if (res.shapes && res.shapes.length > 0) {
+                                     // Use browser confirm (blocking but safe here)
+                                     const confirm = window.confirm(`Could not find a perfect fit (Excess: ${res.maxExcess?.toFixed(1)}mm). Add best approximation?`);
+                                     if (confirm) {
+                                        const newIds = res.shapes.map(s => s.id);
+                                        updateHistory({ 
+                                            footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                                            selectedShapeIds: newIds
+                                        });
+                                     }
+                                } else {
+                                    alert("Global search failed completely.");
+                                }
+                            }
+                            if (res.debugLines) setDebugLines(res.debugLines);
+                        }}
+                    >
+                        Auto-Split
+                    </button>
                 </div>
             );
         })()}
@@ -3090,6 +3137,15 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         );
                     })}
 
+                    {debugLines.map((l, i) => (
+                        <line key={'dbg'+i}
+                            x1={l.x1} y1={-l.y1} x2={l.x2} y2={-l.y2}
+                            stroke={l.color || "rgba(255,255,0,0.5)"}
+                            strokeWidth={1}
+                            vectorEffect="non-scaling-stroke"
+                            pointerEvents="none"
+                        />
+                    ))}
                     {splitPreview && (
                         <line 
                             x1={splitPreview.x1} y1={splitPreview.y1} 
