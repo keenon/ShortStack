@@ -85,3 +85,11 @@ export const IconGrip = ({ className }: { className?: string }) => (
         <path d="M9 3H11V21H9V3ZM13 3H15V21H13V3Z" />
     </svg>
 );
+
+export const IconSplit = ({ size = 16, className = "" }: any) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <line x1="4" y1="20" x2="20" y2="4" />
+    <path d="M14 4l6 0l0 6" />
+    <path d="M4 14l0 6l6 0" />
+  </svg>
+);

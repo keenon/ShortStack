@@ -31,6 +31,7 @@ interface Props {
   onLayerVolumeCalculated?: (layerId: string, volumeMm3: number) => void;
   // NEW: Optional Custom Stackup for Waterline Visualization
   customStack?: { layer: StackupLayer, footprint: Footprint }[];
+  layerSplitSettings?: Record<string, { enabled: boolean, lineIds?: string[] }>;
 }
 
 export interface Footprint3DViewHandle {
@@ -158,7 +159,8 @@ const LayerSolid = ({
   onProgress,
   registerMesh,
   onLoad, // NEW: Completion callback
-  onVolumeCalculated
+  onVolumeCalculated,
+  layerSplitSettings
 }: {
   layer: StackupLayer;
   footprint: Footprint;
@@ -174,6 +176,7 @@ const LayerSolid = ({
   registerMesh?: (id: string, mesh: THREE.Mesh | null) => void;
   onLoad?: (id: string) => void;
   onVolumeCalculated?: (layerId: string, volume: number) => void;
+  layerSplitSettings?: Record<string, { enabled: boolean, lineIds?: string[] }>;
 }) => {
   // UPDATED: Origin Logic
   // We force center to 0,0 to match the 2D View's origin (0,0).
@@ -200,6 +203,8 @@ const LayerSolid = ({
     // Initial Progress
     onProgress(layer.id, 0.01, `Layer ${layer.name}: Queued...`);
 
+    const splitSettings = layerSplitSettings?.[layer.id];
+
     callWorker("computeLayer", {
         layer, 
         footprint, 
@@ -210,7 +215,9 @@ const LayerSolid = ({
         bounds,
         layerIndex,
         totalLayers,
-        resolution
+        resolution,
+        enableSplit: splitSettings?.enabled || false,
+        splitLineIds: splitSettings?.lineIds
     }, (p) => {
         if (!cancelled && onProgress) {
              onProgress(layer.id, p.percent, p.message);
@@ -263,7 +270,7 @@ const LayerSolid = ({
     });
 
     return () => { cancelled = true; };
-  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds, layerIndex, totalLayers, resolution]);
+  }, [layer, footprint, allFootprints, params, bottomZ, thickness, bounds, layerIndex, totalLayers, resolution, layerSplitSettings?.[layer.id]]);
 
   return (
     <mesh 
@@ -610,7 +617,7 @@ const MeshObject = ({
     );
 };
 
-const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh, onLayerVolumeCalculated, customStack, toolpaths }, ref) => {
+const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, allFootprints, params, stackup, meshAssets, visibleLayers, is3DActive, selectedId, onSelect, onUpdateMesh, onLayerVolumeCalculated, customStack, toolpaths, layerSplitSettings }, ref) => {
   const controlsRef = useRef<any>(null);
   const meshRefs = useRef<Record<string, THREE.Mesh>>({});
   const assetRefs = useRef<Record<string, THREE.Mesh>>({});
@@ -1026,6 +1033,7 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
                   }}
                   onLoad={handleLayerLoad} // COMPLETE CALLBACK
                   onVolumeCalculated={onLayerVolumeCalculated}
+                  layerSplitSettings={layerSplitSettings}
                 />
               ) : null;
 

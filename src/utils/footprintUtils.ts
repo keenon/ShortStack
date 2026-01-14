@@ -1,7 +1,7 @@
 // src/utils/footprintUtils.ts
 import { create, all } from "mathjs";
 import * as THREE from "three"; // Added THREE import
-import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine, FootprintPolygon, FootprintCircle } from "../types";
+import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine, FootprintPolygon, FootprintCircle, FootprintSplitLine } from "../types";
 
 // --- CUSTOM MATHJS INSTANCE ---
 export const math = create(all);
@@ -286,7 +286,711 @@ export const calcMid = (v1: string, v2: string) => {
     return `(${v1} + ${v2}) / 2`;
 };
 
-// NEW: AABB Interface
+// --- GEOMETRY UTILS FOR SPLITTING ---
+
+// Generate points for a dovetail cut line
+export function generateDovetailPoints(
+    startX: number, startY: number, 
+    endX: number, endY: number, 
+    count: number, 
+    width: number
+): {x: number, y: number}[] {
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const len = Math.sqrt(dx*dx + dy*dy);
+    if (len < 0.001) return [{x:startX, y:startY}];
+
+    const ux = dx / len;
+    const uy = dy / len;
+    // Perpendicular vector
+    const px = -uy;
+    const py = ux;
+
+    const points = [];
+    points.push({x: startX, y: startY});
+
+    // Dovetail geometric constants
+    // Trapezoid shape: Neck width 'width', Head width 'width * 1.5', Height 'width * 0.8'
+    const neckW = width;
+    const headW = width * 1.5;
+    const height = width * 0.8;
+    const segmentLen = len / count;
+
+    for (let i = 0; i < count; i++) {
+        // Center of this segment along the line
+        const centerDist = (i + 0.5) * segmentLen;
+        const centerX = startX + ux * centerDist;
+        const centerY = startY + uy * centerDist;
+
+        // Base of trapezoid on the line
+        const baseStartDist = centerDist - neckW / 2;
+        const baseEndDist = centerDist + neckW / 2;
+
+        // Start of neck
+        points.push({
+            x: startX + ux * baseStartDist,
+            y: startY + uy * baseStartDist
+        });
+
+        // Outward head corners
+        points.push({
+            x: centerX - ux * (headW / 2) + px * height,
+            y: centerY - uy * (headW / 2) + py * height
+        });
+        points.push({
+            x: centerX + ux * (headW / 2) + px * height,
+            y: centerY + uy * (headW / 2) + py * height
+        });
+
+        // End of neck
+        points.push({
+            x: startX + ux * baseEndDist,
+            y: startY + uy * baseEndDist
+        });
+    }
+
+    points.push({x: endX, y: endY});
+    return points;
+}
+
+// Function to find an optimal split line avoiding holes
+
+
+// --- SPLIT LINE LOGIC ---
+
+export type Obstacle = 
+  | { type: 'circle', x: number, y: number, r: number, isThrough: boolean }
+  | { type: 'poly', points: {x:number, y:number}[], isThrough: boolean };
+
+/**
+ * Recursively collects all physical features that should be avoided by a split line.
+ * Distinguishes between "Through Holes" (critical avoidance) and "Channels/Pockets" (dovetail avoidance).
+ */
+export function collectGlobalObstacles(
+    shapes: FootprintShape[],
+    params: Parameter[],
+    allFootprints: Footprint[],
+    stackup: StackupLayer[],
+    transform = { x: 0, y: 0, angle: 0 },
+    contextFootprint?: Footprint,
+    ignoredLayerIds: string[] = []
+): Obstacle[] {
+    let obstacles: Obstacle[] = [];
+    const rad = transform.angle * (Math.PI / 180);
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    const ctx = contextFootprint || { id: "unknown", name: "unknown", shapes: [], isBoard: false } as any;
+
+    for (const s of shapes) {
+        // 1. Calculate Shape's Origin in World Space relative to Container
+        const lx = (s.type === "line") ? 0 : evaluateExpression((s as any).x, params);
+        const ly = (s.type === "line") ? 0 : evaluateExpression((s as any).y, params);
+        const la = (s.type === "rect" || s.type === "footprint" || s.type === "union") 
+            ? evaluateExpression((s as any).angle, params) : 0;
+
+        // Apply Container Transform (transform.x/y/angle) to Shape Origin (lx, ly)
+        const gx = transform.x + (lx * cos - ly * sin);
+        const gy = transform.y + (lx * sin + ly * cos);
+        const gAngle = transform.angle + la;
+
+        // 2. RECURSE (References & Unions)
+        if (s.type === "footprint") {
+            const ref = s as FootprintReference;
+            const target = allFootprints.find(f => f.id === ref.footprintId);
+            if (target) {
+                obstacles = obstacles.concat(collectGlobalObstacles(
+                    target.shapes, params, allFootprints, stackup, 
+                    { x: gx, y: gy, angle: gAngle },
+                    target,
+                    ignoredLayerIds
+                ));
+            }
+            continue;
+        }
+
+        if (s.type === "union") {
+            const u = s as FootprintUnion;
+            obstacles = obstacles.concat(collectGlobalObstacles(
+                u.shapes, params, allFootprints, stackup,
+                { x: gx, y: gy, angle: gAngle },
+                ctx,
+                ignoredLayerIds
+            ));
+            continue;
+        }
+
+        // 3. CHECK DEPTH (Is this an obstacle?)
+        let isThrough = false;
+        let isCut = false;
+        if (s.type === "boardOutline" || s.type === "wireGuide") continue;
+        
+        if (s.assignedLayers) {
+            for (const layer of stackup) {
+                if (ignoredLayerIds.includes(layer.id)) continue;
+                const assign = s.assignedLayers[layer.id];
+                if (assign) {
+                    const layerThick = evaluateExpression(layer.thicknessExpression, params);
+                    let cutDepth = 0;
+                    if (layer.type === "Cut") cutDepth = layerThick;
+                    else {
+                        const val = evaluateExpression(typeof assign === 'object' ? assign.depth : assign, params);
+                        cutDepth = Math.max(0, val);
+                    }
+                    if (cutDepth > 0) isCut = true;
+                    if (cutDepth >= layerThick - 0.001) {
+                        isThrough = true;
+                    }
+                }
+            }
+        }
+
+        // Only care about cuts (ignore text/guides)
+        if (!isCut || !isThrough) continue; // For now, only consider through holes as obstacles
+        // 4. GENERATE GEOMETRY
+        // Rotation helpers for points inside the shape
+        const sRad = gAngle * (Math.PI / 180);
+        const sCos = Math.cos(sRad);
+        const sSin = Math.sin(sRad);
+
+        // Helper: Transform Point Local->World
+        // px, py are strictly local to the shape's own coordinate system
+        const toGlobal = (px: number, py: number) => ({
+            x: gx + (px * sCos - py * sSin),
+            y: gy + (px * sSin + py * sCos)
+        });
+
+        if (s.type === "circle") {
+            const r = evaluateExpression((s as any).diameter, params) / 2;
+            obstacles.push({ type: 'circle', x: gx, y: gy, r, isThrough });
+        }
+        else if (s.type === "rect") {
+            const w = evaluateExpression((s as any).width, params);
+            const h = evaluateExpression((s as any).height, params);
+            const hw = w/2; const hh = h/2;
+            const pts = [
+                toGlobal(hw, hh), toGlobal(-hw, hh), toGlobal(-hw, -hh), toGlobal(hw, -hh)
+            ];
+            obstacles.push({ type: 'poly', points: pts, isThrough });
+        }
+        else if (s.type === "line") {
+            const th = evaluateExpression((s as any).thickness, params);
+            if (th <= 0.001) continue;
+            
+            const rawPts = (s as any).points || [];
+            if (rawPts.length < 2) continue;
+
+            const globalPts = rawPts.map((p: any) => {
+                const res = resolvePoint(p, ctx, allFootprints, params, { x: gx, y: gy, angle: gAngle });
+                return toGlobal(res.x, res.y);
+            });
+
+            const half = th / 2;
+
+            for (let i = 0; i < globalPts.length - 1; i++) {
+                const p1 = globalPts[i];
+                const p2 = globalPts[i+1];
+
+                const dx = p2.x - p1.x;
+                const dy = p2.y - p1.y;
+                const len = Math.sqrt(dx*dx + dy*dy);
+                if (len <= 0.001) continue;
+
+                const nx = -dy / len * half;
+                const ny = dx / len * half;
+
+                // Create 4 corners of the segment box in World Space
+                const corners = [
+                    { x: p1.x + nx, y: p1.y + ny },
+                    { x: p2.x + nx, y: p2.y + ny },
+                    { x: p2.x - nx, y: p2.y - ny },
+                    { x: p1.x - nx, y: p1.y - ny }
+                ];
+
+                obstacles.push({ type: 'poly', points: corners, isThrough });
+            }
+        }
+        else if (s.type === "polygon") {
+            const rawPts = (s as any).points || [];
+            if (rawPts.length < 3) continue;
+            
+            // UPDATED: Use resolvePoint for Polygons as well
+            const polyPoints = rawPts.map((p: any) => {
+                const res = resolvePoint(p, ctx, allFootprints, params, { x: gx, y: gy, angle: gAngle });
+                return toGlobal(res.x, res.y);
+            });
+            
+            obstacles.push({ type: 'poly', points: polyPoints, isThrough });
+        }
+    }
+    return obstacles;
+}
+
+export function getTessellatedBoardOutline(
+    footprint: Footprint, 
+    params: Parameter[], 
+    allFootprints: Footprint[]
+): {x: number, y: number}[] {
+    const outlinePoints: {x:number, y:number}[] = [];
+    
+    footprint.shapes.forEach(s => {
+        if (s.type === "boardOutline") {
+            const bx = evaluateExpression(s.x, params);
+            const by = evaluateExpression(s.y, params);
+            const rawPts = s.points || [];
+            
+            if (rawPts.length < 3) return;
+
+            for (let i = 0; i < rawPts.length; i++) {
+                const p1Raw = rawPts[i];
+                const p2Raw = rawPts[(i + 1) % rawPts.length];
+
+                // Resolve P1
+                const res1 = resolvePoint(p1Raw, footprint, allFootprints, params, {x:0, y:0, angle:0});
+                const x1 = bx + res1.x;
+                const y1 = by + res1.y;
+                outlinePoints.push({ x: x1, y: y1 });
+
+                // Resolve P2 for curve check
+                const res2 = resolvePoint(p2Raw, footprint, allFootprints, params, {x:0, y:0, angle:0});
+                
+                // Tessellate curves
+                if (res1.handleOut || res2.handleIn) {
+                    const x2 = bx + res2.x;
+                    const y2 = by + res2.y;
+                    const cp1x = x1 + (res1.handleOut ? res1.handleOut.x : 0);
+                    const cp1y = y1 + (res1.handleOut ? res1.handleOut.y : 0);
+                    const cp2x = x2 + (res2.handleIn ? res2.handleIn.x : 0);
+                    const cp2y = y2 + (res2.handleIn ? res2.handleIn.y : 0);
+
+                    const steps = 16; 
+                    for(let k=1; k<steps; k++) {
+                        const t = k/steps;
+                        outlinePoints.push({
+                            x: bezier1D(x1, cp1x, cp2x, x2, t),
+                            y: bezier1D(y1, cp1y, cp2y, y2, t)
+                        });
+                    }
+                }
+            }
+        }
+    });
+    return outlinePoints;
+}
+
+export function checkSplitPartSizes(
+    footprint: Footprint,
+    params: Parameter[],
+    allFootprints: Footprint[],
+    bedSize: { width: number, height: number }
+): { parts: { valid: boolean, corners: {x:number, y:number}[], hull: {x:number, y:number}[] }[] } {
+    
+    // 1. Get Board Outline Points
+    const outlinePoints = getTessellatedBoardOutline(footprint, params, allFootprints);
+    if (outlinePoints.length < 3) return { parts: [] };
+
+    // 2. Identify All Split Lines
+    const splitLines = footprint.shapes.filter(s => s.type === "splitLine") as FootprintSplitLine[];
+    if (splitLines.length === 0) return { parts: [] };
+
+    // Pre-calculate line definitions (Start, Vector, Dovetail Points, Boundary Points)
+    const lineDefs = splitLines.map(sl => {
+        const sx = evaluateExpression(sl.x, params);
+        const sy = evaluateExpression(sl.y, params);
+        const ex = sx + evaluateExpression(sl.endX, params);
+        const ey = sy + evaluateExpression(sl.endY, params);
+        const count = Math.round(evaluateExpression(sl.dovetailCount, params));
+        const width = evaluateExpression(sl.dovetailWidth, params);
+        const dx = ex - sx; 
+        const dy = ey - sy;
+        const len = Math.sqrt(dx*dx + dy*dy);
+        const axisX = len > 0 ? dx/len : 1;
+        const axisY = len > 0 ? dy/len : 0;
+        
+        // Generate cut geometry (dovetail points)
+        const dovetailPts = generateDovetailPoints(sx, sy, ex, ey, count, width);
+        
+        const boundaryPoints: {x:number, y:number}[] = [];
+
+        // A. Inner Dovetails
+        dovetailPts.forEach(p => {
+            if (isPointInPolygon(p, outlinePoints)) boundaryPoints.push(p);
+        });
+
+        // B. Intersections with Outline (Critical for correct Hull)
+        const farStart = { x: sx - axisX * 10000, y: sy - axisY * 10000 };
+        const farEnd = { x: ex + axisX * 10000, y: ey + axisY * 10000 };
+        const cutPath = [farStart, ...dovetailPts, farEnd];
+
+        for (let i = 0; i < cutPath.length - 1; i++) {
+            const c1 = cutPath[i];
+            const c2 = cutPath[i+1];
+            for (let j = 0; j < outlinePoints.length; j++) {
+                const o1 = outlinePoints[j];
+                const o2 = outlinePoints[(j + 1) % outlinePoints.length];
+                const hit = getSegmentIntersection(c1, c2, o1, o2);
+                if (hit) boundaryPoints.push(hit);
+            }
+        }
+
+        return { sx, sy, axisX, axisY, boundaryPoints };
+    });
+
+    // 3. Bin Points by "Side Signature"
+    const pointBins = new Map<number, {x:number, y:number}[]>();
+
+    // Helper to get side (0 or 1)
+    const getSide = (p: {x:number, y:number}, lineIdx: number) => {
+        const l = lineDefs[lineIdx];
+        const cross = (p.x - l.sx) * l.axisY - (p.y - l.sy) * l.axisX;
+        return cross >= 0 ? 0 : 1;
+    };
+
+    // A. Bin Outline Points
+    outlinePoints.forEach(p => {
+        let mask = 0;
+        for(let i=0; i<lineDefs.length; i++) {
+            if (getSide(p, i) === 1) mask |= (1 << i);
+        }
+        if (!pointBins.has(mask)) pointBins.set(mask, []);
+        pointBins.get(mask)!.push(p);
+    });
+
+    // B. Bin Boundary Points (Intersections + Inner Dovetails)
+    lineDefs.forEach((l, k) => {
+        l.boundaryPoints.forEach(p => {
+            let baseMask = 0;
+            // Calculate mask for all OTHER lines
+            for(let j=0; j<lineDefs.length; j++) {
+                if (j === k) continue;
+                if (getSide(p, j) === 1) baseMask |= (1 << j);
+            }
+            
+            // Add to both buckets for Line K (0 and 1)
+            const mask0 = baseMask; // Bit k is 0
+            const mask1 = baseMask | (1 << k); // Bit k is 1
+
+            if (!pointBins.has(mask0)) pointBins.set(mask0, []);
+            pointBins.get(mask0)!.push(p);
+
+            if (!pointBins.has(mask1)) pointBins.set(mask1, []);
+            pointBins.get(mask1)!.push(p);
+        });
+    });
+
+    // 4. Compute Hulls for each bin
+    const results: any[] = [];
+    
+    pointBins.forEach((pts, mask) => {
+        if (pts.length < 3) return;
+
+        const hull = computeConvexHull(pts);
+        
+        let minArea = Infinity;
+        let bestCorners: {x:number, y:number}[] = [];
+        let bestW = 0, bestH = 0;
+
+        for (let i = 0; i < hull.length; i++) {
+            const p1 = hull[i];
+            const p2 = hull[(i + 1) % hull.length];
+            const dx = p2.x - p1.x;
+            const dy = p2.y - p1.y;
+            const len = Math.sqrt(dx*dx + dy*dy);
+            if (len < 1e-6) continue;
+
+            const ux = dx / len;
+            const uy = dy / len;
+            const vx = -uy;
+            const vy = ux;
+
+            let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+            for (const p of hull) {
+                const u = p.x * ux + p.y * uy;
+                const v = p.x * vx + p.y * vy;
+                minU = Math.min(minU, u); maxU = Math.max(maxU, u);
+                minV = Math.min(minV, v); maxV = Math.max(maxV, v);
+            }
+
+            const w = maxU - minU;
+            const h = maxV - minV;
+            const area = w * h;
+
+            if (area < minArea) {
+                minArea = area;
+                bestW = w;
+                bestH = h;
+                
+                const toWorld = (u: number, v: number) => ({
+                    x: u * ux + v * vx,
+                    y: u * uy + v * vy
+                });
+                
+                bestCorners = [
+                    toWorld(minU, minV),
+                    toWorld(maxU, minV),
+                    toWorld(maxU, maxV),
+                    toWorld(minU, maxV)
+                ];
+            }
+        }
+
+        const fits = (bestW <= bedSize.width + 1 && bestH <= bedSize.height + 1) || 
+                     (bestW <= bedSize.height + 1 && bestH <= bedSize.width + 1);
+
+        results.push({ valid: fits, corners: bestCorners, hull });
+    });
+
+    return { parts: results };
+}
+
+// Helper to find intersection point of two line segments
+function getSegmentIntersection(p0: {x:number, y:number}, p1: {x:number, y:number}, p2: {x:number, y:number}, p3: {x:number, y:number}): {x:number, y:number} | null {
+    const s1_x = p1.x - p0.x;     const s1_y = p1.y - p0.y;
+    const s2_x = p3.x - p2.x;     const s2_y = p3.y - p2.y;
+    const denom = -s2_x * s1_y + s1_x * s2_y;
+    
+    if (Math.abs(denom) < 1e-6) return null; // Collinear or parallel
+
+    const s = (-s1_y * (p0.x - p2.x) + s1_x * (p0.y - p2.y)) / denom;
+    const t = ( s2_x * (p0.y - p2.y) - s2_y * (p0.x - p2.x)) / denom;
+
+    if (s >= 0 && s <= 1 && t >= 0 && t <= 1) {
+        return {
+            x: p0.x + (t * s1_x),
+            y: p0.y + (t * s1_y)
+        };
+    }
+    return null;
+}
+
+// Helper: Monotone Chain Convex Hull
+function computeConvexHull(points: {x:number, y:number}[]): {x:number, y:number}[] {
+    if (points.length <= 3) return points;
+    
+    // Remove duplicates to prevent issues with sorting/stack
+    const unique = points.filter((p, i, a) => a.findIndex(t => Math.abs(t.x-p.x) < 1e-4 && Math.abs(t.y-p.y) < 1e-4) === i);
+    if (unique.length < 3) return unique;
+
+    const sorted = unique.sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+    
+    const cross = (o: any, a: any, b: any) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    
+    const lower: {x:number, y:number}[] = [];
+    for (const p of sorted) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+            lower.pop();
+        }
+        lower.push(p);
+    }
+    
+    const upper: {x:number, y:number}[] = [];
+    for (const p of sorted.slice().reverse()) {
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+            upper.pop();
+        }
+        upper.push(p);
+    }
+    
+    lower.pop();
+    upper.pop();
+    return lower.concat(upper);
+}
+
+function isPointInPolygon(p: {x:number, y:number}, polygon: {x:number, y:number}[]): boolean {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i].x, yi = polygon[i].y;
+        const xj = polygon[j].x, yj = polygon[j].y;
+        
+        const intersect = ((yi > p.y) !== (yj > p.y))
+            && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
+
+export function findSafeSplitLine(
+    footprint: Footprint,
+    allFootprints: Footprint[],
+    params: Parameter[],
+    stackup: StackupLayer[],
+    startUser: {x:number, y:number},
+    endUser: {x:number, y:number},
+    bedSize?: { width: number, height: number },
+    options: { searchRadius: number, angleRange: number } = { searchRadius: 20, angleRange: 5 },
+    ignoredLayerIds: string[] = []
+): { result: { start: {x:number, y:number}, end: {x:number, y:number}, count: number } | null, debugLines: any[] } {
+    
+    // 1. Collect all obstacles & Outline
+    const obstacles = collectGlobalObstacles(footprint.shapes, params, allFootprints, stackup, {x:0, y:0, angle:0}, footprint, ignoredLayerIds);
+    const outlinePoints = getTessellatedBoardOutline(footprint, params, allFootprints);
+    
+    // User desired orientation and center
+    const dx = endUser.x - startUser.x;
+    const dy = endUser.y - startUser.y;
+    // const len = Math.sqrt(dx*dx + dy*dy); // Ignored, we calculate based on board intersection
+    const angleBase = Math.atan2(dy, dx);
+    const midX = (startUser.x + endUser.x) / 2;
+    const midY = (startUser.y + endUser.y) / 2;
+
+    let bestScore = -Infinity;
+    let bestResult: { start: {x:number, y:number}, end: {x:number, y:number}, count: number } | null = null;
+    const debugLines: any[] = [];
+
+    // Helper: Distance from segment AB to Point P
+    const distToSegment = (p: {x:number, y:number}, a: {x:number, y:number}, b: {x:number, y:number}) => {
+        const l2 = (a.x-b.x)**2 + (a.y-b.y)**2;
+        if (l2 === 0) return Math.sqrt((p.x-a.x)**2 + (p.y-a.y)**2);
+        let t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2;
+        t = Math.max(0, Math.min(1, t));
+        const projX = a.x + t * (b.x - a.x);
+        const projY = a.y + t * (b.y - a.y);
+        return Math.sqrt((p.x - projX)**2 + (p.y - projY)**2);
+    };
+
+    // Helper: Check intersection/proximity
+    const checkClearance = (p1: {x:number, y:number}, p2: {x:number, y:number}, checkChannels: boolean) => {
+        let minClearance = Infinity;
+        for (const obs of obstacles) {
+            if (!obs.isThrough) continue;
+            if (obs.type === 'circle') {
+                const d = distToSegment(obs, p1, p2);
+                minClearance = Math.min(minClearance, d - obs.r);
+            } 
+            if (!checkChannels) continue;
+            if (obs.type === 'poly') {
+                for(const v of obs.points) {
+                    const d = distToSegment(v, p1, p2);
+                    minClearance = Math.min(minClearance, d);
+                }
+                for(let i=0; i<obs.points.length; i++) {
+                     const v1 = obs.points[i];
+                     const v2 = obs.points[(i+1)%obs.points.length];
+                     if (doSegmentsIntersect(p1, p2, v1, v2)) return -1.0;
+                }
+            }
+        }
+        return minClearance;
+    };
+
+    // Parameters
+    const angleRangeRad = options.angleRange * (Math.PI / 180);
+    const angleStep = 1 * (Math.PI / 180); // 1 degree steps
+    
+    // Perpendicular Offset Search
+    const offsetRange = options.searchRadius; 
+    const offsetStep = 2;
+    const offsetStepsCount = Math.floor(offsetRange / offsetStep);
+
+    // Longitudinal Slide Search
+    const slideRange = 16; 
+    const slideStep = 2;
+    const slideStepsCount = Math.floor(slideRange / slideStep);
+
+    const angleStepsCount = Math.floor(angleRangeRad / angleStep);
+
+    // Optimization: Pre-calculate bounding box center of outline for rough rejection? 
+    // Not needed, outline intersection check is fast enough for <1k iterations.
+
+    for (let c = 1; c <= 3; c++) {
+        for (let a = -angleStepsCount; a <= angleStepsCount; a++) {
+            const angOffset = a * angleStep;
+            const candAngle = angleBase + angOffset;
+            const uX = Math.cos(candAngle);
+            const uY = Math.sin(candAngle);
+            const pX = -uY; 
+            const pY = uX;
+
+            for (let o = -offsetStepsCount; o <= offsetStepsCount; o++) {
+                const offDist = o * offsetStep;
+                const baseMidX = midX + pX * offDist;
+                const baseMidY = midY + pY * offDist;
+
+                for (let s = -slideStepsCount; s <= slideStepsCount; s++) {
+                    const sDist = s * slideStep;
+                    const cMidX = baseMidX + uX * sDist;
+                    const cMidY = baseMidY + uY * sDist;
+
+                    // 1. CALCULATE INTERSECTION WITH BOARD OUTLINE
+                    // Construct infinite line farStart -> farEnd
+                    const farStart = { x: cMidX - uX * 10000, y: cMidY - uY * 10000 };
+                    const farEnd = { x: cMidX + uX * 10000, y: cMidY + uY * 10000 };
+                    
+                    let minT = Infinity;
+                    let maxT = -Infinity;
+                    let hits = 0;
+
+                    if (outlinePoints.length > 2) {
+                        for (let i = 0; i < outlinePoints.length; i++) {
+                            const o1 = outlinePoints[i];
+                            const o2 = outlinePoints[(i + 1) % outlinePoints.length];
+                            const inter = getSegmentIntersection(farStart, farEnd, o1, o2);
+                            if (inter) {
+                                hits++;
+                                // Project intersection onto line axis relative to cMid
+                                const t = (inter.x - cMidX) * uX + (inter.y - cMidY) * uY;
+                                if (t < minT) minT = t;
+                                if (t > maxT) maxT = t;
+                            }
+                        }
+                    }
+
+                    // Must intersect board at least twice (enter and exit)
+                    if (hits < 2 || minT === Infinity) continue; 
+
+                    // 2. DEFINE SMART LENGTH RELATIVE TO SLIDE CENTER
+                    // We must center the line at cMid (where the dovetails are generated)
+                    // but make it long enough to cover the board limits (minT, maxT).
+                    // T is relative to cMid.
+                    const maxDistFromCenter = Math.max(Math.abs(minT), Math.abs(maxT));
+                    const halfLen = maxDistFromCenter * 1.2 + 10; // +10mm padding
+                    
+                    const cStart = { 
+                        x: cMidX - uX * halfLen, 
+                        y: cMidY - uY * halfLen 
+                    };
+                    const cEnd = { 
+                        x: cMidX + uX * halfLen, 
+                        y: cMidY + uY * halfLen 
+                    };
+
+                    // 3. CHECK CLEARANCE (using infinite extension for axis check)
+                    const axisClearance = checkClearance(farStart, farEnd, false);
+                    if (axisClearance < 0.5) continue; 
+
+                    // 4. CHECK DOVETAILS
+                    const width = 10; 
+                    const pts = generateDovetailPoints(cStart.x, cStart.y, cEnd.x, cEnd.y, c, width);
+                    let dovetailClearance = Infinity;
+                    let valid = true;
+
+                    for(let k=0; k<pts.length-1; k++) {
+                        if (k % 4 === 0) continue; // Skip straight segments
+                        const cl = checkClearance(pts[k], pts[k+1], true); 
+                        if (cl < 0.5) { valid = false; break; }
+                        dovetailClearance = Math.min(dovetailClearance, cl);
+                    }
+
+                    if (valid) {
+                        let score = (dovetailClearance === Infinity ? 20 : Math.min(dovetailClearance, 20)) * 5;
+                        score -= c * 40; 
+                        score -= Math.abs(offDist) * 1.0; 
+                        score -= Math.abs(sDist) * 0.8;
+                        score -= Math.abs(a) * 10; 
+                        
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestResult = { start: cStart, end: cEnd, count: c };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return { result: bestResult, debugLines };
+}
+
 export interface Rect { x1: number, y1: number, x2: number, y2: number }
 
 // NEW: Check if two rectangles intersect
@@ -381,6 +1085,27 @@ export function getShapeAABB(
             }
         });
         return valid ? { x1: minX, y1: minY, x2: maxX, y2: maxY } : null;
+    }
+
+    if (shape.type === "splitLine") {
+        // Simple AABB for split line
+        // It's defined by x,y and endX,endY
+        const sl = shape as FootprintSplitLine;
+        const x1 = evaluateExpression(sl.x, params);
+        const y1 = evaluateExpression(sl.y, params);
+        const x2 = x1 + evaluateExpression(sl.endX, params);
+        const y2 = y1 + evaluateExpression(sl.endY, params);
+        
+        // Transform to Global
+        const p1x = pX + (x1 * cos - y1 * sin);
+        const p1y = -(pY + (x1 * sin + y1 * cos));
+        const p2x = pX + (x2 * cos - y2 * sin);
+        const p2y = -(pY + (x2 * sin + y2 * cos));
+        
+        return { 
+            x1: Math.min(p1x, p2x) - 5, y1: Math.min(p1y, p2y) - 5, 
+            x2: Math.max(p1x, p2x) + 5, y2: Math.max(p1y, p2y) + 5 
+        };
     }
 
     if (shape.type === "circle") {

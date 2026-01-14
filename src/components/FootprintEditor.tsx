@@ -2,12 +2,12 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText, FootprintSplitLine } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments , checkSplitPartSizes, findSafeSplitLine, collectGlobalObstacles } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
-import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText } from "./Icons";
+import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
 import { useUndoHistory } from "../hooks/useUndoHistory"; 
 import { collectExportShapesAsync } from "../utils/exportUtils";
@@ -272,6 +272,42 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const selectionStartRef = useRef<{x: number, y: number} | null>(null);
   const selectionCurrentRef = useRef<{x: number, y: number} | null>(null);
 
+  // SPLIT TOOL STATE
+  const [isSplitToolActive, setIsSplitToolActive] = useState(false);
+  const [bedSize, setBedSize] = useState({ width: 250, height: 250 });
+  const [splitToolOptions, setSplitToolOptions] = useState<{ignoredLayerIds: string[]}>({ ignoredLayerIds: [] });
+
+  // Visualization of obstacles for Split Tool
+  const visualObstacles = useMemo(() => {
+    if (isSplitToolActive || (selectedShapeIds.length === 1 && footprint.shapes.find(s => s.id === selectedShapeIds[0])?.type === 'splitLine')) {
+         // Pass 'footprint' as context to correctly resolve local guides
+         let ignored: string[] = splitToolOptions.ignoredLayerIds;
+         
+         // If a specific line is selected, use its settings instead of global defaults
+         if (selectedShapeIds.length === 1) {
+             const sl = footprint.shapes.find(s => s.id === selectedShapeIds[0]);
+             if (sl && sl.type === 'splitLine') {
+                 ignored = (sl as any).ignoredLayerIds || [];
+             }
+         }
+         return collectGlobalObstacles(footprint.shapes, params, allFootprints, stackup, {x:0, y:0, angle:0}, footprint, ignored);
+    }
+    return [];
+  }, [isSplitToolActive, selectedShapeIds, footprint, params, allFootprints, stackup, splitToolOptions]);
+  
+  // Compute Split Parts (Hulls) for the whole board if a split line exists
+  const splitPartHulls = useMemo(() => {
+      // Only show if tool is active OR a split line is selected
+      const hasSelection = selectedShapeIds.some(id => footprint.shapes.find(s => s.id === id && s.type === 'splitLine'));
+      if (!isSplitToolActive && !hasSelection) return [];
+
+      return checkSplitPartSizes(footprint, params, allFootprints, bedSize).parts;
+  }, [footprint, params, allFootprints, bedSize, isSplitToolActive, selectedShapeIds]);
+
+  
+  const splitStart = useRef<{x:number, y:number} | null>(null);
+  const [splitPreview, setSplitPreview] = useState<{x1:number, y1:number, x2:number, y2:number} | null>(null);
+
   // Rotation State
   const [rotationGuide, setRotationGuide] = useState<{ center: {x:number, y:number}, current: {x:number, y:number} } | null>(null);
   const isRotating = useRef(false);
@@ -498,6 +534,20 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (viewMode !== "2D") return;
+
+    if (isSplitToolActive && e.button === 0) {
+        e.stopPropagation();
+        const pos = getMouseWorldPos(e.clientX, e.clientY);
+        // Visual Y is inverted relative to Math Y. Convert to Math Y for logic.
+        const mathPos = { x: pos.x, y: -pos.y };
+        
+        splitStart.current = mathPos;
+        setSplitPreview({ x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y });
+        
+        window.addEventListener('mousemove', handleSplitMouseMove);
+        window.addEventListener('mouseup', handleSplitMouseUp);
+        return;
+    }
     
     // Right Click (2) or Middle Click (1) for PAN
     if (e.button === 1 || e.button === 2) {
@@ -606,7 +656,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                 y: -evaluateExpression(sy, params) // Visual Y is inverted
             });
 
-            if (s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide" || s.type === "union") {
+            if (s.type === "circle" || s.type === "rect" || s.type === "footprint" || s.type === "wireGuide" || s.type === "union" || s.type === "splitLine") {
                 // 1. Calculate Numeric Rotation
                 const origin = getVis(startState.x, startState.y);
                 const rotatedOrigin = rotatePoint(origin, { x: cx, y: cy }, deltaAngleRad);
@@ -645,6 +695,19 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                         x: modifyExpression(h.x, rvhx - hx),
                         y: modifyExpression(h.y, rvhy - hy)
                     };
+                }
+
+                // 6. Handle Split Line Vector Rotation
+                if (s.type === "splitLine") {
+                    const ex = evaluateExpression((startState as any).endX, params);
+                    const ey = evaluateExpression((startState as any).endY, params);
+                    
+                    // Rotate the relative vector (Standard Math rotation, note hCos/hSin uses negative angle)
+                    const nex = ex * hCos - ey * hSin;
+                    const ney = ex * hSin + ey * hCos;
+                    
+                    newProps.endX = modifyExpression((startState as any).endX, nex - ex);
+                    newProps.endY = modifyExpression((startState as any).endY, ney - ey);
                 }
 
                 return { ...s, ...newProps };
@@ -799,6 +862,110 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
     window.removeEventListener('mouseup', handleGlobalMouseUp);
     clickedShapeId.current = null;
   };
+
+  // SPLIT TOOL HANDLERS
+  const handleSplitMouseMove = (e: MouseEvent) => {
+      if (!splitStart.current) return;
+      const pos = getMouseWorldPos(e.clientX, e.clientY);
+      setSplitPreview(prev => prev ? { ...prev, x2: pos.x, y2: pos.y } : null);
+  };
+
+  const handleSplitMouseUp = (e: MouseEvent) => {
+      window.removeEventListener('mousemove', handleSplitMouseMove);
+      window.removeEventListener('mouseup', handleSplitMouseUp);
+      
+      if (!splitStart.current) return;
+      const pos = getMouseWorldPos(e.clientX, e.clientY);
+      const mathEnd = { x: pos.x, y: -pos.y }; // Convert to Math Y
+
+      // SAFETY CHECKS
+      // 1. Minimum Length Check
+      const dist = Math.sqrt((pos.x - splitStart.current.x)**2 + (pos.y - splitStart.current.y)**2); // Visual dist
+      if (dist < 5) {
+          setSplitPreview(null);
+          splitStart.current = null;
+          setIsSplitToolActive(false); // Auto-exit tool
+          return;
+      }
+
+      // 2. Intersection Check (Must touch/cross board AABB at minimum)
+      const aabb = getFootprintAABB(footprintRef.current, params, allFootprints);
+      if (aabb) {
+          // Simple check: does segment intersect bounding box?
+          // We convert mouse pos (Visual Y) to Math Y for check
+          const sMath = { x: splitStart.current!.x, y: splitStart.current!.y };
+          // Check intersection of sMath->mathEnd with aabb (which is Visual Y, so flip AABB Ys or flip Point Ys)
+          // `getFootprintAABB` returns Visual Y. 
+          // `mathEnd` is Math Y. `splitStart` is Math Y.
+          // Let's use Visual Coords for the check since we have `pos` and `splitStart.current` (wait splitStart is Math).
+          // Re-convert splitStart to visual
+          const vStart = { x: splitStart.current!.x, y: -splitStart.current!.y };
+          const vEnd = { x: pos.x, y: pos.y };
+          
+          // Helper to check rect intersection
+          const minX = Math.min(vStart.x, vEnd.x), maxX = Math.max(vStart.x, vEnd.x);
+          const minY = Math.min(vStart.y, vEnd.y), maxY = Math.max(vStart.y, vEnd.y);
+          
+          if (maxX < aabb.x1 || minX > aabb.x2 || maxY < aabb.y1 || minY > aabb.y2) {
+               // Completely outside bounding box
+               setSplitPreview(null);
+               splitStart.current = null;
+            //    setIsSplitToolActive(false); // Auto-exit tool
+               return;
+          }
+      }
+
+      // Run Search Algorithm
+      setProcessingMessage("Computing Optimal Split...");
+
+      setTimeout(() => {
+          // Destructure new return type
+          const { result } = findSafeSplitLine(
+                                footprintRef.current, 
+                                allFootprints, 
+                                params, 
+                                stackup, 
+                                splitStart.current!, 
+                                mathEnd,
+                                bedSize,
+                                undefined, // Default search options
+                                splitToolOptions.ignoredLayerIds // Pass global tool defaults
+                            );
+          if (!result) {
+              alert("Unable to find a valid split line that avoids obstacles. Ensure the line crosses the board.");
+              setSplitPreview(null);
+              setSplitPreview(null);
+              splitStart.current = null;
+              // Do NOT close tool immediately so user can see debug
+              // setIsSplitToolActive(false); 
+              setProcessingMessage(null);
+              return;
+          }
+          const newSplit: FootprintSplitLine = {
+              id: crypto.randomUUID(),
+              type: "splitLine",
+              name: "Fabrication Split",
+              x: result.start.x.toFixed(4),
+              y: result.start.y.toFixed(4),
+              endX: (result.end.x - result.start.x).toFixed(4),
+              endY: (result.end.y - result.start.y).toFixed(4),
+              dovetailCount: result.count.toString(),
+              dovetailWidth: "10", // Default width
+              assignedLayers: {},
+              // Apply current tool options
+              ignoredLayerIds: splitToolOptions.ignoredLayerIds
+          } as FootprintSplitLine;
+
+          updateHistory({ 
+              footprint: { ...footprintRef.current, shapes: [...footprintRef.current.shapes, newSplit] },
+              selectedShapeIds: [newSplit.id]
+          });
+          setProcessingMessage(null);
+          setSplitPreview(null);
+          splitStart.current = null;
+          setIsSplitToolActive(false); // Auto-exit tool on success
+      }, 10);
+  };;
 
   // NEW: Handle Mouse Down on a Tie Down
   const handleTieDownMouseDown = (e: React.MouseEvent, lineId: string, tieDownId: string) => {
@@ -1303,6 +1470,38 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                   }
                   return { ...s, points: newPoints } as any;
               }
+                if (s.type === "splitLine") {
+                  // Dragging Split Line: Calculate tentative position
+                  const tentX = evaluateExpression(startShape.x, params) + dxWorld;
+                  const tentY = evaluateExpression(startShape.y, params) + dyWorldMath;
+                  const endXRel = evaluateExpression((startShape as any).endX, params);
+                  const endYRel = evaluateExpression((startShape as any).endY, params);
+                  
+                  // Run local search for valid snap with rotation
+                  // OPTIMIZATION: Use smaller search radius and angle range during drag
+                  const snapRes = findSafeSplitLine(
+                      footprintRef.current, allFootprints, params, stackup, 
+                      {x: tentX, y: tentY}, 
+                      {x: tentX + endXRel, y: tentY + endYRel},
+                      bedSize,
+                      { searchRadius: 5, angleRange: 5 },
+                      startShape.ignoredLayerIds
+                  );
+
+                  if (snapRes.result) {
+                      return { 
+                          ...s, 
+                          x: snapRes.result.start.x.toFixed(4), 
+                          y: snapRes.result.start.y.toFixed(4),
+                          endX: (snapRes.result.end.x - snapRes.result.start.x).toFixed(4),
+                          endY: (snapRes.result.end.y - snapRes.result.start.y).toFixed(4)
+                      };
+                  }
+                  
+                  // If no valid snap found, do not move. Snap back to original (s).
+                  return s;
+              }
+              
               if (s.type === "line" || s.type === "boardOutline" || s.type === "polygon") {
                   return { ...s, points: (startShape as any).points.map((p: any) => ({ ...p, x: modifyExpression(p.x, dxWorld), y: modifyExpression(p.y, dyWorldMath) })) };
               } 
@@ -1879,6 +2078,18 @@ const handleUngroup = (unionId: string) => {
                     deleteMesh(id);
                 }
             });
+        }
+
+        if (e.key === "Escape") {
+            if (isSplitToolActive) {
+                setIsSplitToolActive(false);
+                setSplitPreview(null);
+                splitStart.current = null;
+                setProcessingMessage(null);
+            } else {
+                // Standard behavior: Clear selection if not in tool
+                setSelectedShapeIds([]);
+            }
         }
     };
 
@@ -2510,6 +2721,11 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
       });
   };
 
+  const getObsColor = (i: number) => {
+        const colors = ["#00ffff", "#ff00ff", "#00ff00", "#ffaa00"]; // Cyan, Magenta, Lime, Orange
+        return colors[i % colors.length];
+    };
+
   return (
     <div className="footprint-editor-container">
       {/* PROCESSING OVERLAY */}
@@ -2538,6 +2754,52 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
         <button onClick={() => addShape("line")}><IconLine /> Line</button>
         <button onClick={() => addShape("wireGuide")}><IconGuide /> Guide</button>
         <button onClick={() => addShape("text")}><IconText /> Comment</button>
+        <button 
+            className={isSplitToolActive ? "active" : ""} 
+            onClick={() => setIsSplitToolActive(!isSplitToolActive)}
+            style={isSplitToolActive ? { background: '#3b5b9d', borderColor: '#646cff', color: 'white' } : {}}
+        >
+            <IconSplit /> Split
+        </button>
+        {(isSplitToolActive || (selectedShapeIds.length === 1 && footprint.shapes.find(s => s.id === selectedShapeIds[0])?.type === 'splitLine')) && (() => {
+            const activeSplit = selectedShapeIds.length === 1 ? footprint.shapes.find(s => s.id === selectedShapeIds[0]) as any : null;
+            const currentW = activeSplit?.bedWidth || bedSize.width;
+            const currentH = activeSplit?.bedHeight || bedSize.height;
+            
+            const handleBedChange = (field: 'width' | 'height', val: string) => {
+                const num = parseFloat(val);
+                if (activeSplit) {
+                    // Update shape property
+                    updateShape(activeSplit.id, field === 'width' ? 'bedWidth' : 'bedHeight', num);
+                } else {
+                    // Update global tool default
+                    setBedSize(prev => ({ ...prev, [field]: num }));
+                }
+            };
+
+            return (
+                <div style={{display:'flex', gap:'5px', marginLeft:'10px', alignItems:'center'}}>
+                    <span style={{fontSize:'0.8em', color:'#aaa'}}>Bed:</span>
+                    <input 
+                        type="number" 
+                        className="toolbar-name-input" 
+                        style={{width:'80px'}} 
+                        value={currentW} 
+                        onChange={e => handleBedChange('width', e.target.value)} 
+                        title="Print Bed Width" 
+                    />
+                    <span style={{color:'#666'}}>x</span>
+                    <input 
+                        type="number" 
+                        className="toolbar-name-input" 
+                        style={{width:'80px'}} 
+                        value={currentH} 
+                        onChange={e => handleBedChange('height', e.target.value)} 
+                        title="Print Bed Height" 
+                    />
+                </div>
+            );
+        })()}
         {footprint.isBoard && <button onClick={() => addShape("boardOutline")}><IconOutline /> Outline</button>}
         
         {/* Footprint Dropdown */}
@@ -2626,6 +2888,13 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                     <rect x={viewBox.x} y={viewBox.y} width={viewBox.width} height={viewBox.height} fill="url(#grid)" />
                     <line x1={viewBox.x} y1="0" x2={viewBox.x + viewBox.width} y2="0" stroke="#444" strokeWidth={strokeScale * 2} vectorEffect="non-scaling-stroke" />
                     <line x1="0" y1={viewBox.y} x2="0" y2={viewBox.y + viewBox.height} stroke="#444" strokeWidth={strokeScale * 2} vectorEffect="non-scaling-stroke" />
+                    {/* OBSTACLE VISUALIZATION */}
+                    {visualObstacles.map((obs, i) => (
+                        obs.type === 'circle' ? 
+                        <circle key={'obs'+i} cx={obs.x} cy={-obs.y} r={obs.r} fill={getObsColor(i) + "40"} stroke={getObsColor(i)} strokeWidth={1} vectorEffect="non-scaling-stroke" /> :
+                        <polygon key={'obs'+i} points={obs.points.map(p => `${p.x},${-p.y}`).join(' ')} fill={getObsColor(i) + "40"} stroke={getObsColor(i)} strokeWidth={1} vectorEffect="non-scaling-stroke" />
+                    ))}
+
                     
                     {/* Shapes Rendered Reversed (Bottom to Top visual order) */}
                     {[...footprint.shapes].reverse().map((shape) => {
@@ -2737,6 +3006,102 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         </g>
                     )}
 
+                    
+                    {/* SPLIT PART SIZE CHECK - Using Unified Hull Logic */}
+                    {splitPartHulls.map((part, i) => {
+                        if (!part.hull || part.hull.length < 1) return null;
+                        const hullPts = part.hull.map(p => `${p.x},${-p.y}`).join(' ');
+                        
+                        // 1. Hull Visualization
+                        const hullColor = part.valid ? "rgba(0, 255, 0, 0.05)" : "rgba(255, 0, 0, 0.05)";
+                        const hullStroke = part.valid ? "rgba(0, 255, 0, 0.3)" : "rgba(255, 0, 0, 0.3)";
+                        
+                        // 2. Bed Visualization logic (Simplified for unified check)
+                        let bedPoly = null;
+                        if (part.corners.length === 4) {
+                            // OBB Center and Axes
+                            const c = part.corners;
+                            const center = { x: (c[0].x + c[2].x)/2, y: (c[0].y + c[2].y)/2 };
+                            const u = { x: c[1].x - c[0].x, y: c[1].y - c[0].y };
+                            const v = { x: c[2].x - c[1].x, y: c[2].y - c[1].y };
+                            const uLen = Math.sqrt(u.x*u.x + u.y*u.y);
+                            const vLen = Math.sqrt(v.x*v.x + v.y*v.y);
+                            const uHat = { x: u.x/uLen, y: u.y/uLen };
+                            const vHat = { x: v.x/vLen, y: v.y/vLen };
+
+                            const bedLong = Math.max(bedSize.width, bedSize.height);
+                            const bedShort = Math.min(bedSize.width, bedSize.height);
+                            const isULong = uLen >= vLen;
+                            
+                            let renderW, renderH;
+                            if (isULong) { renderW = bedLong; renderH = bedShort; }
+                            else { renderW = bedShort; renderH = bedLong; }
+
+                            const halfW = renderW / 2;
+                            const halfH = renderH / 2;
+                            
+                            const bc = [
+                                { x: center.x - uHat.x*halfW - vHat.x*halfH, y: center.y - uHat.y*halfW - vHat.y*halfH },
+                                { x: center.x + uHat.x*halfW - vHat.x*halfH, y: center.y + uHat.y*halfW - vHat.y*halfH },
+                                { x: center.x + uHat.x*halfW + vHat.x*halfH, y: center.y + uHat.y*halfW + vHat.y*halfH },
+                                { x: center.x - uHat.x*halfW + vHat.x*halfH, y: center.y - uHat.y*halfW + vHat.y*halfH }
+                            ];
+                            
+                            bedPoly = (
+                                <polygon 
+                                    points={bc.map(p => `${p.x},${-p.y}`).join(' ')} 
+                                    fill="none" 
+                                    stroke={part.valid ? "cyan" : "orange"} 
+                                    strokeWidth={1} 
+                                    strokeDasharray="2,2" 
+                                    vectorEffect="non-scaling-stroke" 
+                                    opacity={0.6}
+                                />
+                            );
+                        }
+
+                        return (
+                            <g key={'size-check-'+i} pointerEvents="none">
+                                <polygon points={hullPts} fill={hullColor} stroke={hullStroke} strokeWidth={1} strokeDasharray="4,4" vectorEffect="non-scaling-stroke" />
+                                {bedPoly}
+                                {!part.valid && part.corners.length > 0 && (
+                                    <>
+                                        <polygon 
+                                            points={part.corners.map(p => `${p.x},${-p.y}`).join(' ')} 
+                                            fill="none" 
+                                            stroke="red" 
+                                            strokeWidth={2} 
+                                            vectorEffect="non-scaling-stroke" 
+                                        />
+                                        <text 
+                                            x={part.corners[0].x} 
+                                            y={-part.corners[0].y} 
+                                            fill="red" 
+                                            fontSize={6} 
+                                            fontWeight="bold" 
+                                            dy={-2}
+                                            style={{ textShadow: '0 0 2px black' }}
+                                        >
+                                            OVERSIZE
+                                        </text>
+                                    </>
+                                )}
+                            </g>
+                        );
+                    })}
+
+                    {splitPreview && (
+                        <line 
+                            x1={splitPreview.x1} y1={splitPreview.y1} 
+                            x2={splitPreview.x2} y2={splitPreview.y2} 
+                            stroke="#ff00ff" 
+                            strokeWidth={2} 
+                            strokeDasharray="5,5" 
+                            vectorEffect="non-scaling-stroke" 
+                            pointerEvents="none"
+                        />
+                    )}
+
                     {/* NEW: Tie Down Visual Guides */}
                     {tieDownVisuals && (
                         <g pointerEvents="none">
@@ -2797,7 +3162,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
         </div>
 
         <div className="fp-sidebar">
-          {selectedShapeIds.length > 0 || activeMesh ? (
+          {selectedShapeIds.length > 0 || activeMesh || isSplitToolActive ? (
             <>
               <FootprintPropertiesPanel 
                 footprint={footprint}
@@ -2824,6 +3189,10 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                 hoveredTieDownId={hoveredTieDownId}
                 setHoveredTieDownId={setHoveredTieDownId}
                 scrollToTieDownId={scrollToTieDownId}
+                // @ts-ignore - passing extra props for split tool logic
+                isSplitToolActive={isSplitToolActive}
+                splitToolOptions={splitToolOptions}
+                setSplitToolOptions={setSplitToolOptions}
               />
               {activeShape && (
                 <div style={{marginTop: '20px', borderTop: '1px solid #444', paddingTop: '10px'}}>

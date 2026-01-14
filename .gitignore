@@ -14,3 +14,6 @@ Thumbs.db
 signing-certs/
 
 apply_changes.py
+patch.py
+bug.py
+*.sh

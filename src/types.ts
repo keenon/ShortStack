@@ -22,7 +22,7 @@ export interface StackupLayer {
 
 // --- FOOTPRINT TYPES ---
 
-export type ShapeType = "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon" | "union" | "text";;
+export type ShapeType = "circle" | "rect" | "line" | "footprint" | "wireGuide" | "boardOutline" | "polygon" | "union" | "text" | "splitLine";
 
 export interface LayerAssignment {
     depth: string;
@@ -136,7 +136,18 @@ export interface FootprintText extends BaseShape {
   anchor: "start" | "middle" | "end";
 }
 
-export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide | FootprintBoardOutline | FootprintPolygon | FootprintUnion | FootprintText;
+// NEW: Split Line for fabrication slicing
+export interface FootprintSplitLine extends BaseShape {
+  type: "splitLine";
+  x: string;
+  y: string;
+  endX: string; // Relative to x
+  endY: string; // Relative to y
+  dovetailCount: string;
+  dovetailWidth: string; // Width of the neck
+}
+
+export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide | FootprintBoardOutline | FootprintPolygon | FootprintUnion | FootprintText | FootprintSplitLine;
 
 export interface MeshAsset {
   id: string;
@@ -226,5 +237,6 @@ export interface FabricationPlan {
   layerMethods: Record<string, FabricationMethod>;
   waterlineSettings: Record<string, WaterlineSettings>;
   cncSettings: Record<string, CNCSettings>;
+  enableSplitting?: boolean; // NEW: Toggle for applying split cuts
   layerMaterials: Record<string, string>;
 }

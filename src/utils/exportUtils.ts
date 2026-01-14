@@ -1,5 +1,5 @@
 // src/utils/exportUtils.ts
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintUnion, FootprintCircle, FootprintRect, FootprintLine, FootprintPolygon } from "../types";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintUnion, FootprintCircle, FootprintRect, FootprintLine, FootprintPolygon, FootprintSplitLine } from "../types";
 import { evaluateExpression, resolvePoint, getTransformAlongLine, offsetPolygonContour } from "./footprintUtils";
 import { Footprint3DViewHandle } from "../components/Footprint3DView";
 import * as THREE from "three";
@@ -103,7 +103,8 @@ export async function collectExportShapesAsync(
              }
         } else {
              const explicitAssignment = shape.assignedLayers && shape.assignedLayers[layer.id] !== undefined;
-             if (!forceInclude && !explicitAssignment) continue;
+             // Split lines are implicitly assigned to all layers, so we allow them through
+             if (!forceInclude && !explicitAssignment && shape.type !== "splitLine") continue;
              
              let depth = 0;
              let endmillRadius = 0;
@@ -124,6 +125,9 @@ export async function collectExportShapesAsync(
              } else {
                  depth = (layer.type === "Cut") ? layerThickness : 0; 
              }
+
+             // Force split lines to cut full depth
+             if (shape.type === "splitLine") depth = layerThickness;
 
              if (!forceInclude && depth <= 0.0001) continue;
 
@@ -201,10 +205,34 @@ export async function collectExportShapesAsync(
                     return { x: gx + rx, y: gy + ry, handle_in: rotateVec(resolved.handleIn), handle_out: rotateVec(resolved.handleOut) };
                 });
                 result.push(exportObj);
+            } else if (shape.type === "splitLine") {
+                const sl = shape as FootprintSplitLine;
+                exportObj.shape_type = "splitLine";
+                
+                const vecX = evaluateExpression(sl.endX, params);
+                const vecY = evaluateExpression(sl.endY, params);
+                
+                // Rotate vector by accumulated transform angle
+                const rad = (transform.angle * Math.PI) / 180;
+                const cos = Math.cos(rad);
+                const sin = Math.sin(rad);
+                
+                exportObj.end_x = vecX * cos - vecY * sin;
+                exportObj.end_y = vecX * sin + vecY * cos;
+                
+                exportObj.dovetail_count = evaluateExpression(sl.dovetailCount, params);
+                exportObj.dovetail_width = evaluateExpression(sl.dovetailWidth, params);
+                
+                result.push(exportObj);
             }
         }
     }
-    return result;
+
+    // Force split lines to be applied last (CSG subtraction at end of stack)
+    const splits = result.filter(s => s.shape_type === "splitLine");
+    const others = result.filter(s => s.shape_type !== "splitLine");
+
+    return [...others, ...splits];
 }
 
 function slicePolygonContours(contours: {x:number, y:number}[][], depth: number, endmillRadius: number, tx = 0, ty = 0, rot = 0): any[] {

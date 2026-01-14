@@ -92,6 +92,10 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   const dragItemIndex = useRef<number | null>(null);
   const view3DRef = useRef<Footprint3DViewHandle>(null);
 
+  const renderParams = useMemo(() => {
+      return params;
+  }, [params]);
+
   const getLayerStats = (layer: StackupLayer) => {
     if (!activePlan) return { method: "Laser cut" as FabricationMethod, numFiles: 1, exportText: "", numSheets: 0, actualThickness: 0, delta: 0, progThickness: 0, sheetThickness: 0 };
     const method = activePlan.layerMethods[layer.id] || (layer.type === "Cut" ? "Laser cut" : "CNC");
@@ -182,6 +186,16 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     setFabPlans(prev => prev.map(p => p.id === activePlan.id ? updatedPlan : p));
   };
 
+  const updateSplitSettings = (layerId: string, enabled: boolean, lineIds?: string[]) => {
+      if (!activePlan) return;
+      const currentSplitSettings = (activePlan as any).layerSplitSettings || {};
+      const newSettings = {
+          ...currentSplitSettings,
+          [layerId]: { enabled, lineIds: lineIds || currentSplitSettings[layerId]?.lineIds }
+      };
+      setFabPlans(prev => prev.map(p => p.id === activePlan.id ? {...p, layerSplitSettings: newSettings} : p));
+  };
+  
   const updatePlanLayer = (layerId: string, field: "layerMethods" | "layerMaterials", value: string) => {
     if (!activePlan) return;
     let updatedMethods = { ...activePlan.layerMethods };
@@ -560,6 +574,10 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     
                     const volMm3 = layerVolumes[layer.id] || 0;
                     const volCm3 = volMm3 / 1000;
+
+                    const splitSettings = (activePlan as any).layerSplitSettings?.[layer.id] || { enabled: false };
+                    const availableSplitLines = targetFootprint?.shapes.filter(s => s.type === "splitLine") || [];
+
                     return (
                         <div key={layer.id} className="fab-layer-card" style={{ opacity: isVisible ? 1 : 0.6 }}>
                             <div className="fab-layer-title">
@@ -686,6 +704,46 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                     </div>
                                 </div>
                             )}
+
+                            {method === "3D printed" && availableSplitLines.length > 0 && (
+                                <div className="waterline-mini-settings">
+                                    <label className="checkbox-label" style={{ fontWeight: 'bold' }}>
+                                        <input 
+                                            type="checkbox" 
+                                            checked={!!splitSettings.enabled} 
+                                            onChange={(e) => updateSplitSettings(layer.id, e.target.checked)} 
+                                        />
+                                        Split into Parts
+                                    </label>
+                                    {splitSettings.enabled && (
+                                        <div style={{ marginTop: '8px', paddingLeft: '5px' }}>
+                                            <label style={{ fontSize: '0.85em', color: '#888' }}>Active Split Lines:</label>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px' }}>
+                                                {availableSplitLines.map(sl => {
+                                                    const isSelected = !splitSettings.lineIds || splitSettings.lineIds.includes(sl.id);
+                                                    return (
+                                                        <label key={sl.id} className="checkbox-label" style={{ fontSize: '0.85em' }}>
+                                                            <input 
+                                                                type="checkbox" 
+                                                                checked={isSelected} 
+                                                                onChange={(e) => {
+                                                                    const current = splitSettings.lineIds || availableSplitLines.map(s => s.id);
+                                                                    let next;
+                                                                    if (e.target.checked) next = [...current, sl.id];
+                                                                    else next = current.filter((id: string) => id !== sl.id);
+                                                                    updateSplitSettings(layer.id, true, next);
+                                                                }} 
+                                                            />
+                                                            {sl.name}
+                                                        </label>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             {(() => {
                                 const currentMaterial = activePlan.layerMaterials?.[layer.id] || 
                                     Object.keys(MATERIAL_DATA).find(m => MATERIAL_DATA[m].methods.includes(method)) || "";
@@ -747,7 +805,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                         ref={view3DRef}
                         footprint={targetFootprint}
                         allFootprints={footprints}
-                        params={params}
+                        params={renderParams}
                         stackup={stackup}
                         meshAssets={meshAssets}
                         is3DActive={true}
@@ -758,7 +816,8 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                         onLayerVolumeCalculated={(id, vol) => setLayerVolumes(prev => ({...prev, [id]: vol}))}
                         toolpaths={Object.values(activeToolpaths).flat()}
                         customStack={visualStack}
-                    />
+                        layerSplitSettings={(activePlan as any).layerSplitSettings}
+                />
                 </>
             ) : (
                 <div className="empty-preview">
