@@ -2488,6 +2488,18 @@ export function convertExportShapeToFootprintShape(exportShape: any): FootprintS
             points
         } as FootprintLine;
     }
+    else if (exportShape.shape_type === "splitLine") {
+        return {
+            ...base,
+            type: "splitLine",
+            x: fmt(exportShape.x),
+            y: fmt(exportShape.y),
+            endX: fmt(exportShape.end_x),
+            endY: fmt(exportShape.end_y),
+            dovetailCount: fmt(exportShape.dovetail_count),
+            dovetailWidth: fmt(exportShape.dovetail_width)
+        } as FootprintSplitLine;
+    }
     else if (exportShape.shape_type === "polygon") {
         const points: Point[] = (exportShape.points || []).map((p: any) => ({
             id: crypto.randomUUID(),
