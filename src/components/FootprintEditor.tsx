@@ -3092,7 +3092,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         const hullPts = part.hull.map(p => `${p.x},${-p.y}`).join(' ');
                         
                         // 1. Hull Visualization
-                        const hullColor = part.valid ? "rgba(0, 255, 0, 0.05)" : "rgba(255, 0, 0, 0.05)";
+                        const hullColor = part.valid ? "rgba(0, 255, 0, 0.05)" : "rgba(0, 0, 255, 0.88)";
                         const hullStroke = part.valid ? "rgba(0, 255, 0, 0.3)" : "rgba(255, 0, 0, 0.3)";
                         
                         // 2. Bed Visualization logic (Simplified for unified check)
