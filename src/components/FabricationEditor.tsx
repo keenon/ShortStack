@@ -482,32 +482,46 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
 
     // NEW: Map visibility of generated sheets to their parents
   useEffect(() => {
-    if (!activePlan || !targetFootprint) { setActiveToolpaths({}); return; }
-    let currentZAccum = 0;
-    stackup.forEach(layer => {
-        const thickness = evaluateExpression(layer.thicknessExpression, params);
-        const method = activePlan.layerMethods[layer.id];
-        if (method === "CNC") {
-            const settings = activePlan.cncSettings[layer.id] || DEFAULT_CNC;
-            callWorker("computeToolpath", {
-                shapes: targetFootprint.shapes,
-                layerId: layer.id,
-                params,
-                contextFp: targetFootprint,
-                allFootprints: footprints,
-                settings,
-                layerThickness: thickness,
-                bottomZ: currentZAccum,
-                carveSide: layer.carveSide
-            }).then(paths => {
-                setActiveToolpaths(prev => ({ ...prev, [layer.id]: paths }));
-            });
-        } else {
-            setActiveToolpaths(prev => { const n = {...prev}; delete n[layer.id]; return n; });
-        }
-        currentZAccum += thickness;
-    });
-  }, [activePlan, targetFootprint, params, stackup]);
+    if (!activePlan || !targetFootprint) { 
+        setActiveToolpaths({}); 
+        return; 
+    }
+
+    const timer = setTimeout(() => {
+        let currentZAccum = 0;
+        [...stackup].reverse().forEach(layer => {
+            const thickness = evaluateExpression(layer.thicknessExpression, params);
+            const method = activePlan.layerMethods[layer.id];
+            
+            if (method === "CNC") {
+                const settings = activePlan.cncSettings[layer.id] || DEFAULT_CNC;
+                callWorker("computeToolpath", {
+                    shapes: targetFootprint.shapes,
+                    layerId: layer.id,
+                    params,
+                    contextFp: targetFootprint,
+                    allFootprints: footprints,
+                    settings,
+                    layerThickness: thickness,
+                    bottomZ: currentZAccum,
+                    carveSide: layer.carveSide
+                }).then(paths => {
+                    setActiveToolpaths(prev => ({ ...prev, [layer.id]: paths }));
+                });
+            } else {
+                setActiveToolpaths(prev => {
+                    if (!prev[layer.id]) return prev;
+                    const n = { ...prev };
+                    delete n[layer.id];
+                    return n;
+                });
+            }
+            currentZAccum += thickness;
+        });
+    }, 500); // 500ms debounce for CNC parameter changes
+
+    return () => clearTimeout(timer);
+  }, [activePlan?.cncSettings, activePlan?.layerMethods, targetFootprint, params, stackup]);
   const mappedVisibleLayers = useMemo(() => {
     if (!visualStack) return layerVisibility;
     const res = { ...layerVisibility };

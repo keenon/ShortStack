@@ -893,7 +893,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       if (aabb) {
           // Simple check: does segment intersect bounding box?
           // We convert mouse pos (Visual Y) to Math Y for check
-          const sMath = { x: splitStart.current!.x, y: splitStart.current!.y };
+          // const sMath = { x: splitStart.current!.x, y: splitStart.current!.y };
           // Check intersection of sMath->mathEnd with aabb (which is Visual Y, so flip AABB Ys or flip Point Ys)
           // `getFootprintAABB` returns Visual Y. 
           // `mathEnd` is Math Y. `splitStart` is Math Y.

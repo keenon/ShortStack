@@ -968,6 +968,19 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
       return flat ? flat.isEditable : false;
   }, [selectedId, flattenedMeshes]);
 
+  const getArrayHash = (arr: number[]) => {
+    let hash = 0;
+    // We can sample the array or hash the whole thing. 
+    // For toolpaths, a full hash is safer but sampling is faster.
+    for (let i = 0; i < arr.length; i++) {
+        const val = arr[i];
+        // Bitwise hash accumulation
+        hash = ((hash << 5) - hash) + val;
+        hash |= 0; // Convert to 32bit integer
+    }
+    return hash;
+  };
+
   return (
     <div style={{ width: "100%", height: "100%", background: "#111", position: 'relative' }}>
       <ProgressBar progress={progress} />
@@ -1061,19 +1074,25 @@ const Footprint3DView = forwardRef<Footprint3DViewHandle, Props>(({ footprint, a
             ))}
         </group>
 
-        {toolpaths?.map((path, idx) => (
-            <line key={idx}>
-                <bufferGeometry attach="geometry">
-                    <bufferAttribute 
-                        attach="attributes-position" 
-                        count={path.length / 3} 
-                        array={new Float32Array(path)} 
-                        itemSize={3} 
-                    />
-                </bufferGeometry>
-                <lineBasicMaterial attach="material" color="#00ff00" linewidth={2} transparent opacity={0.8} />
-            </line>
-        ))}
+        {toolpaths?.map((path, idx) => {
+            // Generate a unique hash for the point data
+            const pointHash = getArrayHash(path);
+            const key = `${idx}-${path.length}-${pointHash}`;
+
+            return (
+                <line key={key}>
+                    <bufferGeometry attach="geometry">
+                        <bufferAttribute 
+                            attach="attributes-position" 
+                            count={path.length / 3} 
+                            array={new Float32Array(path)} 
+                            itemSize={3} 
+                        />
+                    </bufferGeometry>
+                    <lineBasicMaterial attach="material" color="#00ff00" linewidth={2} transparent opacity={0.8} />
+                </line>
+            );
+        })}
         <Grid infiniteGrid fadeDistance={500} sectionColor="#444" cellColor="#222" position={[0, 0, 0]} />
         <OrbitControls makeDefault ref={controlsRef} />
         <GizmoHelper alignment="bottom-right" margin={[80, 80]}>

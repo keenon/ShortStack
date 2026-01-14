@@ -681,7 +681,7 @@ export function checkSplitPartSizes(
     // 4. Compute Hulls for each bin
     const results: any[] = [];
     
-    pointBins.forEach((pts, mask) => {
+    pointBins.forEach((pts, _) => {
         if (pts.length < 3) return;
 
         const hull = computeConvexHull(pts);
@@ -816,7 +816,7 @@ export function findSafeSplitLine(
     stackup: StackupLayer[],
     startUser: {x:number, y:number},
     endUser: {x:number, y:number},
-    bedSize?: { width: number, height: number },
+    _bedSize?: { width: number, height: number },
     options: { searchRadius: number, angleRange: number } = { searchRadius: 20, angleRange: 5 },
     ignoredLayerIds: string[] = []
 ): { result: { start: {x:number, y:number}, end: {x:number, y:number}, count: number } | null, debugLines: any[] } {

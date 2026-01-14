@@ -1126,15 +1126,134 @@ self.onmessage = async (e: MessageEvent) => {
             const toolRadius = toolDiameter / 2;
             const stepDown = Math.max(0.1, evaluateExpression(settings.stepDownExpression, params));
             const stepOverRaw = evaluateExpression(settings.stepOverExpression, params);
+            
+            // --- NEW: Parse Stock & Chuck Settings ---
+            const stockDepthRaw = evaluateExpression(settings.stockDepthExpression, params);
+            
+            // LOCAL Z COORDINATES (0 = Bottom of Layer, Thickness = Top of Layer)
+            const localLayerTopZ = layerThickness;
+            const localStockTopZ = Math.max(stockDepthRaw, localLayerTopZ);
+            
+            const chuckDiameter = evaluateExpression(settings.chuckDiameterExpression, params);
+            const chuckRadius = chuckDiameter / 2;
             // Default logic: if stepOver > toolDiameter, clamp it. If user intended mm, it works. 
             const stepOver = Math.min(stepOverRaw, toolDiameter * 0.95); 
             
-            const safeZ = (carveSide === "Top" ? (bottomZ + layerThickness + 5) : (bottomZ - 5)); // 5mm clearance
-            const surfaceZ = (carveSide === "Top" ? (bottomZ + layerThickness) : bottomZ);
-            const cutDir = (carveSide === "Top" ? -1 : 1);
-
-            // 2. Flatten and Resolve Shapes
+            const localSafeZ = localStockTopZ + 5; // 5mm clearance above stock
+            
+            // 2. Flatten and Resolve Shapes (MOVED UP FOR BOUNDS CALCULATION)
             const flatShapes = flattenShapes(contextFp, contextFp, shapes, allFootprints, params);
+
+            // 1.5. Surfacing (Facing) Pass
+            // If the stock is higher than the layer top, we must face it off first.
+            if (Math.abs(localStockTopZ - localLayerTopZ) > 0.01) {
+                // Calculate Bounding Box of the Board
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+                
+                const allPoints: Point[] = [];
+                // Collect points from flattened shapes to determine bounds correctly
+                flatShapes.forEach((item) => {
+                    const s = item.shape;
+                    if ((s as any).points) allPoints.push(...(s as any).points);
+                    if (s.type === 'rect') {
+                        const w = evaluateExpression((s as FootprintRect).width, params);
+                        const h = evaluateExpression((s as FootprintRect).height, params);
+                        
+                        // Use Resolved Global Transforms from flatShapes
+                        const x = item.x;
+                        const y = item.y;
+                        const r = item.rotation * (Math.PI / 180);
+                        
+                        const cos = Math.cos(r);
+                        const sin = Math.sin(r);
+                        const hw = w/2; 
+                        const hh = h/2;
+                        
+                        // Relative corners
+                        const corners = [
+                           {x: -hw, y: -hh}, {x: hw, y: -hh},
+                           {x: hw, y: hh}, {x: -hw, y: hh}
+                        ];
+                        
+                        corners.forEach(c => {
+                           // Rotate then Translate
+                           const rx = x + (c.x * cos - c.y * sin);
+                           const ry = y + (c.x * sin + c.y * cos);
+                           minX = Math.min(minX, rx); maxX = Math.max(maxX, rx);
+                           minY = Math.min(minY, ry); maxY = Math.max(maxY, ry);
+                        });
+                    }
+                });
+                
+                // If checking points
+                if (minX === Infinity) { minX = 0; maxX = 100; minY = 0; maxY = 100; }
+                
+                // Add margins for the surfacing block
+                const margin = toolDiameter * 2;
+                minX -= margin; maxX += margin; minY -= margin; maxY += margin;
+                
+                // Create Surfacing Shape (Rectangle)
+                const width = maxX - minX;
+                const height = maxY - minY;
+                
+                // Use Manifold to generate pocketing for this rect
+                let surfCS = collect(CrossSection.square([width, height], true));
+                surfCS = collect(surfCS.translate([(minX + maxX)/2, (minY + maxY)/2])); // Center it (Note Y flip for Manifold logic)
+
+                // Generate Surfacing Toolpaths
+                // We cut from StockTop down to LayerTop
+                let currentSurfZ = 0; // Relative to Stock Top
+                const totalSurfDepth = localStockTopZ - localLayerTopZ;
+                
+                // Surfacing pocket loop
+                let surfOffset = surfCS;
+                const surfContours: number[][] = [];
+                
+                // Calculate concentric paths for the block
+                while(!surfOffset.isEmpty()) {
+                     const polys = surfOffset.toPolygons();
+                     polys.forEach((poly: number[][]) => {
+                        if (poly.length > 2) {
+                             const p = [...poly];
+                             if (Math.abs(p[0][0] - p[p.length-1][0]) > 1e-6 || Math.abs(p[0][1] - p[p.length-1][1]) > 1e-6) p.push(p[0]);
+                             surfContours.push(p.flat());
+                        }
+                     });
+                     surfOffset = collect(surfOffset.offset(-stepOver, "Round"));
+                }
+                
+                // Generate Z moves for surfacing
+                // We cut from Stock Top down to Layer Top
+                while (currentSurfZ < totalSurfDepth - 0.001) {
+                    currentSurfZ += stepDown;
+                    if (currentSurfZ > totalSurfDepth) currentSurfZ = totalSurfDepth;
+                    
+                    // Local Z Height (cutting down)
+                    const localZ = localStockTopZ - currentSurfZ;
+                    // Visual Z Height (Global)
+                    const visZ = localZ + bottomZ;
+                    const visSafeZ = visZ + 5;
+                    
+                    surfContours.forEach(flatPoly => {
+                         const line3D: number[] = [];
+                         // Map X,Y to X,Z,-Y (Vis uses -Y for depth)
+                         for(let k=0; k<flatPoly.length; k+=2) {
+                             line3D.push(flatPoly[k], visZ, -flatPoly[k+1]); 
+                         }
+                         if (line3D.length > 0) {
+                             // Entry
+                             toolpaths.push([line3D[0], visSafeZ, line3D[2], line3D[0], visZ, line3D[2]]);
+                             // Cut
+                             toolpaths.push(line3D);
+                             // Exit
+                             const l = line3D.length;
+                             toolpaths.push([line3D[l-3], visZ, line3D[l-1], line3D[l-3], visSafeZ, line3D[l-1]]);
+                         }
+                    });
+                }
+            }
+
+
             
             // 3. Build Depth Map (Non-Overlapping Regions)
             // Strategy: Iterate shapes last-to-first (or first-to-last?).
@@ -1212,7 +1331,7 @@ self.onmessage = async (e: MessageEvent) => {
                     });
                     
                     // Add new shape
-                    nextRegions.push({ cs: shapeCS, depth: targetDepth });
+                    nextRegions.push({ cs: collect(shapeCS), depth: targetDepth });
                     regions = nextRegions;
                 }
             });
@@ -1250,7 +1369,8 @@ self.onmessage = async (e: MessageEvent) => {
                     if (passContours.length > 0) pocketPaths.push(passContours);
                     
                     // Step In
-                    currentOffset = collect(currentOffset.offset(-stepOver, "Round"));
+                    const nextOffset = currentOffset.offset(-stepOver, "Round");
+                    currentOffset = collect(nextOffset);
                 }
 
                 // Generate Z-Moves for this Pocket
@@ -1263,32 +1383,31 @@ self.onmessage = async (e: MessageEvent) => {
                     currentZ += stepDown;
                     if (currentZ > reg.depth) currentZ = reg.depth;
                     
-                    const zHeight = surfaceZ + (cutDir * currentZ);
+                    // Local Z: Start at Layer Top, go down by currentZ
+                    const localZ = localLayerTopZ - currentZ;
+                    
+                    // Visual Z
+                    const visZ = localZ + bottomZ;
+                    const visSafeZ = localSafeZ + bottomZ;
                     
                     // Add paths for this level
                     pocketPaths.forEach(contours => {
                         contours.forEach(flatPoly => {
                             const line3D: number[] = [];
                             // Convert [x,y, x,y] to [x, zHeight, -y]
-                            // NOTE: Visualizer expects -y for Z coord usually?
-                            // See computeLayer: rawVertices.push(p.x, step.z, -p.y);
                             for(let k=0; k<flatPoly.length; k+=2) {
-                                line3D.push(flatPoly[k], zHeight, -flatPoly[k+1]);
+                                line3D.push(flatPoly[k], visZ, -flatPoly[k+1]);
                             }
                             
                             if (line3D.length > 0) {
                                 // Add Travel moves
-                                // 1. Retract at previous pos (if any)
-                                // 2. Rapid to Start (at Safe Z)
-                                // 3. Plunge to Cut Z
-                                
                                 const startX = line3D[0];
                                 const startY_Vis = line3D[2]; // -y
                                 
-                                // Retract/Rapid Connection (Simulated as a separate segment for visualizer)
+                                // Retract/Rapid Connection
                                 const entryPath = [
-                                    startX, safeZ, startY_Vis, // Start high
-                                    startX, zHeight, startY_Vis // Plunge
+                                    startX, visSafeZ, startY_Vis, // Start high
+                                    startX, visZ, startY_Vis // Plunge
                                 ];
                                 toolpaths.push(entryPath);
                                 
@@ -1299,8 +1418,8 @@ self.onmessage = async (e: MessageEvent) => {
                                 const endX = line3D[line3D.length-3];
                                 const endY_Vis = line3D[line3D.length-1];
                                 const exitPath = [
-                                    endX, zHeight, endY_Vis,
-                                    endX, safeZ, endY_Vis
+                                    endX, visZ, endY_Vis,
+                                    endX, visSafeZ, endY_Vis
                                 ];
                                 toolpaths.push(exitPath);
                             }
@@ -1309,61 +1428,78 @@ self.onmessage = async (e: MessageEvent) => {
                 }
             });
 
-            // 5. Final Profile Cut (Board Outline)
+            // 5. Final Profile Cut (Board Outline) with Chuck Clearance
             if (contextFp.isBoard) {
-                // Find outline shape logic
                 const assignments = contextFp.boardOutlineAssignments || {};
                 const assignedId = assignments[layerId];
                 let outlineShape = contextFp.shapes.find((s: any) => s.id === assignedId) as any;
                 if (!outlineShape) outlineShape = contextFp.shapes.find((s: any) => s.type === "boardOutline") as any;
 
                 if (outlineShape) {
-                    // Create Outline CS
                     let outlineCS: any = null;
                     const originX = evaluateExpression(outlineShape.x, params);
                     const originY = evaluateExpression(outlineShape.y, params);
                     
                     const pts = getPolyOutlinePoints(outlineShape.points, 0, 0, params, contextFp, allFootprints, resolution);
-                    // Add origin
                     const absPts = pts.map(p => [p.x + originX, p.y + originY]);
                     
                     if (absPts.length > 2) {
                         outlineCS = collect(new CrossSection([absPts], "EvenOdd"));
-                        // Offset OUTSIDE by Tool Radius
-                        const profilePath = collect(outlineCS.offset(toolRadius, "Round")); // Positive offset = expand
                         
-                        const polys = profilePath.toPolygons();
+                        // We generate a "Moat" around the outline to ensure the chuck fits
+                        // Loop from Tool Radius up to Chuck Radius + Margin
+                        const moatMax = Math.max(toolRadius, chuckRadius + 2.0);
+                        const moatContours: number[][] = [];
                         
-                        // Cut Logic
+                        // Generate all offset contours first
+                        // We cut from Inside (Outline) -> Out (Moat Edge) so dimensions are cut first
+                        let currentOffset = toolRadius;
+                        while(currentOffset <= moatMax + 0.001) {
+                            const offCS = collect(outlineCS.offset(currentOffset, "Round"));
+                            const offPolys = offCS.toPolygons();
+                            offPolys.forEach((poly: number[][]) => {
+                                if (poly.length > 2) {
+                                    const p = [...poly];
+                                    if (Math.abs(p[0][0] - p[p.length-1][0]) > 1e-6 || Math.abs(p[0][1] - p[p.length-1][1]) > 1e-6) p.push(p[0]);
+                                    // Flatten
+                                    moatContours.push(p.flat());
+                                }
+                            });
+                            
+                            if (currentOffset >= moatMax) break;
+                            currentOffset += stepOver;
+                            if (currentOffset > moatMax) currentOffset = moatMax; // Ensure final cleanup pass
+                        }
+
                         let currentZ = 0;
-                        // For profile, we often cut a bit deeper to ensure separation
-                        const targetD = layerThickness + 0.5; 
+                        const targetD = layerThickness + 0.5; // Cut slightly through
                         
                         while (currentZ < targetD - 0.001) {
                             currentZ += stepDown;
                             if (currentZ > targetD) currentZ = targetD;
-                            const zHeight = surfaceZ + (cutDir * currentZ);
+                            
+                            // Local Z
+                            const localZ = localLayerTopZ - currentZ;
+                            
+                            // Visual Z
+                            const visZ = localZ + bottomZ;
+                            const visSafeZ = localSafeZ + bottomZ;
 
-                            polys.forEach((poly: number[][]) => {
-                                if (poly.length > 2) {
-                                    const p = [...poly];
-                                    // Closure
-                                    if (Math.abs(p[0][0] - p[p.length-1][0]) > 1e-6 || Math.abs(p[0][1] - p[p.length-1][1]) > 1e-6) {
-                                        p.push(p[0]);
-                                    }
-                                    
-                                    const line3D: number[] = [];
-                                    p.forEach(pt => line3D.push(pt[0], zHeight, -pt[1]));
-                                    
+                            moatContours.forEach(flatPoly => {
+                                const line3D: number[] = [];
+                                // Map to Vis Coords (X, Z, -Y)
+                                for(let k=0; k<flatPoly.length; k+=2) {
+                                    line3D.push(flatPoly[k], visZ, -flatPoly[k+1]);
+                                }
+                                if (line3D.length > 0) {
                                     // Connect
                                     const startX = line3D[0];
                                     const startY_Vis = line3D[2];
-                                    toolpaths.push([startX, safeZ, startY_Vis, startX, zHeight, startY_Vis]); // Entry
+                                    toolpaths.push([startX, visSafeZ, startY_Vis, startX, visZ, startY_Vis]); // Entry
                                     toolpaths.push(line3D); // Cut
-                                    // Retract is implicit at end of loop if we jump, but explicit is better
                                     const endX = line3D[line3D.length-3];
                                     const endY_Vis = line3D[line3D.length-1];
-                                    toolpaths.push([endX, zHeight, endY_Vis, endX, safeZ, endY_Vis]); // Exit
+                                    toolpaths.push([endX, visZ, endY_Vis, endX, visSafeZ, endY_Vis]); // Exit
                                 }
                             });
                         }
