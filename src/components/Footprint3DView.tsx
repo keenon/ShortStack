@@ -1258,7 +1258,7 @@ function separateGeometries(geometry: THREE.BufferGeometry): THREE.BufferGeometr
         newGeo.setAttribute('position', new THREE.Float32BufferAttribute(newPos, 3));
         newGeo.computeVertexNormals();
         return newGeo;
-    });
+    }).filter(g => g.getAttribute('position').count > 102); // Filter out tiny parts with less than 34 triangles
 }
 
 export default Footprint3DView;

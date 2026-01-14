@@ -874,13 +874,13 @@ self.onmessage = async (e: MessageEvent) => {
                             type: "line",
                             name: "split",
                             x: "0", y: "0",
-                            thickness: "0.5", // Kerf width
+                            thickness: (payload.splitKerf || 0.5).toString(), // Kerf width
                             points: linePoints,
                             assignedLayers: {}
                         };
 
                         // Use existing logic to get contour of the line (thickened by kerf)
-                        const cutterPts = getLineOutlinePoints(mockLine, params, 0.5, resolution, footprint, allFootprints);
+                        const cutterPts = getLineOutlinePoints(mockLine, params, payload.splitKerf || 0.5, resolution, footprint, allFootprints);
                         
                         if (cutterPts.length >= 3) {
                             const polyArr = cutterPts.map(p => [p.x, p.y]);
