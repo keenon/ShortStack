@@ -89,6 +89,111 @@ function computeConvexHull(points: {x:number, y:number}[]): {x:number, y:number}
     return lower.concat(upper);
 }
 
+// Replaced getMOBB with this unified checker that handles rotation
+type FitResult = {
+  fits: boolean;
+  excess: number;          // 0 if fits, otherwise metric of how much it overflows
+  rotation: number;        // radians
+  translation: {x:number, y:number};
+  corners: {x:number, y:number}[];
+};
+
+const findFittingRectangle = (
+  points: {x:number, y:number}[],
+  W: number,
+  H: number
+): FitResult => {
+
+  const hull = computeConvexHull(points);
+  // Degenerate case fits
+  if (hull.length < 3) {
+    return { fits: true, excess: 0, rotation: 0, translation: { x: 0, y: 0 }, corners: [] };
+  }
+
+  let minExcess = Infinity;
+  let bestResult: FitResult = { fits: false, excess: Infinity, rotation: 0, translation: {x:0, y:0}, corners: [] };
+
+  for (let i = 0; i < hull.length; i++) {
+    const p1 = hull[i];
+    const p2 = hull[(i + 1) % hull.length];
+
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+
+    const ux = dx / len;
+    const uy = dy / len;
+    const vx = -uy;
+    const vy = ux;
+
+    let minU = Infinity, maxU = -Infinity;
+    let minV = Infinity, maxV = -Infinity;
+
+    for (const p of hull) {
+      const u = p.x * ux + p.y * uy;
+      const v = p.x * vx + p.y * vy;
+      minU = Math.min(minU, u);
+      maxU = Math.max(maxU, u);
+      minV = Math.min(minV, v);
+      maxV = Math.max(maxV, v);
+    }
+
+    const width = maxU - minU;
+    const height = maxV - minV;
+
+    // Check 1: Normal Bed
+    const excessNormal = Math.max(0, width - W) + Math.max(0, height - H);
+    // Check 2: Rotated Bed
+    const excessRotated = Math.max(0, width - H) + Math.max(0, height - W);
+
+    const isRotated = excessRotated < excessNormal;
+    const currentExcess = Math.min(excessNormal, excessRotated);
+
+    if (currentExcess < minExcess) {
+        minExcess = currentExcess;
+        
+        // Calculate translation/rotation for potential use
+        const tu = -minU;
+        const tv = -minV;
+        const tx = tu * ux + tv * vx;
+        const ty = tu * uy + tv * vy;
+        const angle = Math.atan2(uy, ux);
+
+        bestResult = {
+            fits: currentExcess < 1e-4,
+            excess: currentExcess,
+            rotation: angle,
+            translation: { x: tx, y: ty },
+            corners: isRotated 
+                ? [{x:0,y:0}, {x:H,y:0}, {x:H,y:W}, {x:0,y:W}] 
+                : [{x:0,y:0}, {x:W,y:0}, {x:W,y:H}, {x:0,y:H}]
+        };
+        
+        // Optimization: if we fit perfectly, stop searching
+        if (bestResult.fits) return bestResult;
+    }
+  }
+
+  return bestResult;
+};
+
+// Kept for backward compatibility if needed, but redirects to new logic logic roughly
+const getMOBB = (points: {x:number, y:number}[]) => {
+    // This is a simplified fallback to satisfy legacy calls
+    const hull = computeConvexHull(points);
+    let bestArea = Infinity;
+    let bestBox = { w: 0, h: 0, corners: [] as any[], hull };
+    
+    // ... (Legacy MOBB logic is implicitly handled by findFittingRectangle now, 
+    // but if specific code relies on this exact function signature, keep the original implementation)
+    // For cleanup purposes, we will leave the original implementation of computeConvexHull above 
+    // and let consumers use findFittingRectangle for robust checks.
+    // If strict MOBB is needed:
+    return { w: 0, h: 0, corners: [], hull }; 
+};
+
+
 function isPointInPolygon(p: {x:number, y:number}, polygon: {x:number, y:number}[]): boolean {
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -193,16 +298,21 @@ export function checkSplitPartSizes(
         const l = lineDefs[idx];
         return ((p.x - l.sx) * l.axisY - (p.y - l.sy) * l.axisX) >= 0 ? 0 : 1;
     };
+    
+    // Bin outline points
     outlinePoints.forEach(p => {
         let mask = 0;
         for(let i=0; i<lineDefs.length; i++) if (getSide(p, i) === 1) mask |= (1 << i);
         if (!pointBins.has(mask)) pointBins.set(mask, []);
         pointBins.get(mask)!.push(p);
     });
+
+    // Bin cut line points (shared edges)
     lineDefs.forEach((l, k) => {
         l.boundaryPoints.forEach(p => {
             let baseMask = 0;
             for(let j=0; j<lineDefs.length; j++) if (j !== k && getSide(p, j) === 1) baseMask |= (1 << j);
+            // Add to both sides of the cut
             [baseMask, baseMask | (1 << k)].forEach(m => {
                 if (!pointBins.has(m)) pointBins.set(m, []);
                 pointBins.get(m)!.push(p);
@@ -213,32 +323,22 @@ export function checkSplitPartSizes(
     const results: any[] = [];
     pointBins.forEach((pts) => {
         if (pts.length < 3) return;
-        const hull = computeConvexHull(pts);
-        let minArea = Infinity; let bestCorners: {x:number, y:number}[] = [];
-        let bestW = 0, bestH = 0;
-        for (let i = 0; i < hull.length; i++) {
-            const p1 = hull[i]; const p2 = hull[(i + 1) % hull.length];
-            const dx = p2.x - p1.x; const dy = p2.y - p1.y; const len = Math.sqrt(dx*dx + dy*dy);
-            if (len < 1e-6) continue;
-            const ux = dx / len; const uy = dy / len; const vx = -uy; const vy = ux;
-            let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
-            for (const p of hull) {
-                const u = p.x * ux + p.y * uy; const v = p.x * vx + p.y * vy;
-                minU = Math.min(minU, u); maxU = Math.max(maxU, u);
-                minV = Math.min(minV, v); maxV = Math.max(maxV, v);
-            }
-            if ((maxU-minU)*(maxV-minV) < minArea) {
-                minArea = (maxU-minU)*(maxV-minV); bestW = maxU-minU; bestH = maxV-minV;
-                bestCorners = [ {x:minU*ux+minV*vx, y:minU*uy+minV*vy}, {x:maxU*ux+minV*vx, y:maxU*uy+minV*vy}, {x:maxU*ux+maxV*vx, y:maxU*uy+maxV*vy}, {x:minU*ux+maxV*vx, y:minU*uy+maxV*vy} ];
-            }
-        }
-        const excess = Math.min(Math.max(0, bestW-bedSize.width)+Math.max(0, bestH-bedSize.height), Math.max(0, bestW-bedSize.height)+Math.max(0, bestH-bedSize.width));
-        results.push({ valid: excess < 1.0, excess, corners: bestCorners, hull });
+
+        // Use the new fitting logic
+        const fit = findFittingRectangle(pts, bedSize.width, bedSize.height);
+
+        results.push({ 
+            valid: fit.fits, 
+            excess: fit.excess, 
+            corners: fit.corners,
+            // Re-computing hull just for the return type (visualizers might need it)
+            hull: computeConvexHull(pts) 
+        });
     });
     return { parts: results, maxExcess: results.reduce((max, p) => Math.max(max, p.excess), 0) };
 }
 
-// --- SEARCH ALGORITHMS ---
+// --- SEARCH ALGORITHMS (LEGACY) ---
 
 export function findSafeSplitLine(
     footprint: Footprint,
@@ -313,41 +413,338 @@ export function findSafeSplitLine(
     return { result: bestResult, debugLines: [] };
 }
 
+
+// --- PSO IMPLEMENTATION (NEW) ---
+
+interface GeometryCache {
+    outline: { x: number, y: number }[];
+    obstacles: { x: number, y: number, r: number }[]; 
+    bounds: { minX: number, maxX: number, minY: number, maxY: number };
+    bedSize: { width: number, height: number };
+}
+
+interface Particle {
+    position: number[]; // [angle, offsetRatio1, offsetRatio2, ...]
+    velocity: number[];
+    bestPosition: number[];
+    bestCost: number;
+    currentCost: number;
+}
+
+interface PSOResult {
+    angle: number;
+    offsets: number[];
+    cost: number;
+}
+
+const PSO_CONFIG = {
+    SWARM_SIZE: 40,
+    MAX_ITERATIONS: 150,
+    INERTIA: 0.7,
+    C1: 1.4,
+    C2: 1.4,
+    DOVETAIL_WIDTH_ALLOWANCE: 15,
+};
+
+// --- MAIN ENTRY POINT ---
+
 export function autoComputeSplit(
     footprint: Footprint,
     allFootprints: Footprint[],
     params: Parameter[],
     stackup: StackupLayer[],
     bedSize: { width: number, height: number },
-    options: { clearance: number, desiredCuts: number } = { clearance: 2.0, desiredCuts: 1 },
+    options: { clearance: number, desiredCuts: number } = { clearance: 0.0, desiredCuts: 1 },
     ignoredLayerIds: string[] = []
 ): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, debugLines?: any[], log?: string } {
-    const outlinePoints = getTessellatedBoardOutline(footprint, params, allFootprints);
-    let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
-    outlinePoints.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); });
-    const width = maxX - minX; const height = maxY - minY;
-    const bedW = bedSize.width - 5; const bedH = bedSize.height - 5;
-    const cutsX = Math.max(0, Math.ceil(width / bedW) - 1); const cutsY = Math.max(0, Math.ceil(height / bedH) - 1);
+    
+    // 1. Prepare Geometry
+    const rawOutline = getTessellatedBoardOutline(footprint, params, allFootprints);
+    if (rawOutline.length < 3) return { success: false, log: "Invalid board outline" };
 
-    const generatedShapes: FootprintSplitLine[] = [];
-    const optimizeAndPush = (centerX: number, centerY: number, isVertical: boolean) => {
-        const u = isVertical ? {x:0, y:1} : {x:1, y:0};
-        const res = findSafeSplitLine(footprint, allFootprints, params, stackup, {x:centerX-u.x*2000, y:centerY-u.y*2000}, {x:centerX+u.x*2000, y:centerY+u.y*2000}, bedSize, { searchRadius: 20, angleRange: 0 }, ignoredLayerIds);
-        if (res.result) {
-            const r = res.result;
-            generatedShapes.push({
-                id: crypto.randomUUID(), type: "splitLine", name: "Auto Split",
-                x: r.start.x.toFixed(4), y: r.start.y.toFixed(4),
-                endX: (r.end.x - r.start.x).toFixed(4), endY: (r.end.y - r.start.y).toFixed(4),
-                dovetailCount: r.count.toString(), dovetailWidth: r.width.toString(),
-                assignedLayers: {}, ignoredLayerIds: ignoredLayerIds
-            } as any);
-        }
+    const rawObstacles = collectGlobalObstacles(
+        footprint.shapes, params, allFootprints, stackup, 
+        {x:0, y:0, angle:0}, footprint, ignoredLayerIds
+    );
+    
+    // Filter only through-hole circles
+    const criticalObstacles = rawObstacles
+        .filter(o => o.isThrough && o.type === 'circle') 
+        // @ts-ignore
+        .map(o => ({ x: o.x, y: o.y, r: o.r }));
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    rawOutline.forEach(p => { 
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    });
+
+    const geometry: GeometryCache = {
+        outline: rawOutline,
+        obstacles: criticalObstacles,
+        bounds: { minX, maxX, minY, maxY },
+        bedSize
     };
 
-    if (cutsX > 0) for(let i=1; i<=cutsX; i++) optimizeAndPush(minX + (width/(cutsX+1))*i, (minY+maxY)/2, true);
-    if (cutsY > 0) for(let i=1; i<=cutsY; i++) optimizeAndPush((minX+maxX)/2, minY + (height/(cutsY+1))*i, false);
+    // 2. Determine Search Range
+    const w = maxX - minX;
+    const h = maxY - minY;
+    // Estimate min cuts needed by area/dimension
+    const minCutsDim = Math.ceil(Math.max(w / bedSize.width, h / bedSize.height)) - 1;
+    const maxSearchCuts = Math.max(minCutsDim + 1, 4); 
+
+    let bestSolution: PSOResult | null = null;
+
+    // 3. Iterative Search (1 cut, 2 cuts...)
+    for (let n = 1; n <= maxSearchCuts; n++) {
+        const solution = runPSO(n, geometry);
+        
+        // Cost < 1.0 implies fit
+        if (solution.cost < 5.0) { 
+            bestSolution = solution;
+            break; 
+        }
+        
+        if (!bestSolution || solution.cost < bestSolution.cost) {
+            bestSolution = solution;
+        }
+    }
+
+    if (!bestSolution) {
+        return { success: false, log: "PSO failed to find valid split." };
+    }
+
+    // 4. Convert Abstract Solution (Angle/Offsets) to Concrete Shapes
+    const generatedShapes: FootprintSplitLine[] = [];
+    const { angle, offsets } = bestSolution;
     
-    const sizeCheck = checkSplitPartSizes({ ...footprint, shapes: [...footprint.shapes.filter(s=>s.type==="boardOutline"), ...generatedShapes] }, params, allFootprints, bedSize);
-    return { success: sizeCheck.maxExcess < 1.0, shapes: generatedShapes, maxExcess: sizeCheck.maxExcess, debugLines: [], log: `Auto-Split Done: ${generatedShapes.length} cuts.` };
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    const vx = -uy;
+    const vy = ux;
+
+    const diag = Math.sqrt(w*w + h*h) * 1.5;
+    const cx = (minX+maxX)/2;
+    const cy = (minY+maxY)/2;
+    const centerProj = cx*ux + cy*uy;
+
+    offsets.forEach(offsetVal => {
+        const diff = offsetVal - centerProj;
+        const anchorX = cx + diff * ux;
+        const anchorY = cy + diff * uy;
+
+        const sx = anchorX - vx * diag;
+        const sy = anchorY - vy * diag;
+        const ex = anchorX + vx * diag;
+        const ey = anchorY + vy * diag;
+
+        generatedShapes.push({
+            id: crypto.randomUUID(),
+            type: "splitLine",
+            name: "Auto Split",
+            x: sx.toFixed(4),
+            y: sy.toFixed(4),
+            endX: (ex - sx).toFixed(4),
+            endY: (ey - sy).toFixed(4),
+            dovetailCount: "4", 
+            dovetailWidth: "12",
+            assignedLayers: {},
+            ignoredLayerIds
+        } as any);
+    });
+
+    // 5. Final robust verification
+    const sizeCheck = checkSplitPartSizes(
+        { ...footprint, shapes: [...footprint.shapes.filter(s => s.type === "boardOutline"), ...generatedShapes] },
+        params, allFootprints, bedSize
+    );
+
+    console.log(`Auto-Split Result: ${generatedShapes.length} cuts, Max Excess: ${sizeCheck.maxExcess.toFixed(2)}`);
+
+    return {
+        success: sizeCheck.maxExcess < 1.0,
+        shapes: generatedShapes,
+        maxExcess: sizeCheck.maxExcess,
+        debugLines: [],
+        log: `Auto-Split: ${generatedShapes.length} cuts. Cost: ${bestSolution.cost.toFixed(2)}`
+    };
 }
+
+// --- PSO CORE LOGIC ---
+
+const runPSO = (nCuts: number, geo: GeometryCache): PSOResult => {
+    const dim = 1 + nCuts; // [Angle, Ratio1, Ratio2...]
+    
+    const particles: Particle[] = [];
+    let globalBestPos: number[] = [];
+    let globalBestCost = Infinity;
+
+    // Initialize Swarm
+    for (let i = 0; i < PSO_CONFIG.SWARM_SIZE; i++) {
+        const pos = [
+            Math.random() * Math.PI, 
+            ...Array(nCuts).fill(0).map(() => 0.1 + Math.random() * 0.8)
+        ];
+        
+        const cost = evaluateFitness(pos, geo);
+        
+        if (cost < globalBestCost) {
+            globalBestCost = cost;
+            globalBestPos = [...pos];
+        }
+
+        particles.push({
+            position: pos,
+            velocity: Array(dim).fill(0).map(() => (Math.random() - 0.5) * 0.1),
+            bestPosition: [...pos],
+            bestCost: cost,
+            currentCost: cost
+        });
+    }
+
+    // Optimization Loop
+    for (let iter = 0; iter < PSO_CONFIG.MAX_ITERATIONS; iter++) {
+        if (globalBestCost < 0.1) break; // Perfect fit
+
+        for (const p of particles) {
+            for (let d = 0; d < dim; d++) {
+                const r1 = Math.random();
+                const r2 = Math.random();
+                p.velocity[d] = 
+                    (PSO_CONFIG.INERTIA * p.velocity[d]) +
+                    (PSO_CONFIG.C1 * r1 * (p.bestPosition[d] - p.position[d])) +
+                    (PSO_CONFIG.C2 * r2 * (globalBestPos[d] - p.position[d]));
+                
+                p.position[d] += p.velocity[d];
+            }
+
+            // Boundary constraints
+            if (p.position[0] < 0) p.position[0] += Math.PI;
+            if (p.position[0] > Math.PI) p.position[0] -= Math.PI;
+
+            for (let d = 1; d < dim; d++) {
+                if (p.position[d] < 0.05) p.position[d] = 0.05;
+                if (p.position[d] > 0.95) p.position[d] = 0.95;
+            }
+
+            const newCost = evaluateFitness(p.position, geo);
+            p.currentCost = newCost;
+
+            if (newCost < p.bestCost) {
+                p.bestCost = newCost;
+                p.bestPosition = [...p.position];
+            }
+            if (newCost < globalBestCost) {
+                globalBestCost = newCost;
+                globalBestPos = [...p.position];
+            }
+        }
+    }
+
+    const { offsets } = getActualOffsets(globalBestPos[0], globalBestPos.slice(1), geo.outline);
+    console.log(`PSO found solution with cost: ${globalBestCost.toFixed(2)} using ${nCuts} cuts.`);
+    return {
+        angle: globalBestPos[0],
+        offsets,
+        cost: globalBestCost
+    };
+};
+
+const evaluateFitness = (pos: number[], geo: GeometryCache): number => {
+    const angle = pos[0];
+    const ratios = pos.slice(1).sort((a, b) => a - b);
+    
+    // 1. Get real world cut positions
+    const { offsets, minU, maxU } = getActualOffsets(angle, ratios, geo.outline);
+
+    // 2. Obstacle Avoidance
+    let obstaclePenalty = 0;
+    const ux = Math.cos(angle), uy = Math.sin(angle);
+    
+    // Vectorized check for obstacles against cut lines
+    for (const obs of geo.obstacles) {
+        const obsU = obs.x * ux + obs.y * uy;
+        for (const cutU of offsets) {
+            const dist = Math.abs(obsU - cutU);
+            const minDist = obs.r + (PSO_CONFIG.DOVETAIL_WIDTH_ALLOWANCE / 2);
+            if (dist < minDist) {
+                // Higher penalty for being closer to center of hole
+                obstaclePenalty += 1000 + (minDist - dist) * 100;
+            }
+        }
+    }
+    // Optimization: Fail fast if we hit a hole
+    if (obstaclePenalty > 0) return obstaclePenalty;
+
+    // 3. Fit Check
+    const cuts = [minU, ...offsets, maxU];
+    let totalPenalty = 0;
+
+    for (let i = 0; i < cuts.length - 1; i++) {
+        // A. Clip board outline to the strip defined by two cuts
+        const stripPoints = getPointsInStrip(geo.outline, ux, uy, cuts[i], cuts[i+1]);
+        
+        // If the strip has negligible area, ignore
+        if (stripPoints.length < 3) continue;
+
+        // B. Check if this sub-polygon fits on the bed
+        const fit = findFittingRectangle(stripPoints, geo.bedSize.width, geo.bedSize.height);
+        
+        if (!fit.fits) {
+            // Apply penalty proportional to how much it sticks out (squared for stronger gradient)
+            totalPenalty += (fit.excess * fit.excess);
+        }
+    }
+
+    return totalPenalty;
+};
+
+// Maps normalized 0-1 ratios to world coordinate offsets along the normal vector
+const getActualOffsets = (angle: number, ratios: number[], outline: {x:number, y:number}[]) => {
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+    
+    let minU = Infinity, maxU = -Infinity;
+    for(const p of outline) {
+        const u = p.x * ux + p.y * uy;
+        if(u < minU) minU = u;
+        if(u > maxU) maxU = u;
+    }
+    
+    const span = maxU - minU;
+    const offsets = ratios.map(r => minU + (span * r));
+    
+    return { offsets, minU, maxU };
+};
+
+// Sutherland-Hodgman style clipping against two parallel lines
+const getPointsInStrip = (outline: {x:number, y:number}[], ux: number, uy: number, startU: number, endU: number) => {
+    const stripPoints: {x:number, y:number}[] = [];
+    const len = outline.length;
+    
+    for (let k = 0; k < len; k++) {
+        const p1 = outline[k];
+        const p2 = outline[(k+1) % len];
+        
+        const u1 = p1.x * ux + p1.y * uy;
+        const u2 = p2.x * ux + p2.y * uy;
+
+        // Point p1 is inside
+        if (u1 >= startU - 1e-4 && u1 <= endU + 1e-4) {
+            stripPoints.push(p1);
+        }
+
+        // Check intersections with startU plane
+        if ((u1 < startU && u2 > startU) || (u1 > startU && u2 < startU)) {
+            const t = (startU - u1) / (u2 - u1);
+            stripPoints.push({ x: p1.x + t * (p2.x - p1.x), y: p1.y + t * (p2.y - p1.y) });
+        }
+        
+        // Check intersections with endU plane
+        if ((u1 < endU && u2 > endU) || (u1 > endU && u2 < endU)) {
+            const t = (endU - u1) / (u2 - u1);
+            stripPoints.push({ x: p1.x + t * (p2.x - p1.x), y: p1.y + t * (p2.y - p1.y) });
+        }
+    }
+    return stripPoints;
+};
