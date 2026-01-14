@@ -2,6 +2,8 @@
 import { create, all } from "mathjs";
 import * as THREE from "three"; // Added THREE import
 import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine, FootprintPolygon, FootprintCircle, FootprintSplitLine } from "../types";
+import {generateDovetailPoints, getTessellatedBoardOutline, findSafeSplitLine, checkSplitPartSizes} from "./splitUtils"; // Ensure splitUtils is imported for type augmentation
+export {generateDovetailPoints, getTessellatedBoardOutline, findSafeSplitLine, checkSplitPartSizes} from "./splitUtils"; // Re-export for external use
 
 // --- CUSTOM MATHJS INSTANCE ---
 export const math = create(all);
@@ -286,10 +288,8 @@ export const calcMid = (v1: string, v2: string) => {
     return `(${v1} + ${v2}) / 2`;
 };
 
-// --- GEOMETRY UTILS FOR SPLITTING ---
-
-// Generate points for a dovetail cut line
-export function generateDovetailPoints(
+// MOVED: generateDovetailPoints to splitUtils.ts
+export function _removed_generateDovetailPoints(
     startX: number, startY: number, 
     endX: number, endY: number, 
     count: number, 
@@ -528,7 +528,7 @@ export function collectGlobalObstacles(
     return obstacles;
 }
 
-export function getTessellatedBoardOutline(
+export function _removed_getTessellatedBoardOutline(
     footprint: Footprint, 
     params: Parameter[], 
     allFootprints: Footprint[]
@@ -580,7 +580,7 @@ export function getTessellatedBoardOutline(
     return outlinePoints;
 }
 
-export function checkSplitPartSizes(
+export function _removed_checkSplitPartSizes(
     footprint: Footprint,
     params: Parameter[],
     allFootprints: Footprint[],
@@ -817,7 +817,7 @@ function isPointInPolygon(p: {x:number, y:number}, polygon: {x:number, y:number}
     return inside;
 }
 
-export function findSafeSplitLine(
+export function _removed_findSafeSplitLine(
     footprint: Footprint,
     allFootprints: Footprint[],
     params: Parameter[],
@@ -1015,7 +1015,7 @@ export function findSafeSplitLine(
     return { result: bestResult, debugLines };
 }
 
-export function autoComputeSplit(
+export function _removed_autoComputeSplit(
     footprint: Footprint,
     allFootprints: Footprint[],
     params: Parameter[],
@@ -1023,7 +1023,7 @@ export function autoComputeSplit(
     bedSize: { width: number, height: number },
     options: { clearance: number, desiredCuts: number } = { clearance: 2.0, desiredCuts: 1 },
     ignoredLayerIds: string[] = []
-): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, debugLines?: any[] } {
+): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, debugLines?: any[], log?: string } {
     
     const debugLines: any[] = [];
     let generatedShapes: FootprintSplitLine[] = [];
@@ -1052,56 +1052,124 @@ export function autoComputeSplit(
     
     console.log(`Auto-Split: Size ${width.toFixed(1)}x${height.toFixed(1)}. Naive Cuts: ${naiveTotalCuts} (X:${cutsX}, Y:${cutsY}). Min possible: ${minCuts}`);
 
-    // Helper: Optimize a specific cut configuration
+    // Helper: Optimize a specific cut configuration with Rigorous MOBB Check
     const runStraightCutScan = (targetCuts: number): { angle: number, offsets: number[] } | null => {
-        // Scan angles
-        for (let ang = 0; ang < 180; ang += 2) {
+        
+        // Helper: Intersection of line (defined by normal and dist) and segment
+        const getInter = (p1: {x:number, y:number}, p2: {x:number, y:number}, normalX: number, normalY: number, d: number) => {
+            const d1 = p1.x * normalX + p1.y * normalY - d;
+            const d2 = p2.x * normalX + p2.y * normalY - d;
+            if ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) {
+                const t = d1 / (d1 - d2);
+                return { x: p1.x + t * (p2.x - p1.x), y: p1.y + t * (p2.y - p1.y) };
+            }
+            return null;
+        };
+
+        // Fine Granularity Scan (0.5 deg)
+        for (let ang = 0; ang < 180; ang += 0.5) {
             const rad = ang * Math.PI / 180;
             const ux = Math.cos(rad);
             const uy = Math.sin(rad);
             
-            // Project outline to 1D
-            let minP = Infinity, maxP = -Infinity;
+            // Project outline to cut axis
+            let minU = Infinity, maxU = -Infinity;
             outlinePoints.forEach(p => {
-                const proj = p.x * ux + p.y * uy;
-                minP = Math.min(minP, proj);
-                maxP = Math.max(maxP, proj);
+                const u = p.x * ux + p.y * uy;
+                minU = Math.min(minU, u);
+                maxU = Math.max(maxU, u);
             });
+
+            // Define cuts
+            const totalSpan = maxU - minU;
+            const step = totalSpan / (targetCuts + 1);
             
-            const span = maxP - minP;
-            // Check if this span fits in N+1 segments of BedWidth (or BedHeight)
-            // Note: Since we rotate, we just need to fit the segments into ONE dimension of the bed,
-            // while the perpendicular dimension of the board must fit the OTHER dimension of the bed.
-            
-            // Check perpendicular width
-            const vx = -uy; const vy = ux;
-            let minV = Infinity, maxV = -Infinity;
-            outlinePoints.forEach(p => {
-                const proj = p.x * vx + p.y * vy;
-                minV = Math.min(minV, proj);
-                maxV = Math.max(maxV, proj);
-            });
-            const pWidth = maxV - minV;
-            
-            // Check if perpendicular width fits bed
-            let validBedDim = -1; // 0 = fits Width, 1 = fits Height
-            if (pWidth <= bedH) validBedDim = 0; // Segments must lie along BedW
-            else if (pWidth <= bedW) validBedDim = 1; // Segments must lie along BedH
-            
-            if (validBedDim === -1) continue; // Doesn't fit perpendicularly
-            
-            const limit = validBedDim === 0 ? bedW : bedH;
-            
-            // Can we cut 'span' into targetCuts+1 pieces each <= limit?
-            if (span / (targetCuts + 1) > limit) continue;
-            
-            // Found a valid angle! Calculate even offsets
-            const offsets = [];
-            const step = span / (targetCuts + 1);
-            for(let i=1; i<=targetCuts; i++) {
-                offsets.push(minP + step * i);
+            let allPartsFit = true;
+
+            // Check each part
+            for(let i=0; i<=targetCuts; i++) {
+                const uStart = minU + step * i;
+                const uEnd = minU + step * (i+1);
+                
+                // Collect points for this part (Vertices inside + Intersections on boundaries)
+                const partPoints: {x:number, y:number}[] = [];
+                
+                for(let j=0; j<outlinePoints.length; j++) {
+                    const p1 = outlinePoints[j];
+                    const u1 = p1.x * ux + p1.y * uy;
+                    
+                    // Check Vertex
+                    if (u1 >= uStart - 0.001 && u1 <= uEnd + 0.001) {
+                        partPoints.push(p1);
+                    }
+                    
+                    const p2 = outlinePoints[(j+1)%outlinePoints.length];
+                    
+                    // Check Intersection with uStart
+                    const int1 = getInter(p1, p2, ux, uy, uStart);
+                    if (int1) partPoints.push(int1);
+                    
+                    // Check Intersection with uEnd
+                    const int2 = getInter(p1, p2, ux, uy, uEnd);
+                    if (int2) partPoints.push(int2);
+                }
+                
+                if (partPoints.length < 3) continue; // Empty part
+                
+                // Compute Convex Hull
+                const hull = computeConvexHull(partPoints);
+                
+                // Compute exact MOBB using rotating calipers on hull
+                let minArea = Infinity;
+                let bestW = Infinity, bestH = Infinity;
+
+                for (let k = 0; k < hull.length; k++) {
+                    const h1 = hull[k];
+                    const h2 = hull[(k + 1) % hull.length];
+                    const dx = h2.x - h1.x;
+                    const dy = h2.y - h1.y;
+                    const len = Math.sqrt(dx*dx + dy*dy);
+                    if (len < 1e-6) continue;
+                    
+                    const ax = dx / len;
+                    const ay = dy / len;
+                    const px = -ay;
+                    const py = ax;
+                    
+                    let minA = Infinity, maxA = -Infinity;
+                    let minP = Infinity, maxP = -Infinity;
+                    
+                    for(const h of hull) {
+                        const dotA = h.x * ax + h.y * ay;
+                        const dotP = h.x * px + h.y * py;
+                        minA = Math.min(minA, dotA); maxA = Math.max(maxA, dotA);
+                        minP = Math.min(minP, dotP); maxP = Math.max(maxP, dotP);
+                    }
+                    
+                    const w = maxA - minA;
+                    const h = maxP - minP;
+                    if (w*h < minArea) {
+                        minArea = w*h;
+                        bestW = w;
+                        bestH = h;
+                    }
+                }
+                
+                // Check fit
+                const fitsNorm = bestW <= bedSize.width && bestH <= bedSize.height;
+                const fitsRot = bestW <= bedSize.height && bestH <= bedSize.width;
+                
+                if (!fitsNorm && !fitsRot) {
+                    allPartsFit = false;
+                    break;
+                }
             }
-            return { angle: rad, offsets };
+
+            if (allPartsFit) {
+                const offsets = [];
+                for(let i=1; i<=targetCuts; i++) offsets.push(minU + step * i);
+                return { angle: rad, offsets };
+            }
         }
         return null;
     };
@@ -1211,7 +1279,8 @@ export function autoComputeSplit(
         success: sizeCheck.maxExcess < 1.0, 
         shapes: generatedShapes, 
         maxExcess: sizeCheck.maxExcess,
-        debugLines 
+        debugLines,
+        log: `Auto-Split Result:\nSize: ${width.toFixed(1)}x${height.toFixed(1)}\nNaive Cuts: ${naiveTotalCuts}\nFinal Cuts: ${generatedShapes.length}\nExcess: ${sizeCheck.maxExcess.toFixed(2)}mm`
     };
 }
 
