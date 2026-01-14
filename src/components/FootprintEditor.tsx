@@ -4,8 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText, FootprintSplitLine } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments , checkSplitPartSizes, findSafeSplitLine, collectGlobalObstacles, autoComputeSplit } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
+import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
@@ -274,7 +275,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
 
   // SPLIT TOOL STATE
   const [isSplitToolActive, setIsSplitToolActive] = useState(false);
-  const [bedSize, setBedSize] = useState({ width: 250, height: 250 });
+  const [bedSize, setBedSize] = useState({ width: 256, height: 256 });
   const [splitToolOptions, setSplitToolOptions] = useState<{ignoredLayerIds: string[]}>({ ignoredLayerIds: [] });
 
   // Visualization of obstacles for Split Tool
@@ -2849,6 +2850,9 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                             
                             setProcessingMessage(null);
                             
+                            // Show debug log from algorithm
+                            if (res.log) alert(res.log);
+
                             if (res.success) {
                                 if (res.shapes && res.shapes.length > 0) {
                                     const newIds = res.shapes.map(s => s.id);
@@ -2860,15 +2864,9 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                                     alert("No split needed! The footprint already fits within the bed dimensions.");
                                 }
                             } else {
+                                // Fallback or Failure
                                 if (res.shapes && res.shapes.length > 0) {
-                                     const confirm = window.confirm(`Could not find a perfect fit (Excess: ${res.maxExcess?.toFixed(1)}mm). Add best approximation?`);
-                                     if (confirm) {
-                                        const newIds = res.shapes.map(s => s.id);
-                                        updateHistory({ 
-                                            footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
-                                            selectedShapeIds: newIds
-                                        });
-                                     }
+                                    alert(`Warning: Perfect fit not found. Found ${res.shapes.length} cuts with excess: ${res.maxExcess?.toFixed(1)}mm`);
                                 } else {
                                     alert("Global search failed completely. Check obstacle layers or try increasing bed size.");
                                 }
