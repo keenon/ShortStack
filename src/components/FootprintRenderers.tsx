@@ -211,13 +211,15 @@ export const RecursiveShapeRenderer = ({
       const y2 = y1 + evaluateExpression(sl.endY, params);
       const count = Math.round(evaluateExpression(sl.dovetailCount, params));
       const width = evaluateExpression(sl.dovetailWidth, params);
+      const height = evaluateExpression((sl as any).dovetailHeight, params) || (width * 0.8);
+      const flip = !!(sl as any).flip;
 
       // Generate points in global visual space
       // Note: Y is inverted for visualization in parent components usually?
       // RecursiveShapeRenderer generally receives Y-up math coords, and renders them. 
       // The parent SVG flips Y if needed. Here we assume we draw in standard math coords and apply transform.
       
-      const pts = generateDovetailPoints(x1, y1, x2, y2, count, width);
+      const pts = generateDovetailPoints(x1, y1, x2, y2, count, width, height, flip);
       let d = `M ${pts[0].x} ${-pts[0].y}`;
       for(let i=1; i<pts.length; i++) d += ` L ${pts[i].x} ${-pts[i].y}`;
 
