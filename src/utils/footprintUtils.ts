@@ -1026,7 +1026,7 @@ export function autoComputeSplit(
 ): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, debugLines?: any[] } {
     
     const debugLines: any[] = [];
-    const generatedShapes: FootprintSplitLine[] = [];
+    let generatedShapes: FootprintSplitLine[] = [];
 
     // 1. CALCULATE BOUNDS
     const outlinePoints = getTessellatedBoardOutline(footprint, params, allFootprints);
@@ -1035,78 +1035,174 @@ export function autoComputeSplit(
     
     const width = maxX - minX;
     const height = maxY - minY;
+    const area = Math.abs(width * height); // Approx area
+    const bedArea = bedSize.width * bedSize.height;
     
     // Safety margin
     const bedW = bedSize.width - 5;
     const bedH = bedSize.height - 5;
 
-    // Calculate needed cuts (Ceiling - 1)
+    // Pessimistic Axis-Aligned guess
     const cutsX = Math.max(0, Math.ceil(width / bedW) - 1);
     const cutsY = Math.max(0, Math.ceil(height / bedH) - 1);
+    const naiveTotalCuts = cutsX + cutsY;
+    
+    // Theoretical minimum
+    const minCuts = Math.max(0, Math.ceil(area / (bedW*bedH)) - 1);
+    
+    console.log(`Auto-Split: Size ${width.toFixed(1)}x${height.toFixed(1)}. Naive Cuts: ${naiveTotalCuts} (X:${cutsX}, Y:${cutsY}). Min possible: ${minCuts}`);
 
-    console.log(`Auto-Split: Size ${width.toFixed(1)}x${height.toFixed(1)}. Need ${cutsX} vertical and ${cutsY} horizontal cuts.`);
-
-    // 2. GENERATE IDEAL POSITIONS AND OPTIMIZE
-    const optimizeCut = (centerX: number, centerY: number, isVertical: boolean) => {
-        const ux = isVertical ? 0 : 1;
-        const uy = isVertical ? 1 : 0;
-        
-        // Define Infinite Line
-        const startNode = { x: centerX - ux * 2000, y: centerY - uy * 2000 };
-        const endNode = { x: centerX + ux * 2000, y: centerY + uy * 2000 };
-
-        // Search Radius: Half the segment width to allow wiggling around obstacles
-        const searchRadius = isVertical ? (width / (cutsX + 1)) / 2.5 : (height / (cutsY + 1)) / 2.5;
-
-        // Run Optimizer
-        const searchRes = findSafeSplitLine(
-            footprint, allFootprints, params, stackup,
-            startNode, endNode, bedSize,
-            { searchRadius: Math.max(10, searchRadius), angleRange: 0 }, 
-            ignoredLayerIds
-        );
-
-        if (searchRes.result) {
-            const r = searchRes.result;
-            const newShape: FootprintSplitLine = {
-                id: crypto.randomUUID(), type: "splitLine",
-                name: "Auto Split",
-                x: r.start.x.toFixed(4), y: r.start.y.toFixed(4),
-                endX: (r.end.x - r.start.x).toFixed(4), endY: (r.end.y - r.start.y).toFixed(4),
-                dovetailCount: r.count.toString(), dovetailWidth: r.width.toString(),
-                assignedLayers: {},
-                ignoredLayerIds: ignoredLayerIds
-            } as any;
+    // Helper: Optimize a specific cut configuration
+    const runStraightCutScan = (targetCuts: number): { angle: number, offsets: number[] } | null => {
+        // Scan angles
+        for (let ang = 0; ang < 180; ang += 2) {
+            const rad = ang * Math.PI / 180;
+            const ux = Math.cos(rad);
+            const uy = Math.sin(rad);
             
-            generatedShapes.push(newShape);
-            debugLines.push({ x1: r.start.x, y1: r.start.y, x2: r.end.x, y2: r.end.y, color: "rgba(0,255,0,0.5)" });
-        } else {
-            // Failed to place cut
-            debugLines.push({ x1: startNode.x, y1: startNode.y, x2: endNode.x, y2: endNode.y, color: "rgba(255,0,0,0.5)" });
+            // Project outline to 1D
+            let minP = Infinity, maxP = -Infinity;
+            outlinePoints.forEach(p => {
+                const proj = p.x * ux + p.y * uy;
+                minP = Math.min(minP, proj);
+                maxP = Math.max(maxP, proj);
+            });
+            
+            const span = maxP - minP;
+            // Check if this span fits in N+1 segments of BedWidth (or BedHeight)
+            // Note: Since we rotate, we just need to fit the segments into ONE dimension of the bed,
+            // while the perpendicular dimension of the board must fit the OTHER dimension of the bed.
+            
+            // Check perpendicular width
+            const vx = -uy; const vy = ux;
+            let minV = Infinity, maxV = -Infinity;
+            outlinePoints.forEach(p => {
+                const proj = p.x * vx + p.y * vy;
+                minV = Math.min(minV, proj);
+                maxV = Math.max(maxV, proj);
+            });
+            const pWidth = maxV - minV;
+            
+            // Check if perpendicular width fits bed
+            let validBedDim = -1; // 0 = fits Width, 1 = fits Height
+            if (pWidth <= bedH) validBedDim = 0; // Segments must lie along BedW
+            else if (pWidth <= bedW) validBedDim = 1; // Segments must lie along BedH
+            
+            if (validBedDim === -1) continue; // Doesn't fit perpendicularly
+            
+            const limit = validBedDim === 0 ? bedW : bedH;
+            
+            // Can we cut 'span' into targetCuts+1 pieces each <= limit?
+            if (span / (targetCuts + 1) > limit) continue;
+            
+            // Found a valid angle! Calculate even offsets
+            const offsets = [];
+            const step = span / (targetCuts + 1);
+            for(let i=1; i<=targetCuts; i++) {
+                offsets.push(minP + step * i);
+            }
+            return { angle: rad, offsets };
         }
+        return null;
     };
 
-    // Process Vertical Cuts
-    if (cutsX > 0) {
-        const step = width / (cutsX + 1);
-        for(let i=1; i<=cutsX; i++) {
-            optimizeCut(minX + step * i, (minY + maxY)/2, true);
-        }
+    // STRATEGY 1: TRY N-1 CUTS
+    let finalConfig = null;
+    if (naiveTotalCuts > minCuts) {
+        console.log("Attempting N-1 optimization...");
+        finalConfig = runStraightCutScan(naiveTotalCuts - 1);
     }
 
-    // Process Horizontal Cuts
-    if (cutsY > 0) {
-        const step = height / (cutsY + 1);
-        for(let i=1; i<=cutsY; i++) {
-            optimizeCut((minX + maxX)/2, minY + step * i, false);
+    // STRATEGY 2: FALLBACK TO NAIVE AXIS ALIGNED
+    if (!finalConfig) {
+        console.log("Optimization failed, falling back to axis aligned.");
+        // Reconstruct axis aligned config as angle/offsets
+        // We do this by creating separate jobs for X and Y, 
+        // but to unify the pipeline, we generate the shapes directly here.
+        
+        // Direct generation for axis aligned to ensure fallback reliability
+        const shapes: FootprintSplitLine[] = [];
+        
+        const optimizeAndPush = (centerX: number, centerY: number, isVertical: boolean) => {
+            const ux = isVertical ? 0 : 1;
+            const uy = isVertical ? 1 : 0;
+            const startNode = { x: centerX - ux * 2000, y: centerY - uy * 2000 };
+            const endNode = { x: centerX + ux * 2000, y: centerY + uy * 2000 };
+            // Search Radius: allow slight wiggle
+            const searchRes = findSafeSplitLine(
+                footprint, allFootprints, params, stackup, startNode, endNode, bedSize,
+                { searchRadius: 20, angleRange: 0 }, ignoredLayerIds
+            );
+            if (searchRes.result) {
+                const r = searchRes.result;
+                shapes.push({
+                    id: crypto.randomUUID(), type: "splitLine", name: "Auto Split",
+                    x: r.start.x.toFixed(4), y: r.start.y.toFixed(4),
+                    endX: (r.end.x - r.start.x).toFixed(4), endY: (r.end.y - r.start.y).toFixed(4),
+                    dovetailCount: r.count.toString(), dovetailWidth: r.width.toString(),
+                    assignedLayers: {}, ignoredLayerIds: ignoredLayerIds
+                } as any);
+                debugLines.push({x1: r.start.x, y1: r.start.y, x2: r.end.x, y2: r.end.y, color: "rgba(0,255,0,0.5)"});
+            }
+        };
+
+        if (cutsX > 0) {
+            const step = width / (cutsX + 1);
+            for(let i=1; i<=cutsX; i++) optimizeAndPush(minX + step * i, (minY+maxY)/2, true);
+        }
+        if (cutsY > 0) {
+            const step = height / (cutsY + 1);
+            for(let i=1; i<=cutsY; i++) optimizeAndPush((minX+maxX)/2, minY + step * i, false);
+        }
+        
+        generatedShapes = shapes;
+
+    } else {
+        // EXECUTE OPTIMIZED CONFIG (Hill Climb with Dovetails)
+        console.log("Optimization success! Applying dovetail search...");
+        const ux = Math.cos(finalConfig.angle);
+        const uy = Math.sin(finalConfig.angle);
+        // Perpendicular for center point calc
+        const px = -uy; 
+        const py = ux;
+        
+        // Find center of board projected on perp axis
+        let centerP = 0;
+        outlinePoints.forEach(p => centerP += (p.x * px + p.y * py));
+        centerP /= outlinePoints.length; // Approximate center
+
+        for (const offset of finalConfig.offsets) {
+            // Reconstruct a point on the line
+            // P = offset * U + centerP * P
+            const cx = offset * ux + centerP * px;
+            const cy = offset * uy + centerP * py;
+            
+            const startNode = { x: cx - ux * 2000, y: cy - uy * 2000 };
+            const endNode = { x: cx + ux * 2000, y: cy + uy * 2000 };
+            
+            // Run hill climb with restricted angle to keep close to optimal
+            const searchRes = findSafeSplitLine(
+                footprint, allFootprints, params, stackup, startNode, endNode, bedSize,
+                { searchRadius: 20, angleRange: 5 }, ignoredLayerIds
+            );
+            
+            if (searchRes.result) {
+                const r = searchRes.result;
+                generatedShapes.push({
+                    id: crypto.randomUUID(), type: "splitLine", name: "Optimized Split",
+                    x: r.start.x.toFixed(4), y: r.start.y.toFixed(4),
+                    endX: (r.end.x - r.start.x).toFixed(4), endY: (r.end.y - r.start.y).toFixed(4),
+                    dovetailCount: r.count.toString(), dovetailWidth: r.width.toString(),
+                    assignedLayers: {}, ignoredLayerIds: ignoredLayerIds
+                } as any);
+                debugLines.push({x1: r.start.x, y1: r.start.y, x2: r.end.x, y2: r.end.y, color: "rgba(0,255,255,0.5)"});
+            } else {
+                debugLines.push({x1: startNode.x, y1: startNode.y, x2: endNode.x, y2: endNode.y, color: "rgba(255,0,0,0.5)"});
+            }
         }
     }
 
     // 3. FINAL VALIDATION
-    if (generatedShapes.length === 0 && (cutsX > 0 || cutsY > 0)) {
-        return { success: false, shapes: [], maxExcess: Infinity, debugLines };
-    }
-
     // Create mock footprint to check total result
     const mockFp = { ...footprint, shapes: [...footprint.shapes.filter(s=>s.type==="boardOutline"), ...generatedShapes] };
     const sizeCheck = checkSplitPartSizes(mockFp, params, allFootprints, bedSize);

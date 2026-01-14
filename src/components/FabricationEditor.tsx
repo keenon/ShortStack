@@ -186,12 +186,13 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     setFabPlans(prev => prev.map(p => p.id === activePlan.id ? updatedPlan : p));
   };
 
-  const updateSplitSettings = (layerId: string, enabled: boolean, lineIds?: string[]) => {
+  const updateSplitSettings = (layerId: string, updates: { enabled?: boolean, lineIds?: string[], kerf?: string }) => {
       if (!activePlan) return;
       const currentSplitSettings = (activePlan as any).layerSplitSettings || {};
+      const oldLayerSettings = currentSplitSettings[layerId] || {};
       const newSettings = {
           ...currentSplitSettings,
-          [layerId]: { enabled, lineIds: lineIds || currentSplitSettings[layerId]?.lineIds }
+          [layerId]: { ...oldLayerSettings, ...updates }
       };
       setFabPlans(prev => prev.map(p => p.id === activePlan.id ? {...p, layerSplitSettings: newSettings} : p));
   };
@@ -334,11 +335,38 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                 let shapes: any[] = [];
 
                 if (method === "3D printed") {
-                    const rawStl = view3DRef.current?.getLayerSTL(layer.id);
-                    if (rawStl) {
-                        stl_content = Array.from(rawStl);
-                    } else {
+                    // Try to get multiple parts if split
+                    const stlParts = await view3DRef.current?.getLayerSTLs(layer.id) || [];
+                    
+                    if (stlParts.length === 0) {
                         console.error(`Failed to get STL for layer ${layer.name}`);
+                        continue;
+                    }
+
+                    if (stlParts.length > 1) {
+                        // Multi-file export
+                        for (let i = 0; i < stlParts.length; i++) {
+                            const partFileName = `${planName}_${layer.name.replace(/[^a-zA-Z0-9]/g, '_')}_Part${i+1}.${extension}`;
+                            const partPath = await join(folderPath as string, partFileName);
+                            
+                            await invoke("export_layer_files", {
+                                request: {
+                                    filepath: partPath,
+                                    file_type: rustFormat,
+                                    machining_type: "Carved/Printed",
+                                    cut_direction: layer.carveSide,
+                                    outline,
+                                    shapes: [],
+                                    layer_thickness: layerThickness,
+                                    stl_content: Array.from(stlParts[i])
+                                }
+                            });
+                        }
+                        // Skip the single export below
+                        continue; 
+                    } else {
+                        // Single file
+                        stl_content = Array.from(stlParts[0]);
                     }
                 } else {
                     const effectiveType = method === "Laser cut" ? "Cut" as const : "Carved/Printed" as const;
@@ -711,10 +739,21 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                         <input 
                                             type="checkbox" 
                                             checked={!!splitSettings.enabled} 
-                                            onChange={(e) => updateSplitSettings(layer.id, e.target.checked)} 
+                                            onChange={(e) => updateSplitSettings(layer.id, { enabled: e.target.checked })} 
                                         />
                                         Split into Parts
                                     </label>
+                                    {splitSettings.enabled && (
+                                        <div style={{ paddingLeft: '22px', marginBottom: '5px' }}>
+                                            <label style={{ fontSize: '0.8em', color: '#888' }}>Cut Kerf (mm)</label>
+                                            <input 
+                                                type="number" step="0.1" 
+                                                style={{ width: '60px', marginLeft: '8px', background:'#333', border:'1px solid #555', color:'white', fontSize:'0.9em' }}
+                                                value={splitSettings.kerf || "0.5"}
+                                                onChange={(e) => updateSplitSettings(layer.id, { kerf: e.target.value })}
+                                            />
+                                        </div>
+                                    )}
                                     {splitSettings.enabled && (
                                         <div style={{ marginTop: '8px', paddingLeft: '5px' }}>
                                             <label style={{ fontSize: '0.85em', color: '#888' }}>Active Split Lines:</label>
@@ -731,7 +770,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                                                     let next;
                                                                     if (e.target.checked) next = [...current, sl.id];
                                                                     else next = current.filter((id: string) => id !== sl.id);
-                                                                    updateSplitSettings(layer.id, true, next);
+                                                                    updateSplitSettings(layer.id, { enabled: true, lineIds: next });
                                                                 }} 
                                                             />
                                                             {sl.name}
