@@ -1,7 +1,7 @@
 // src/components/FootprintPropertiesPanel.tsx
 // import React, { Fragment, useMemo } from "react";
 import { Fragment, useMemo, useRef, useEffect } from "react";
-import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion, FootprintText, TieDown } from "../types";
+import { Footprint, Parameter, StackupLayer, Point, LayerAssignment, FootprintReference, FootprintCircle, FootprintRect, FootprintLine, FootprintWireGuide, FootprintBoardOutline, FootprintPolygon, MeshAsset, FootprintShape, FootprintUnion, FootprintText, TieDown, FootprintSplitLine} from "../types";
 import ExpressionEditor from "./ExpressionEditor";
 import { modifyExpression, calcMid, getAvailableWireGuides, findWireGuideByPath, convertRectToPolyPoints, isFootprintOptionValid } from "../utils/footprintUtils";
 
@@ -30,6 +30,9 @@ const FootprintPropertiesPanel = ({
   hoveredTieDownId,
   setHoveredTieDownId,
   scrollToTieDownId,
+  isSplitToolActive,
+  splitToolOptions,
+  setSplitToolOptions,
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -55,6 +58,9 @@ const FootprintPropertiesPanel = ({
   hoveredTieDownId?: string | null;
   setHoveredTieDownId?: (id: string | null) => void;
   scrollToTieDownId?: string | null;
+  isSplitToolActive?: boolean;
+  splitToolOptions?: { ignoredLayerIds: string[] };
+  setSplitToolOptions?: (opts: { ignoredLayerIds: string[] }) => void;
 }) => {
   
   // Get available wire guides for Snapping
@@ -137,6 +143,47 @@ const FootprintPropertiesPanel = ({
           {currentLocked && <small style={{color: '#666', fontSize:'0.8em'}}>Selection only</small>}
       </div>
   );
+
+  // NEW: Split Tool Global Options (When tool active but no line selected)
+  if (selectedShapeIds.length === 0 && isSplitToolActive) {
+      const toolOpts = splitToolOptions || { ignoredLayerIds: [] };
+      const setToolOpts = setSplitToolOptions || (() => {});
+
+      return (
+        <div className="properties-panel">
+            <h3>Split Tool Options</h3>
+            <p style={{fontSize:'0.9em', color:'#aaa', marginBottom:'20px'}}>
+                Configure default settings for new split lines.
+            </p>
+
+            <div className="prop-section">
+                <h4>Ignored Obstacle Layers</h4>
+                <div className="layer-list">
+                    {stackup.map(layer => {
+                        const isIgnored = toolOpts?.ignoredLayerIds?.includes(layer.id);
+                        return (
+                            <div key={layer.id} className="layer-assignment-row">
+                                <input 
+                                    type="checkbox" 
+                                    checked={!!isIgnored} 
+                                    onChange={(e) => {
+                                        const current = toolOpts?.ignoredLayerIds || [];
+                                        const next = e.target.checked 
+                                            ? [...current, layer.id]
+                                            : current.filter((id: string) => id !== layer.id);
+                                        setToolOpts({ ...toolOpts, ignoredLayerIds: next });
+                                    }}
+                                />
+                                <div className="layer-color-badge" style={{ backgroundColor: layer.color }} />
+                                <span className="layer-name">{layer.name}</span>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+      );
+  }
 
   if (selectedShapeIds.length > 1) {
     const handleBatchLock = (locked: boolean) => {
@@ -806,6 +853,73 @@ const FootprintPropertiesPanel = ({
   };
 
   // NEW: Wire Guide Properties
+  if (shape.type === "splitLine") {
+      const sl = shape as FootprintSplitLine;
+      return (
+        <div className="properties-panel">
+            {header}
+            {renderLockToggle(shape.id, shape.locked)}
+            <div className="prop-group">
+                <label>Name</label>
+                <input type="text" value={sl.name} onChange={(e) => updateShape(sl.id, "name", e.target.value)} />
+            </div>
+            <div className="prop-group">
+                <label>Dovetail Count</label>
+                <ExpressionEditor value={sl.dovetailCount} onChange={(v) => updateShape(sl.id, "dovetailCount", v)} params={params} placeholder="3" />
+            </div>
+            <div className="prop-group">
+                <label>Dovetail Width (mm)</label>
+                <ExpressionEditor value={sl.dovetailWidth} onChange={(v) => updateShape(sl.id, "dovetailWidth", v)} params={params} placeholder="10" />
+            </div>
+            <div className="prop-section">
+                <h4>Position</h4>
+                <div className="prop-group">
+                    <label>Start X</label>
+                    <ExpressionEditor value={sl.x} onChange={(v) => updateShape(sl.id, "x", v)} params={params} />
+                </div>
+                <div className="prop-group">
+                    <label>Start Y</label>
+                    <ExpressionEditor value={sl.y} onChange={(v) => updateShape(sl.id, "y", v)} params={params} />
+                </div>
+                <div className="prop-group">
+                    <label>DX</label>
+                    <ExpressionEditor value={sl.endX} onChange={(v) => updateShape(sl.id, "endX", v)} params={params} />
+                </div>
+                <div className="prop-group">
+                <label>DY</label>
+                <ExpressionEditor value={sl.endY} onChange={(v) => updateShape(sl.id, "endY", v)} params={params} />
+            </div>
+            </div>
+
+            <div className="prop-section">
+                <h4>Ignored Obstacle Layers</h4>
+                <div className="layer-list">
+                    {stackup.map(layer => {
+                        const isIgnored = (sl as any).ignoredLayerIds?.includes(layer.id);
+                        return (
+                            <div key={layer.id} className="layer-assignment-row">
+                                <input 
+                                    type="checkbox" 
+                                    checked={!!isIgnored} 
+                                    onChange={(e) => {
+                                        const current = (sl as any).ignoredLayerIds || [];
+                                        const next = e.target.checked 
+                                            ? [...current, layer.id]
+                                            : current.filter((id: string) => id !== layer.id);
+                                        updateShape(sl.id, "ignoredLayerIds", next);
+                                    }}
+                                />
+                                <div className="layer-color-badge" style={{ backgroundColor: layer.color }} />
+                                <span className="layer-name">{layer.name}</span>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+      );
+  }
+
   if (shape.type === "wireGuide") {
       const wg = shape as FootprintWireGuide;
       return (

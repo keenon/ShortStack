@@ -1,5 +1,4 @@
 // src/workers/meshWorker.ts
-
 // --- POLYFILLS FOR WORKER ENVIRONMENT ---
 self.window = self as any;
 self.document = {
@@ -25,8 +24,8 @@ import { mergeBufferGeometries, mergeVertices } from "three-stdlib";
 // @ts-ignore
 import initOCCT from "occt-import-js";
 import Module from "manifold-3d";
-import { evaluateExpression, resolvePoint, getPolyOutlinePoints, getTransformAlongLine } from "../utils/footprintUtils";
-import { Footprint, Parameter, FootprintShape, FootprintRect, FootprintLine, FootprintPolygon, FootprintReference, FootprintUnion, Point, FootprintBoardOutline } from "../types";
+import { evaluateExpression, resolvePoint, getPolyOutlinePoints, getTransformAlongLine, generateDovetailPoints } from "../utils/footprintUtils";
+import { Footprint, Parameter, FootprintShape, FootprintRect, FootprintLine, FootprintPolygon, FootprintReference, FootprintUnion, Point, FootprintBoardOutline, FootprintSplitLine } from "../types";
 
 let occt: any = null;
 let manifoldModule: any = null;
@@ -842,6 +841,71 @@ self.onmessage = async (e: MessageEvent) => {
                 // --- FINAL CLIPPING STEP ---
                 report(`Clipping to board boundary...`, 0.92);
                 base = collect(manifoldModule.Manifold.intersection(base, boundaryMask));
+
+                // --- 5. FABRICATION SPLIT (APPLIED LAST) ---
+                if (payload.enableSplit) {
+                    report(`Applying fabrication split...`, 0.94);
+                    const splitShapes = footprint.shapes.filter((s: any) => s.type === "splitLine");
+                    const targetIds: string[] | undefined = payload.splitLineIds;
+
+                    splitShapes.forEach((s: any) => {
+                        if (targetIds && targetIds.length > 0 && !targetIds.includes(s.id)) return;
+
+                        const sl = s as FootprintSplitLine;
+                        const startX = evaluate(sl.x, params);
+                        const startY = evaluate(sl.y, params);
+                        const endX = startX + evaluate(sl.endX, params);
+                        const endY = startY + evaluate(sl.endY, params);
+                        const count = Math.round(evaluate(sl.dovetailCount, params));
+                        const dWidth = evaluate(sl.dovetailWidth, params);
+
+                        // Generate points in math coords (Y-Up)
+                        const pts = generateDovetailPoints(startX, startY, endX, endY, count, dWidth);
+                        
+                        // Map to Point[] for utility function
+                        const linePoints: Point[] = pts.map(p => ({
+                            id: "temp",
+                            x: p.x.toString(),
+                            y: p.y.toString()
+                        }));
+
+                        const mockLine: FootprintLine = {
+                            id: "temp_split",
+                            type: "line",
+                            name: "split",
+                            x: "0", y: "0",
+                            thickness: "0.5", // Kerf width
+                            points: linePoints,
+                            assignedLayers: {}
+                        };
+
+                        // Use existing logic to get contour of the line (thickened by kerf)
+                        const cutterPts = getLineOutlinePoints(mockLine, params, 0.5, resolution, footprint, allFootprints);
+                        
+                        if (cutterPts.length >= 3) {
+                            const polyArr = cutterPts.map(p => [p.x, p.y]);
+                            
+                            // Re-map contour to local (Same logic as earlier shapes)
+                            const remappedPoly = polyArr.map(pt => {
+                                const lx = pt[0] - centerX;
+                                const lz = centerZ - pt[1]; 
+                                return [lx, -lz];
+                            });
+                            
+                            let cutterCS = collect(new CrossSection([remappedPoly], "EvenOdd"));
+                            
+                            // Extrude vertically (Y axis in world)
+                            const cutterH = thickness + 10;
+                            const cutter3D = collect(collect(cutterCS.extrude(cutterH)).translate([0, 0, -cutterH/2]));
+                            
+                            // Align Z -> Y
+                            const cutterAligned = collect(cutter3D.rotate([-90, 0, 0]));
+                            
+                            // Subtract from FINAL base
+                            base = collect(Manifold.difference(base, cutterAligned));
+                        }
+                    });
+                }
 
                 report(`Finalizing mesh for ${layerStr}...`, 0.95);
 

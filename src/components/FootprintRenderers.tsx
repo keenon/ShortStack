@@ -1,7 +1,7 @@
 // src/components/FootprintRenderers.tsx
 import React from "react";
-import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion, FootprintText } from "../types";
-import { evaluateExpression, resolvePoint, getTransformAlongLine } from "../utils/footprintUtils";
+import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintWireGuide, FootprintBoardOutline, FootprintLine, FootprintUnion, FootprintText, FootprintSplitLine  } from "../types";
+import { evaluateExpression, resolvePoint, getTransformAlongLine, generateDovetailPoints  } from "../utils/footprintUtils";
 
 // Helper for Cubic Bezier evaluation at t (1D)
 function bezier1D(p0: number, p1: number, p2: number, p3: number, t: number): number {
@@ -198,6 +198,40 @@ export const RecursiveShapeRenderer = ({
               onlyHandles={onlyHandles}
               parentTransform={parentTransform}
           />
+      );
+  }
+
+  // SPLIT LINE RENDERER
+  if (shape.type === "splitLine") {
+      if (onlyHandles) return null; // No handles yet implemented for manual tweak
+      const sl = shape as FootprintSplitLine;
+      const x1 = evaluateExpression(sl.x, params);
+      const y1 = evaluateExpression(sl.y, params);
+      const x2 = x1 + evaluateExpression(sl.endX, params);
+      const y2 = y1 + evaluateExpression(sl.endY, params);
+      const count = Math.round(evaluateExpression(sl.dovetailCount, params));
+      const width = evaluateExpression(sl.dovetailWidth, params);
+
+      // Generate points in global visual space
+      // Note: Y is inverted for visualization in parent components usually?
+      // RecursiveShapeRenderer generally receives Y-up math coords, and renders them. 
+      // The parent SVG flips Y if needed. Here we assume we draw in standard math coords and apply transform.
+      
+      const pts = generateDovetailPoints(x1, y1, x2, y2, count, width);
+      let d = `M ${pts[0].x} ${-pts[0].y}`;
+      for(let i=1; i<pts.length; i++) d += ` L ${pts[i].x} ${-pts[i].y}`;
+
+      // UPDATED: Subtle styling when not selected
+      const stroke = isSelected ? selectionColor : "#ff00ff";
+      const opacity = isSelected ? 1.0 : 0.4;
+      const widthStr = isSelected ? 2 : 1;
+      
+      return (
+          <g style={{ cursor: 'pointer', opacity }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
+              <path d={d} fill="none" stroke={stroke} strokeWidth={widthStr} strokeDasharray="5,2" vectorEffect="non-scaling-stroke" />
+              {/* Hit area */}
+              <path d={d} fill="none" stroke="transparent" strokeWidth={10} vectorEffect="non-scaling-stroke" />
+          </g>
       );
   }
 
