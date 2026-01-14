@@ -1114,7 +1114,7 @@ self.onmessage = async (e: MessageEvent) => {
         // --- 5. COMPUTE CNC TOOLPATH ---
         else if (type === "computeToolpath") {
             if (!manifoldModule) throw new Error("Manifold not initialized");
-            const { shapes, params, contextFp, allFootprints, settings, layerThickness, layerId, bottomZ, carveSide, resolution = 32 } = payload;
+            const { shapes, params, contextFp, allFootprints, settings, layerThickness, layerId, bottomZ, resolution = 32 } = payload;
             const { CrossSection } = manifoldModule;
             const garbage: any[] = [];
             const collect = <T>(obj: T): T => { if(obj && (obj as any).delete) garbage.push(obj); return obj; };
