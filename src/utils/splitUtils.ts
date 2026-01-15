@@ -257,14 +257,25 @@ export function checkSplitPartSizes(
     const outlinePoints = getTessellatedBoardOutline(footprint, params, allFootprints);
     if (outlinePoints.length < 3) return { parts: [], maxExcess: 0 };
     const splitLines = footprint.shapes.filter(s => s.type === "splitLine") as FootprintSplitLine[];
-    if (splitLines.length === 0) return { parts: [], maxExcess: 0 };
+    if (splitLines.length === 0) {
+        const fit = findFittingRectangle(outlinePoints, bedSize.width, bedSize.height);
+        return { 
+            parts: [{ 
+                valid: fit.fits, 
+                excess: fit.excess, 
+                corners: fit.corners, 
+                hull: computeConvexHull(outlinePoints) 
+            }], 
+            maxExcess: fit.excess 
+        };
+    }
 
     const lineDefs = splitLines.map(sl => {
         const sx = evaluateExpression(sl.x, params);
         const sy = evaluateExpression(sl.y, params);
         const ex = sx + evaluateExpression(sl.endX, params);
         const ey = sy + evaluateExpression(sl.endY, params);
-        const posArr = sl.dovetailPositions ? sl.dovetailPositions.map(p => evaluateExpression(p, params)) : [0.5];
+        const posArr = sl.dovetailPositions ? sl.dovetailPositions.map(p => evaluateExpression(p, params)) : [];
         const width = evaluateExpression(sl.dovetailWidth, params);
         const height = evaluateExpression(sl.dovetailHeight, params);
         const flip = !!sl.flip;
@@ -509,7 +520,7 @@ export function autoComputeSplit(
         const solution = runPSO(n, geometry);
         
         // Cost < 1.0 implies fit
-        if (solution.cost < 5.0) { 
+        if (solution.cost < 1.0) { 
             bestSolution = solution;
             break; 
         }
@@ -572,7 +583,7 @@ export function autoComputeSplit(
             const sy = anchorY + vy * (tMin - pad);
             const ex = anchorX + vx * (tMax + pad);
             const ey = anchorY + vy * (tMax + pad);
-
+            
             generatedShapes.push({
                 id: crypto.randomUUID(),
                 type: "splitLine",
@@ -581,9 +592,10 @@ export function autoComputeSplit(
                 y: sy.toFixed(4),
                 endX: (ex - sx).toFixed(4),
                 endY: (ey - sy).toFixed(4),
-                dovetailPositions: ["0.5"], 
+                dovetailPositions: [], 
                 dovetailWidth: "15",
                 dovetailHeight: "12",
+                flip: false,
                 assignedLayers: {},
                 ignoredLayerIds
             } as any);
@@ -620,6 +632,7 @@ interface RustGeometryInput {
     obstacles: RustObstacle[];
     bed_width: number;
     bed_height: number;
+    initial_line?: [[number, number], [number, number]] | null; // Optional seed
 }
 
 interface RustGeneratedCut {
@@ -629,149 +642,13 @@ interface RustGeneratedCut {
     dovetail_width: number;
     dovetail_height: number;
     dovetail_t: number;
+    flipped: boolean;
 }
 
 interface RustOptimizationResult {
     success: boolean;
     cost: number;
     shapes: RustGeneratedCut[];
-}
-
-// --- OPTIMIZER HELPER ---
-
-/**
- * Sends a single cut line to the Rust backend to optimize its position, 
- * angle, and dovetail parameters for maximum clearance and board fit.
- */
-export async function optimizeCutWithDovetail(
-    cut: FootprintSplitLine,
-    footprint: Footprint,
-    allFootprints: Footprint[],
-    params: Parameter[],
-    bedSize: { width: number, height: number }
-): Promise<FootprintSplitLine> {
-    
-    // 1. Prepare Geometry
-    const outline = getTessellatedBoardOutline(footprint, params, allFootprints);
-    if (outline.length < 3) return cut; // Safety fallback
-
-    // Map outline to array of arrays for Rust
-    const rustOutline = outline.map(p => [p.x, p.y]);
-
-    // Collect obstacles (Reuse your existing obstacle collection logic)
-    // Note: We need to pass a dummy stackup or grab it from context if available.
-    // Assuming 'collectGlobalObstacles' is available in this scope or you pass stackup.
-    // For this helper, we'll assume the caller passes critical obstacles or we re-collect.
-    // *Simplification*: We'll assume the helper is called from a context where we can get obstacles.
-    // If not, we need to pass 'stackup' to this function. 
-    // Let's add 'stackup' to the arguments or assume a global context. 
-    // I will update the function signature below to include stackup.
-    
-    // Fallback: if no obstacles found, send empty list.
-    const rustObstacles: RustObstacle[] = []; 
-    // (You should ideally inject the 'criticalObstacles' list used in autoComputeSplit here)
-
-    const input: RustGeometryInput = {
-        outline: rustOutline,
-        obstacles: rustObstacles, 
-        bed_width: bedSize.width,
-        bed_height: bedSize.height
-    };
-
-    try {
-        // 2. Invoke Rust
-        // Note: We are sending snake_case keys because we defined the Rust struct 
-        // without #[serde(rename_all="camelCase")].
-        const result = await invoke<RustOptimizationResult>("compute_smart_split", { input });
-
-        if (!result.success || result.shapes.length === 0) {
-            console.warn("Rust optimizer failed or returned no shapes, keeping original.");
-            return cut;
-        }
-
-        const optShape = result.shapes[0];
-
-        // 3. Reconstruct the Cut Line
-        // The optimizer returns a specific segment (start->end) and a 't' value (0.0-1.0)
-        // for the dovetail center.
-        // Most renderers place the dovetail at the exact center (t=0.5) if count=1.
-        // We will shift the start/end points of the line so that the physical location
-        // of the dovetail aligns with the optimizer's result, while keeping t=0.5 
-        // relative to the drawn line.
-
-        const rStart = { x: optShape.start[0], y: optShape.start[1] };
-        const rEnd = { x: optShape.end[0], y: optShape.end[1] };
-        
-        // Calculate the absolute position of the optimized dovetail center
-        const dx = rEnd.x - rStart.x;
-        const dy = rEnd.y - rStart.y;
-        const len = Math.sqrt(dx*dx + dy*dy);
-        const ux = dx / len;
-        const uy = dy / len;
-
-        const doveCenterX = rStart.x + ux * (len * optShape.dovetail_t);
-        const doveCenterY = rStart.y + uy * (len * optShape.dovetail_t);
-
-        // Create a new long line centered on this point to ensure it crosses the board
-        // (The original optimizer might have returned a clipped line, but we want 
-        // to be robust for the renderer which might clip it again)
-        const hugeLen = Math.max(bedSize.width, bedSize.height) * 3;
-        const newStart = { 
-            x: doveCenterX - ux * (hugeLen / 2), 
-            y: doveCenterY - uy * (hugeLen / 2) 
-        };
-        const newEnd = { 
-            x: doveCenterX + ux * (hugeLen / 2), 
-            y: doveCenterY + uy * (hugeLen / 2) 
-        };
-
-        // Clip this new line against the board outline to get clean start/end points
-        // (Reuse your existing clipping logic or simple segment intersection)
-        let tMin = 0.5 - (len / hugeLen); // Approx original start
-        let tMax = 0.5 + (len / hugeLen); // Approx original end
-        
-        // Refined clipping:
-        const farStart = { x: doveCenterX - ux * 10000, y: doveCenterY - uy * 10000 };
-        const farEnd = { x: doveCenterX + ux * 10000, y: doveCenterY + uy * 10000 };
-        // ... (Insert intersection logic here similar to autoComputeSplit) ...
-        // For brevity, we will use the optimizer's returned vector direction and 
-        // just clamp it to the outline.
-
-        // 4. Handle "Flip"
-        // Rust always places dovetail on "Left" of the vector.
-        // Original cut vector:
-        const origDx = parseFloat(cut.endX as any);
-        const origDy = parseFloat(cut.endY as any);
-        
-        // Dot product to check if direction reversed
-        const dot = ux * origDx + uy * origDy;
-        const isReversed = dot < 0;
-
-        // If Rust reversed the line, it means it wanted the dovetail on the "Right"
-        // of the original vector. 
-        // Since we are adopting the NEW vector (newStart -> newEnd), the dovetail 
-        // is on the "Left" of THIS new vector.
-        // So geometrically, 'flip' should be false if we use the new vector.
-        // However, if you want to preserve the "End Handle is roughly that way" UX:
-        // You could swap start/end and set flip=true. 
-        // Let's stick to the simplest geometry: Use Rust's direction, flip=false.
-        
-        return {
-            ...cut,
-            x: rStart.x.toFixed(4),
-            y: rStart.y.toFixed(4),
-            endX: (rEnd.x - rStart.x).toFixed(4),
-            endY: (rEnd.y - rStart.y).toFixed(4),
-            dovetailPositions: [optShape.dovetail_t.toFixed(4)],
-            dovetailWidth: optShape.dovetail_width.toFixed(4),
-            dovetailHeight: optShape.dovetail_height.toFixed(4), 
-            flip: false 
-        } as any;
-
-    } catch (e) {
-        console.error("Rust optimization error:", e);
-        return cut;
-    }
 }
 
 // --- UPDATED AUTO SPLIT ---
@@ -792,7 +669,8 @@ export async function autoComputeSplitWithRefinement(
         return psoResult;
     }
 
-    console.log("PSO found rough cuts. Refining with CMA-ES...");
+    console.log("PSO found idealized cuts. Refining with CMA-ES...");
+    console.log(`Initial Cuts: ${psoResult.shapes.length} | Log: ${psoResult.log} with excess ${psoResult.maxExcess}`);
 
     // 2. Refine each cut using Rust
     // We need to collect obstacles once to pass them efficiently
@@ -810,46 +688,56 @@ export async function autoComputeSplitWithRefinement(
     // Helper to call our optimizer with pre-collected obstacles
     const optimize = async (cut: FootprintSplitLine) => {
         const outline = getTessellatedBoardOutline(footprint, params, allFootprints);
+        // Prepare input strictly matching Rust expectations
+        const initialLineSeed: [[number, number], [number, number]] = [
+            [cut.x, cut.y].map(v => parseFloat(v)) as [number, number],
+            [cut.endX, cut.endY].map(v => parseFloat(v)) as [number, number]
+        ];
         const input: RustGeometryInput = {
             outline: outline.map(p => [p.x, p.y]),
             obstacles: rustObstacles,
             bed_width: bedSize.width,
-            bed_height: bedSize.height
+            bed_height: bedSize.height,
+            initial_line: initialLineSeed
         };
         
         try {
             const res = await invoke<RustOptimizationResult>("compute_smart_split", { input });
+            
             if (res.success && res.shapes.length > 0) {
-                const s = res.shapes[0];
-                // Logic to center the dovetail (t=0.5)
-                const start = { x: s.start[0], y: s.start[1] };
-                const end = { x: s.end[0], y: s.end[1] };
-                const dx = end.x - start.x; const dy = end.y - start.y;
-                const len = Math.sqrt(dx*dx + dy*dy);
-                const ux = dx/len; const uy = dy/len;
-                
-                // Real center of dovetail
-                const cx = start.x + ux * (len * s.dovetail_t);
-                const cy = start.y + uy * (len * s.dovetail_t);
-                
-                // Construct new segment centered on cx, cy with same length
-                // This ensures t=0.5 corresponds to the optimized location
-                const newSx = cx - ux * (len/2);
-                const newSy = cy - uy * (len/2);
-                
+                const s = res.shapes[0]; // The GeneratedCut from Rust
+
+                // Extract absolute coordinates from Rust result
+                const startX = s.start[0];
+                const startY = s.start[1];
+                const endX = s.end[0];
+                const endY = s.end[1];
+
                 return {
                     ...cut,
-                    x: newSx.toFixed(4),
-                    y: newSy.toFixed(4),
-                    endX: (ux * len).toFixed(4),
-                    endY: (uy * len).toFixed(4),
+                    // 1. Absolute Start Position
+                    x: startX.toFixed(4),
+                    y: startY.toFixed(4),
+                    
+                    // 2. Relative Vector (End - Start)
+                    endX: (endX - startX).toFixed(4),
+                    endY: (endY - startY).toFixed(4),
+                    
+                    // 3. Dovetail Parameters
                     dovetailWidth: s.dovetail_width.toFixed(4),
-                    // If your type doesn't support height, you might need to drop this or use a parameter
                     dovetailHeight: s.dovetail_height.toFixed(4),
-                    flip: false // Rust result is always Left-oriented
+                    
+                    // 4. Longitudinal Position (0-1 along the line)
+                    // We use the exact 't' found by Rust instead of centering
+                    dovetailPositions: [s.dovetail_t.toFixed(4)],
+                    
+                    // 5. Orientation
+                    flip: s.flipped 
                 };
             }
-        } catch(e) { console.error(e); }
+        } catch(e) { 
+            console.error("Split refinement failed:", e); 
+        }
         return cut;
     };
 

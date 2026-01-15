@@ -6,7 +6,7 @@ import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference,
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
-import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit } from "../utils/splitUtils";
+import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit, autoComputeSplitWithRefinement } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
@@ -2892,41 +2892,55 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         onClick={async () => {
                             if (!footprint.isBoard) { alert("Please enable 'Standalone Board' first."); return; }
                             
+                            const preCheck = checkSplitPartSizes(footprint, params, allFootprints, bedSize);
+                            if (preCheck.maxExcess < 1.0) {
+                                alert("No split needed! The footprint already fits within the bed dimensions.");
+                                return;
+                            }
+
                             setProcessingMessage("Running Global Search...");
                             
                             // Yield to UI to show spinner
                             await new Promise(resolve => setTimeout(resolve, 50));
 
-                            const res = autoComputeSplit(
-                                footprint, allFootprints, params, stackup, 
-                                bedSize, { clearance: 2, desiredCuts: 1 }, 
-                                splitToolOptions.ignoredLayerIds
-                            );
-                            
-                            setProcessingMessage(null);
-                            
-                            // Show debug log from algorithm
-                            if (res.log) alert(res.log);
+                            try {
+                                const res = await autoComputeSplitWithRefinement(
+                                    footprint, allFootprints, params, stackup, 
+                                    bedSize, { clearance: 2, desiredCuts: 1 }, 
+                                    splitToolOptions.ignoredLayerIds
+                                );
+                                
+                                setProcessingMessage(null);
+                                
+                                if (res.log) console.log(res.log);
+                                console.log("Auto-split result:", res);
 
-                            if (res.success) {
-                                if (res.shapes && res.shapes.length > 0) {
+                                if (res.success && res.shapes && res.shapes.length > 0) {
                                     const newIds = res.shapes.map(s => s.id);
                                     updateHistory({ 
                                         footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
                                         selectedShapeIds: newIds
                                     });
                                 } else {
-                                    alert("No split needed! The footprint already fits within the bed dimensions.");
+                                    // Fallback or Failure
+                                    if (res.shapes && res.shapes.length > 0) {
+                                        alert(`Warning: Perfect fit not found. Found ${res.shapes.length} cuts with excess: ${res.maxExcess?.toFixed(1)}mm`);
+                                        // Still apply the best effort result
+                                        const newIds = res.shapes.map(s => s.id);
+                                        updateHistory({ 
+                                            footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                                            selectedShapeIds: newIds
+                                        });
+                                    } else {
+                                        alert("Global search failed completely. Check obstacle layers or try increasing bed size.");
+                                    }
                                 }
-                            } else {
-                                // Fallback or Failure
-                                if (res.shapes && res.shapes.length > 0) {
-                                    alert(`Warning: Perfect fit not found. Found ${res.shapes.length} cuts with excess: ${res.maxExcess?.toFixed(1)}mm`);
-                                } else {
-                                    alert("Global search failed completely. Check obstacle layers or try increasing bed size.");
-                                }
+                                if (res.debugLines) setDebugLines(res.debugLines);
+                            } catch (e) {
+                                console.error(e);
+                                setProcessingMessage(null);
+                                alert("An error occurred during optimization.");
                             }
-                            if (res.debugLines) setDebugLines(res.debugLines);
                         }}
                     >
                         Auto-Split
