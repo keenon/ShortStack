@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText, FootprintSplitLine } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
@@ -922,29 +922,53 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           return;
       }
 
-      // 2. Intersection Check (Must touch/cross board AABB at minimum)
-      const aabb = getFootprintAABB(footprintRef.current, params, allFootprints);
-      if (aabb) {
-          // Simple check: does segment intersect bounding box?
-          // We convert mouse pos (Visual Y) to Math Y for check
-          const sMath = { x: splitStart.current!.x, y: splitStart.current!.y };
-          // Check intersection of sMath->mathEnd with aabb (which is Visual Y, so flip AABB Ys or flip Point Ys)
-          // `getFootprintAABB` returns Visual Y. 
-          // `mathEnd` is Math Y. `splitStart` is Math Y.
-          // Let's use Visual Coords for the check since we have `pos` and `splitStart.current` (wait splitStart is Math).
-          // Re-convert splitStart to visual
-          const vStart = { x: splitStart.current!.x, y: -splitStart.current!.y };
-          const vEnd = { x: pos.x, y: pos.y };
-          
-          // Helper to check rect intersection
-          const minX = Math.min(vStart.x, vEnd.x), maxX = Math.max(vStart.x, vEnd.x);
-          const minY = Math.min(vStart.y, vEnd.y), maxY = Math.max(vStart.y, vEnd.y);
-          
-          if (maxX < aabb.x1 || minX > aabb.x2 || maxY < aabb.y1 || minY > aabb.y2) {
-               // Completely outside bounding box
+      // 2. Intersection Check (Must touch/cross board outline)
+      const outlinePoints = getTessellatedBoardOutline(footprintRef.current, params, allFootprints);
+      if (outlinePoints.length > 0) {
+          let hasOverlap = false;
+          const sX = splitStart.current!.x;
+          const sY = splitStart.current!.y;
+          const eX = mathEnd.x;
+          const eY = mathEnd.y;
+
+          // A. Check Edge Intersections
+          for (let i = 0; i < outlinePoints.length; i++) {
+              const p1 = outlinePoints[i];
+              const p2 = outlinePoints[(i + 1) % outlinePoints.length];
+              
+              // Standard segment intersection math
+              const d1x = eX - sX;     const d1y = eY - sY;
+              const d2x = p2.x - p1.x; const d2y = p2.y - p1.y;
+              const det = -d2x * d1y + d1x * d2y;
+              
+              if (Math.abs(det) > 1e-6) {
+                  const s = (-d1y * (sX - p1.x) + d1x * (sY - p1.y)) / det;
+                  const t = ( d2x * (sY - p1.y) - d2y * (sX - p1.x)) / det;
+                  if (s >= 0 && s <= 1 && t >= 0 && t <= 1) {
+                      hasOverlap = true;
+                      break;
+                  }
+              }
+          }
+
+          // B. Check Containment (if start/end inside)
+          if (!hasOverlap) {
+              const midX = (sX + eX) / 2;
+              const midY = (sY + eY) / 2;
+              let inside = false;
+              for (let i = 0, j = outlinePoints.length - 1; i < outlinePoints.length; j = i++) {
+                  const xi = outlinePoints[i].x, yi = outlinePoints[i].y;
+                  const xj = outlinePoints[j].x, yj = outlinePoints[j].y;
+                  const intersect = ((yi > midY) !== (yj > midY)) && (midX < (xj - xi) * (midY - yi) / (yj - yi) + xi);
+                  if (intersect) inside = !inside;
+              }
+              if (inside) hasOverlap = true;
+          }
+
+          if (!hasOverlap) {
+               // Completely outside board outline
                setSplitPreview(null);
                splitStart.current = null;
-            //    setIsSplitToolActive(false); // Auto-exit tool
                return;
           }
       }
