@@ -914,7 +914,8 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
       // SAFETY CHECKS
       // 1. Minimum Length Check
-      const dist = Math.sqrt((pos.x - splitStart.current.x)**2 + (pos.y - splitStart.current.y)**2); // Visual dist
+      const dist = Math.sqrt((mathEnd.x - splitStart.current.x)**2 + (mathEnd.y - splitStart.current.y)**2); // Visual dist
+      console.log("Split Line Length:", dist);
       if (dist < 5) {
           setSplitPreview(null);
           splitStart.current = null;
@@ -3092,79 +3093,27 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         const hullPts = part.hull.map(p => `${p.x},${-p.y}`).join(' ');
                         
                         // 1. Hull Visualization
-                        const hullColor = part.valid ? "rgba(0, 255, 0, 0.05)" : "rgba(0, 0, 255, 0.88)";
+                        const hullColor = part.valid ? "rgba(0, 255, 0, 0.05)" : "rgba(255, 0, 0, 0.05)";
                         const hullStroke = part.valid ? "rgba(0, 255, 0, 0.3)" : "rgba(255, 0, 0, 0.3)";
                         
-                        // 2. Bed Visualization logic (Simplified for unified check)
-                        let bedPoly = null;
-                        if (part.corners.length === 4) {
-                            // OBB Center and Axes
-                            const c = part.corners;
-                            const center = { x: (c[0].x + c[2].x)/2, y: (c[0].y + c[2].y)/2 };
-                            const u = { x: c[1].x - c[0].x, y: c[1].y - c[0].y };
-                            const v = { x: c[2].x - c[1].x, y: c[2].y - c[1].y };
-                            const uLen = Math.sqrt(u.x*u.x + u.y*u.y);
-                            const vLen = Math.sqrt(v.x*v.x + v.y*v.y);
-                            const uHat = { x: u.x/uLen, y: u.y/uLen };
-                            const vHat = { x: v.x/vLen, y: v.y/vLen };
-
-                            const bedLong = Math.max(bedSize.width, bedSize.height);
-                            const bedShort = Math.min(bedSize.width, bedSize.height);
-                            const isULong = uLen >= vLen;
-                            
-                            let renderW, renderH;
-                            if (isULong) { renderW = bedLong; renderH = bedShort; }
-                            else { renderW = bedShort; renderH = bedLong; }
-
-                            const halfW = renderW / 2;
-                            const halfH = renderH / 2;
-                            
-                            const bc = [
-                                { x: center.x - uHat.x*halfW - vHat.x*halfH, y: center.y - uHat.y*halfW - vHat.y*halfH },
-                                { x: center.x + uHat.x*halfW - vHat.x*halfH, y: center.y + uHat.y*halfW - vHat.y*halfH },
-                                { x: center.x + uHat.x*halfW + vHat.x*halfH, y: center.y + uHat.y*halfW + vHat.y*halfH },
-                                { x: center.x - uHat.x*halfW + vHat.x*halfH, y: center.y - uHat.y*halfW + vHat.y*halfH }
-                            ];
-                            
-                            bedPoly = (
-                                <polygon 
-                                    points={bc.map(p => `${p.x},${-p.y}`).join(' ')} 
-                                    fill="none" 
-                                    stroke={part.valid ? "cyan" : "orange"} 
-                                    strokeWidth={1} 
-                                    strokeDasharray="2,2" 
-                                    vectorEffect="non-scaling-stroke" 
-                                    opacity={0.6}
-                                />
-                            );
-                        }
+                        // 2. Bed Visualization logic (World Space)
+                        const bedPoly = part.corners.length === 4 ? (
+                            <polygon 
+                                points={part.corners.map(p => `${p.x},${-p.y}`).join(' ')} 
+                                fill="none" 
+                                stroke={part.valid ? "#00ff00" : "orange"} 
+                                strokeWidth={2} 
+                                strokeDasharray="4,4" 
+                                vectorEffect="non-scaling-stroke" 
+                                opacity={0.8}
+                            />
+                        ) : null;
 
                         return (
                             <g key={'size-check-'+i} pointerEvents="none">
                                 <polygon points={hullPts} fill={hullColor} stroke={hullStroke} strokeWidth={1} strokeDasharray="4,4" vectorEffect="non-scaling-stroke" />
                                 {bedPoly}
-                                {!part.valid && part.corners.length > 0 && (
-                                    <>
-                                        <polygon 
-                                            points={part.corners.map(p => `${p.x},${-p.y}`).join(' ')} 
-                                            fill="none" 
-                                            stroke="red" 
-                                            strokeWidth={2} 
-                                            vectorEffect="non-scaling-stroke" 
-                                        />
-                                        <text 
-                                            x={part.corners[0].x} 
-                                            y={-part.corners[0].y} 
-                                            fill="red" 
-                                            fontSize={6} 
-                                            fontWeight="bold" 
-                                            dy={-2}
-                                            style={{ textShadow: '0 0 2px black' }}
-                                        >
-                                            OVERSIZE
-                                        </text>
-                                    </>
-                                )}
+                                {/* Oversize indicator removed */}
                             </g>
                         );
                     })}

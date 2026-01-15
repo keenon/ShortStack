@@ -153,21 +153,28 @@ const findFittingRectangle = (
     if (currentExcess < minExcess) {
         minExcess = currentExcess;
         
-        // Calculate translation/rotation for potential use
-        const tu = -minU;
-        const tv = -minV;
-        const tx = tu * ux + tv * vx;
-        const ty = tu * uy + tv * vy;
         const angle = Math.atan2(uy, ux);
+        
+        // Calculate World Space Origin of the aligned Bed
+        const originX = minU * ux + minV * vx;
+        const originY = minU * uy + minV * vy;
+        
+        // Dimensions in World Space alignment
+        const bU = isRotated ? H : W;
+        const bV = isRotated ? W : H;
+        
+        // Compute World Corners
+        const c1 = { x: originX, y: originY };
+        const c2 = { x: originX + bU * ux, y: originY + bU * uy };
+        const c3 = { x: originX + bU * ux + bV * vx, y: originY + bU * uy + bV * vy };
+        const c4 = { x: originX + bV * vx, y: originY + bV * vy };
 
         bestResult = {
             fits: currentExcess < 1e-4,
             excess: currentExcess,
             rotation: angle,
-            translation: { x: tx, y: ty },
-            corners: isRotated 
-                ? [{x:0,y:0}, {x:H,y:0}, {x:H,y:W}, {x:0,y:W}] 
-                : [{x:0,y:0}, {x:W,y:0}, {x:W,y:H}, {x:0,y:H}]
+            translation: { x: 0, y: 0 },
+            corners: [c1, c2, c3, c4]
         };
         
         // Optimization: if we fit perfectly, stop searching
@@ -331,7 +338,8 @@ export function checkSplitPartSizes(
             valid: fit.fits, 
             excess: fit.excess, 
             corners: fit.corners,
-            // Re-computing hull just for the return type (visualizers might need it)
+            transform: fit.translation,
+            rotation: fit.rotation,
             hull: computeConvexHull(pts) 
         });
     });
@@ -533,24 +541,51 @@ export function autoComputeSplit(
         const anchorX = cx + diff * ux;
         const anchorY = cy + diff * uy;
 
-        const sx = anchorX - vx * diag;
-        const sy = anchorY - vy * diag;
-        const ex = anchorX + vx * diag;
-        const ey = anchorY + vy * diag;
+        // Define infinite cut line
+        const farStart = { x: anchorX - vx * 10000, y: anchorY - vy * 10000 };
+        const farEnd = { x: anchorX + vx * 10000, y: anchorY + vy * 10000 };
 
-        generatedShapes.push({
-            id: crypto.randomUUID(),
-            type: "splitLine",
-            name: "Auto Split",
-            x: sx.toFixed(4),
-            y: sy.toFixed(4),
-            endX: (ex - sx).toFixed(4),
-            endY: (ey - sy).toFixed(4),
-            dovetailCount: "4", 
-            dovetailWidth: "12",
-            assignedLayers: {},
-            ignoredLayerIds
-        } as any);
+        // Find intersection with Board Outline to clamp line length
+        let tMin = Infinity;
+        let tMax = -Infinity;
+        let hits = 0;
+
+        const ol = geometry.outline;
+        for (let k = 0; k < ol.length; k++) {
+            const p1 = ol[k];
+            const p2 = ol[(k + 1) % ol.length];
+            const hit = getSegmentIntersection(farStart, farEnd, p1, p2);
+            if (hit) {
+                hits++;
+                // Project hit onto the unit vector 'v' relative to anchor
+                const t = (hit.x - anchorX) * vx + (hit.y - anchorY) * vy;
+                if (t < tMin) tMin = t;
+                if (t > tMax) tMax = t;
+            }
+        }
+
+        if (hits >= 2 && tMin < tMax) {
+            // Apply slight padding so the line fully crosses the boundary
+            const pad = 1.0; 
+            const sx = anchorX + vx * (tMin - pad);
+            const sy = anchorY + vy * (tMin - pad);
+            const ex = anchorX + vx * (tMax + pad);
+            const ey = anchorY + vy * (tMax + pad);
+
+            generatedShapes.push({
+                id: crypto.randomUUID(),
+                type: "splitLine",
+                name: "Auto Split",
+                x: sx.toFixed(4),
+                y: sy.toFixed(4),
+                endX: (ex - sx).toFixed(4),
+                endY: (ey - sy).toFixed(4),
+                dovetailCount: "1", 
+                dovetailWidth: "15",
+                assignedLayers: {},
+                ignoredLayerIds
+            } as any);
+        }
     });
 
     // 5. Final robust verification
