@@ -16,7 +16,9 @@ use std::fs::File;
 use std::io::Write;
 use csgrs::sketch::Sketch;
 // use csgrs::mesh::Mesh; // Removed unused import
-use csgrs::traits::CSG; 
+use csgrs::traits::CSG;
+
+use crate::optimizer::debug_split_eval; 
 
 #[derive(Debug, serde::Deserialize, Clone)]
 struct ExportVec2 {
@@ -1091,6 +1093,16 @@ async fn compute_smart_split(input: GeometryInput) -> Result<geometry::Optimizat
     Ok(result)
 }
 
+#[command]
+async fn get_debug_eval(input: GeometryInput) -> Result<String, String> {
+    // Run CPU intensive task on a thread to avoid blocking UI
+    let result = std::thread::spawn(move || {
+        debug_split_eval(input)
+    }).join().map_err(|_| "Eval panicked".to_string())?;
+
+    Ok(result)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1100,7 +1112,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![export_layer_files, compute_smart_split ])
+        .invoke_handler(tauri::generate_handler![export_layer_files, compute_smart_split, get_debug_eval ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
