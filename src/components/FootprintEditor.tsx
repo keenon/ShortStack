@@ -722,7 +722,6 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                         footprintRef.current, allFootprints, params, stackup, 
                         {x: currentX, y: currentY}, 
                         {x: currentX + nex, y: currentY + ney},
-                        bedSize,
                         { searchRadius: 10, angleRange: 5 }, // Tight snapping corridor
                         (startState as any).ignoredLayerIds
                     );
@@ -962,7 +961,6 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                                 stackup, 
                                 splitStart.current!, 
                                 mathEnd,
-                                bedSize,
                                 undefined, // Default search options
                                 splitToolOptions.ignoredLayerIds // Pass global tool defaults
                             );
@@ -984,8 +982,10 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
               y: result.start.y.toFixed(4),
               endX: (result.end.x - result.start.x).toFixed(4),
               endY: (result.end.y - result.start.y).toFixed(4),
-              dovetailPositions: Array(result.count).fill(0).map((_,i) => ((i+0.5)/result.count).toFixed(4)),
+              dovetailPositions: result.positions.map(pos => pos.toString()),
               dovetailWidth: result.width.toString(),
+              dovetailHeight: result.height.toString(),
+              flipDovetails: result.flip,
               assignedLayers: {},
               // Apply current tool options
               ignoredLayerIds: splitToolOptions.ignoredLayerIds
@@ -1549,7 +1549,6 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                       footprintRef.current, allFootprints, params, stackup, 
                       {x: tentX, y: tentY}, 
                       {x: tentX + endXRel, y: tentY + endYRel},
-                      bedSize,
                       { searchRadius: 5, angleRange: 5 },
                       startShape.ignoredLayerIds
                   );

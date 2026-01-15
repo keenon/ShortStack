@@ -146,6 +146,7 @@ export interface FootprintSplitLine extends BaseShape {
   flip?: boolean; // Flip dovetail side
   dovetailPositions: string[]; // 0-1 Positions along line
   dovetailWidth: string; // Width of the neck
+  dovetailHeight: string; // Height of the dovetail
 }
 
 export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide | FootprintBoardOutline | FootprintPolygon | FootprintUnion | FootprintText | FootprintSplitLine;

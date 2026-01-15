@@ -2034,7 +2034,8 @@ export function convertExportShapeToFootprintShape(exportShape: any): FootprintS
             endX: fmt(exportShape.end_x),
             endY: fmt(exportShape.end_y),
             dovetailPositions: (exportShape.dovetail_positions || [0.5]).map((p:number) => fmt(p)),
-            dovetailWidth: fmt(exportShape.dovetail_width)
+            dovetailWidth: fmt(exportShape.dovetail_width),
+            dovetailHeight: fmt(exportShape.dovetail_height)
         } as FootprintSplitLine;
     }
     else if (exportShape.shape_type === "polygon") {

@@ -222,6 +222,7 @@ export async function collectExportShapesAsync(
                 
                 exportObj.dovetail_positions = (sl.dovetailPositions || ["0.5"]).map(p => evaluateExpression(p, params));
                 exportObj.dovetail_width = evaluateExpression(sl.dovetailWidth, params);
+                exportObj.dovetail_height = evaluateExpression(sl.dovetailHeight, params);
                 
                 result.push(exportObj);
             }
