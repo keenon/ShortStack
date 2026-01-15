@@ -1,5 +1,10 @@
 // src-tauri/src/lib.rs
 use tauri::command;
+mod geometry;
+mod optimizer;
+
+use geometry::GeometryInput;
+use optimizer::run_optimization;
 use std::f64::consts::PI;
 use geo::{Coord, LineString, MultiPolygon, Polygon, Intersects, Contains};
 use geo::bounding_rect::BoundingRect;
@@ -1076,6 +1081,16 @@ fn append_linestring_to_data(data: Data, ls: &LineString<f64>) -> Data {
     d
 }
 
+#[command]
+async fn compute_smart_split(input: GeometryInput) -> Result<geometry::OptimizationResult, String> {
+    // Run CPU intensive task on a thread to avoid blocking UI
+    let result = std::thread::spawn(move || {
+        run_optimization(input)
+    }).join().map_err(|_| "Optimization thread panicked".to_string())?;
+
+    Ok(result)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1085,7 +1100,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![export_layer_files])
+        .invoke_handler(tauri::generate_handler![export_layer_files, compute_smart_split ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
