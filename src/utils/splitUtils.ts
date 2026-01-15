@@ -790,7 +790,7 @@ export async function autoComputeSplitWithRefinement(
         .map(o => ({ x: o.x, y: o.y, r: o.r }));
         
     const refinedShapes: FootprintSplitLine[] = [];
-
+    
     // Helper to call our optimizer with pre-collected obstacles
     const optimize = async (cut: FootprintSplitLine) => {
         const outline = getTessellatedBoardOutline(footprint, params, allFootprints);
