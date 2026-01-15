@@ -266,7 +266,7 @@ export function checkSplitPartSizes(
         const ey = sy + evaluateExpression(sl.endY, params);
         const posArr = sl.dovetailPositions ? sl.dovetailPositions.map(p => evaluateExpression(p, params)) : [0.5];
         const width = evaluateExpression(sl.dovetailWidth, params);
-        const height = evaluateExpression((sl as any).dovetailHeight, params) || (width * 0.8);
+        const height = evaluateExpression(sl.dovetailHeight, params);
         const flip = !!sl.flip;
         const dx = ex - sx; const dy = ey - sy;
         const len = Math.sqrt(dx*dx + dy*dy);
@@ -342,10 +342,19 @@ export function findSafeSplitLine(
     stackup: StackupLayer[],
     startUser: {x:number, y:number},
     endUser: {x:number, y:number},
-    bedSize?: { width: number, height: number },
     options: { searchRadius: number, angleRange: number } = { searchRadius: 20, angleRange: 5 },
     ignoredLayerIds: string[] = []
-): { result: { start: {x:number, y:number}, end: {x:number, y:number}, count: number, width: number } | null, debugLines: any[] } {
+): { 
+    result: { 
+        start: {x:number, y:number}, 
+        end: {x:number, y:number}, 
+        positions: number[], 
+        width: number, 
+        height: number, 
+        flip: boolean 
+    } | null, 
+    debugLines: any[] 
+} {
     const obstacles = collectGlobalObstacles(footprint.shapes, params, allFootprints, stackup, {x:0, y:0, angle:0}, footprint, ignoredLayerIds);
     const outlinePoints = getTessellatedBoardOutline(footprint, params, allFootprints);
     const dx = endUser.x - startUser.x; const dy = endUser.y - startUser.y;
@@ -375,7 +384,9 @@ export function findSafeSplitLine(
     const widths = [20, 15, 10];
 
     for (let c = 1; c <= 3; c++) {
+      const positions = []; for(let k=0; k<c; k++) positions.push((k+0.5)/c);
       for (const width of widths) {
+        const height = width * 0.8;
         for (let a = -options.angleRange; a <= options.angleRange; a++) {
           const uX = Math.cos(angleBase + a*angStep); const uY = Math.sin(angleBase + a*angStep);
           const pX = -uY; const pY = uX;
@@ -392,17 +403,16 @@ export function findSafeSplitLine(
               if (hits < 2 || checkClearance(fS, fE, false) < 0.5) continue;
               const hL = Math.max(Math.abs(minT), Math.abs(maxT)) * 1.2 + 10;
               const cS = { x: cMidX - uX*hL, y: cMidY - uY*hL }; const cE = { x: cMidX + uX*hL, y: cMidY + uY*hL };
-              // Convert count to positions
-              const positions = [];
-              for(let k=0; k<c; k++) positions.push((k + 0.5) / c);
               
-              const pts = generateDovetailPoints(cS.x, cS.y, cE.x, cE.y, positions, width);
-              let valid = true; for(let k=2; k<pts.length-1; k+=4) if (!isPointInPolygon(pts[k], outlinePoints) || !isPointInPolygon(pts[k+1], outlinePoints)) { valid=false; break; }
-              if (!valid) continue;
-              let dClear = Infinity; for(let k=0; k<pts.length-1; k++) { if (k%4===0) continue; const cl=checkClearance(pts[k], pts[k+1], true); if (cl < 0.5) { valid=false; break; } dClear=Math.min(dClear, cl); }
-              if (valid) {
-                const score = (dClear === Infinity ? 20 : Math.min(dClear, 20))*5 - c*40 + width*2 - Math.abs(o*offStep) - Math.abs(s*slideStep)*0.8 - Math.abs(a)*10;
-                if (score > bestScore) { bestScore = score; bestResult = { start: cS, end: cE, count: c, width }; }
+              for (const flip of [false, true]) {
+                  const pts = generateDovetailPoints(cS.x, cS.y, cE.x, cE.y, positions, width, height, flip);
+                  let valid = true; for(let k=2; k<pts.length-1; k+=4) if (!isPointInPolygon(pts[k], outlinePoints) || !isPointInPolygon(pts[k+1], outlinePoints)) { valid=false; break; }
+                  if (!valid) continue;
+                  let dClear = Infinity; for(let k=0; k<pts.length-1; k++) { if (k%4===0) continue; const cl=checkClearance(pts[k], pts[k+1], true); if (cl < 0.5) { valid=false; break; } dClear=Math.min(dClear, cl); }
+                  if (valid) {
+                    const score = (dClear === Infinity ? 20 : Math.min(dClear, 20))*5 - c*40 + width*2 - Math.abs(o*offStep) - Math.abs(s*slideStep)*0.8 - Math.abs(a)*10;
+                    if (score > bestScore) { bestScore = score; bestResult = { start: cS, end: cE, positions, width, height, flip }; }
+                  }
               }
             }
           }
@@ -573,6 +583,7 @@ export function autoComputeSplit(
                 endY: (ey - sy).toFixed(4),
                 dovetailPositions: ["0.5"], 
                 dovetailWidth: "15",
+                dovetailHeight: "12",
                 assignedLayers: {},
                 ignoredLayerIds
             } as any);

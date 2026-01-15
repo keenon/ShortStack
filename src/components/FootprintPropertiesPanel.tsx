@@ -898,7 +898,7 @@ const FootprintPropertiesPanel = ({
             </div>
             <div className="prop-group">
                 <label>Dovetail Height (mm)</label>
-                <ExpressionEditor value={(sl as any).dovetailHeight} onChange={(v) => updateShape(sl.id, "dovetailHeight", v)} params={params} placeholder="Auto" />
+                <ExpressionEditor value={sl.dovetailHeight} onChange={(v) => updateShape(sl.id, "dovetailHeight", v)} params={params} placeholder="8" />
             </div>
             <div className="prop-group">
                 <label className="checkbox-label">

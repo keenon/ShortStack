@@ -213,7 +213,7 @@ export const RecursiveShapeRenderer = ({
       
       const positions = (sl.dovetailPositions || []).map(p => evaluateExpression(p, params));
       const width = evaluateExpression(sl.dovetailWidth, params);
-      const height = evaluateExpression((sl as any).dovetailHeight, params) || (width * 0.8);
+      const height = evaluateExpression(sl.dovetailHeight, params);
       const flip = !!sl.flip;
 
       // If handles only pass, just render the grips
