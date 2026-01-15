@@ -12,6 +12,7 @@ pub struct GeometryInput {
     pub obstacles: Vec<Obstacle>,
     pub bed_width: f64,
     pub bed_height: f64,
+    pub initial_line: Option<[[f64; 2]; 2]>, 
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -35,8 +36,8 @@ pub struct GeneratedCut {
     pub end: [f64; 2],
     pub dovetail_width: f64,
     pub dovetail_height: f64,
-    // t value 0.0-1.0 along the line
     pub dovetail_t: f64, 
+    pub flipped: bool, // Added this
 }
 
 // --- Geometric Helpers ---
