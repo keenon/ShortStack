@@ -399,7 +399,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const dragTargetRef = useRef<{ 
       id: string; 
       pointIdx?: number; 
-      handleType?: 'in' | 'out' | 'symmetric';
+      handleType?: 'in' | 'out' | 'symmetric' | 'dovetail';
       mode: DragMode;
       resizeHandle?: ResizeHandle;
       initialVal?: string; // Original expression for width/height/dia
@@ -984,7 +984,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
               y: result.start.y.toFixed(4),
               endX: (result.end.x - result.start.x).toFixed(4),
               endY: (result.end.y - result.start.y).toFixed(4),
-              dovetailCount: result.count.toString(),
+              dovetailPositions: Array(result.count).fill(0).map((_,i) => ((i+0.5)/result.count).toFixed(4)),
               dovetailWidth: result.width.toString(),
               assignedLayers: {},
               // Apply current tool options
@@ -1289,7 +1289,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       window.addEventListener('mouseup', handleShapeMouseUp);
   };
 
-  const handleHandleMouseDown = (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => {
+  const handleHandleMouseDown = (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out' | 'dovetail') => {
       // Only allow Left Click (0) for shape interaction.
       // This allows Right Click (2) and Middle Click (1) to bubble up to camera panning.
       if (e.button !== 0) return;
@@ -1383,6 +1383,37 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
               // --- UPDATED POINT MOVE LOGIC WITH SOFT SNAP ---
               if (pointIdx !== undefined && s.id === targetId) {
+                  // Handle Split Line Dovetail Sliding
+                  if (s.type === 'splitLine' && (startShape as any).dovetailPositions) {
+                      // Project mouse onto the line segment to find new t
+                      const sx = evaluateExpression(startShape.x, params);
+                      const sy = -evaluateExpression(startShape.y, params);
+                      const exRel = evaluateExpression((startShape as any).endX, params);
+                      const eyRel = -evaluateExpression((startShape as any).endY, params);
+                      
+                      // Line vector
+                      const lx = exRel;
+                      const ly = eyRel;
+                      const l2 = lx*lx + ly*ly;
+                      
+                      if (l2 > 0.0001) {
+                          const mWorld = getMouseWorldPos(e.clientX, e.clientY);
+                          // Vector from Start to Mouse
+                          const mx = mWorld.x - sx;
+                          const my = mWorld.y - sy;
+                          
+                          // Project
+                          let t = (mx * lx + my * ly) / l2;
+                          t = Math.max(0.05, Math.min(0.95, t)); // Clamp with padding
+                          
+                          const newPositions = [...(startShape as any).dovetailPositions];
+                          newPositions[pointIdx] = t.toFixed(4);
+                          
+                          return { ...s, dovetailPositions: newPositions } as any;
+                      }
+                      return s;
+                  }
+
                   // Handle Wire Guide direction handle specifically
                   if (startShape.type === "wireGuide") {
                       if (startShape.handle) {

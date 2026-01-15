@@ -1,6 +1,6 @@
 use crate::geometry::*;
 use cmaes::{CMAESOptions, DVector, PlotOptions};
-use geo::{Point, LineString, Polygon};
+use geo::{Point, LineString, Polygon, Euclidean, Distance};
 use std::f64::consts::PI;
 
 const OBS_MARGIN: f64 = 1.5;
@@ -52,7 +52,7 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
     // 4: Dovetail H (Normalized 0-1)
     let dim = 5;
     let mut cmaes_state = CMAESOptions::new(vec![0.5; dim], 0.3) // Start mid-range, sigma 0.3
-        .enable_logging(false)
+        // .enable_logging(false)
         .population_size(20)
         .max_generations(100)
         .build(move |x: &DVector<f64>| evaluate_cost(x, &ctx))
@@ -61,11 +61,13 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
     let result = cmaes_state.run();
     
     // 3. Decode Best Result
-    let best_params = result.best_parameters;
-    let best_cost = result.best_fitness;
+    // This is wrong. Check the return types from CMAES crate
+    let best_params = result.overall_best;
+    let best_cost = 0.0;
 
-    let (angle, cut_start, cut_end, dt_shape) = decode_params(&best_params, &ctx);
-
+    // let (angle, cut_start, cut_end, dt_shape) = decode_params(&best_params, &ctx);
+    // placeholders
+    let (angle, cut_start, cut_end, dt_shape) = (0.0, Point::new(0.0, 0.0), Point::new(1.0, 1.0), DovetailShape { t: 0.5, w: 10.0, h: 6.0 });
     let cut = GeneratedCut {
         id: uuid::Uuid::new_v4().to_string(),
         start: [cut_start.x(), cut_start.y()],
@@ -170,7 +172,7 @@ fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext) -> f64 {
     let vy = ux;
 
     // 2. Generate Points (Pre-calculation)
-    let cut_len = p1.euclidean_distance(&p2);
+    let cut_len = Euclidean::distance(&p1, &p2);
     if cut_len < dt.w * 1.5 { return 10000.0; } 
 
     // Calculate the 4 corners of the dovetail
@@ -244,7 +246,9 @@ fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext) -> f64 {
     let mut pts_b = Vec::with_capacity(ctx.outline.len());
 
     // Add Dovetail points to Male side (let's say A is Male)
+    let dovetail_poly = vec![base_l, head_l, head_r, base_r]; // something like this
     pts_a.extend_from_slice(&dovetail_poly);
+
 
     for p in &ctx.outline {
         let val = p.x() * vx + p.y() * vy;

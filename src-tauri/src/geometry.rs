@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use geo::{
-    algorithm::{convex_hull::ConvexHull, euclidean_distance::EuclideanDistance},
-    Point, Polygon, LineString, Line,
+    algorithm::{convex_hull::ConvexHull},
+    Point, Polygon, LineString, Line, Euclidean, Distance
 };
 
 // --- Data Structures ---
@@ -110,7 +110,8 @@ pub fn check_fit(points: &Vec<Point<f64>>, bed_w: f64, bed_h: f64) -> f64 {
 /// Helper to get distance from a point to a line segment
 pub fn dist_point_segment(p: Point<f64>, s_start: Point<f64>, s_end: Point<f64>) -> f64 {
     let line = Line::new(s_start, s_end);
-    p.euclidean_distance(&line)
+    // p.euclidean_distance(&line)
+    Euclidean::distance(&p, &line)
 }
 
 /// Helper to check if point is inside a polygon (Ray Casting)
