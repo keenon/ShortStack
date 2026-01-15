@@ -6,7 +6,7 @@ import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference,
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
-import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit, autoComputeSplitWithRefinement } from "../utils/splitUtils";
+import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit, autoComputeSplitWithRefinement, evaluateRustSplitLineCost } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
@@ -1567,15 +1567,30 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                   const endXRel = evaluateExpression((startShape as any).endX, params);
                   const endYRel = evaluateExpression((startShape as any).endY, params);
                   
+                  const start = { x: tentX, y: tentY };
+                  const end = { x: tentX + endXRel, y: tentY + endYRel };
                   // Run local search for valid snap with rotation
                   // OPTIMIZATION: Use smaller search radius and angle range during drag
                   const snapRes = findSafeSplitLine(
                       footprintRef.current, allFootprints, params, stackup, 
-                      {x: tentX, y: tentY}, 
-                      {x: tentX + endXRel, y: tentY + endYRel},
+                      start, 
+                      end,
                       { searchRadius: 5, angleRange: 5 },
                       startShape.ignoredLayerIds
                   );
+                  
+                  evaluateRustSplitLineCost(
+                        footprintRef.current, 
+                        allFootprints, 
+                        params, 
+                        stackup, 
+                        bedSize, 
+                        start, 
+                        end,
+                        startShape.ignoredLayerIds
+                    ).then(cost => {
+                        console.log((cost));
+                    });
 
                   if (snapRes.result) {
                       return { 

@@ -458,11 +458,11 @@ interface PSOResult {
 }
 
 const PSO_CONFIG = {
-    SWARM_SIZE: 40,
-    MAX_ITERATIONS: 150,
-    INERTIA: 0.7,
-    C1: 1.4,
-    C2: 1.4,
+    SWARM_SIZE: 120,        // Increased to ensure global optimum is found
+    MAX_ITERATIONS: 300,    // Increased for better convergence
+    INERTIA: 0.729,         // Standard PSO constriction factor
+    C1: 1.494,              // Cognitive coefficient
+    C2: 1.494,              // Social coefficient
     DOVETAIL_WIDTH_ALLOWANCE: 15,
 };
 
@@ -516,17 +516,43 @@ export function autoComputeSplit(
     let bestSolution: PSOResult | null = null;
 
     // 3. Iterative Search (1 cut, 2 cuts...)
-    for (let n = 1; n <= maxSearchCuts; n++) {
-        const solution = runPSO(n, geometry);
+    // Respect user preference for minimum cuts (prior belief), but ensure we try at least 1
+    const startCut = Math.max(1, options.desiredCuts || 1);
+
+    for (let n = startCut; n <= maxSearchCuts; n++) {
+        let nBest: PSOResult | null = null;
         
-        // Cost < 1.0 implies fit
-        if (solution.cost < 1.0) { 
-            bestSolution = solution;
-            break; 
+        // MULTI-SHOT STRATEGY: 
+        // PSO is stochastic. We run it multiple times (shots) for the current N
+        // to ensure we don't miss a valid solution due to bad initialization.
+        const attempts = 5;
+
+        for (let k = 0; k < attempts; k++) {
+            const solution = runPSO(n, geometry);
+            
+            // If we found a valid fit (< 1.0 excess), we can stop immediately for this N
+            if (solution.cost < 1.0) { 
+                nBest = solution;
+                break; 
+            }
+            
+            // Otherwise track the best attempt for this N
+            if (!nBest || solution.cost < nBest.cost) {
+                nBest = solution;
+            }
         }
-        
-        if (!bestSolution || solution.cost < bestSolution.cost) {
-            bestSolution = solution;
+
+        if (nBest) {
+            // If the best result for N is valid, we are done.
+            if (nBest.cost < 1.0) { 
+                bestSolution = nBest;
+                break; 
+            }
+            
+            // Otherwise, check if this is the best failure we've seen so far across all N
+            if (!bestSolution || nBest.cost < bestSolution.cost) {
+                bestSolution = nBest;
+            }
         }
     }
 
@@ -653,6 +679,60 @@ interface RustOptimizationResult {
 
 // --- UPDATED AUTO SPLIT ---
 
+export async function evaluateRustSplitLineCost(
+    footprint: Footprint,
+    allFootprints: Footprint[],
+    params: Parameter[],
+    stackup: any[], // StackupLayer[]
+    bedSize: { width: number, height: number },
+    start: {x: number, y: number},
+    end: {x: number, y: number},
+    ignoredLayerIds: string[] = []
+): Promise<String> {
+    // 1. Prepare Geometry (Same method as auto-split to ensure consistency)
+    const outline = getTessellatedBoardOutline(footprint, params, allFootprints);
+    
+    const rawObstacles = collectGlobalObstacles(
+        footprint.shapes, params, allFootprints, stackup, 
+        {x:0, y:0, angle:0}, footprint, ignoredLayerIds
+    );
+    
+    // Filter only through-hole circles, just like the Rust optimizer expects
+    const rustObstacles = rawObstacles
+        .filter(o => o.isThrough && o.type === 'circle')
+        // @ts-ignore 
+        .map(o => ({ x: o.x, y: o.y, r: o.r }));
+
+    // 2. Prepare Input Object
+    const input = {
+        outline: outline.map(p => [p.x, p.y]),
+        obstacles: rustObstacles,
+        bed_width: bedSize.width,
+        bed_height: bedSize.height,
+        // Pass the line as a seed. Rust will evaluate this specific line.
+        initial_line: [
+            [start.x, start.y],
+            [end.x, end.y]
+        ]
+    };
+
+    // DEBUG LOGGING
+    console.group("Rust Split Eval Debug");
+    console.log(`Line: (${start.x.toFixed(2)}, ${start.y.toFixed(2)}) -> (${end.x.toFixed(2)}, ${end.y.toFixed(2)})`);
+    console.log(`Sending ${rustObstacles.length} obstacles to Rust:`);
+    rustObstacles.forEach((o, i) => console.log(`  [${i}] x:${o.x.toFixed(2)}, y:${o.y.toFixed(2)}, r:${o.r.toFixed(2)}`));
+    console.groupEnd();
+
+    try {
+        // Call the new debug command
+        const cost = await invoke<String>("get_debug_eval", { input });
+        return cost;
+    } catch (e) {
+        console.error("Debug Eval Failed", e);
+        return "Error";
+    }
+}
+
 export async function autoComputeSplitWithRefinement(
     footprint: Footprint,
     allFootprints: Footprint[],
@@ -703,7 +783,7 @@ export async function autoComputeSplitWithRefinement(
         
         try {
             const res = await invoke<RustOptimizationResult>("compute_smart_split", { input });
-            
+            console.log(`Refinement result for cut ${cut.id}: Success=${res.success} Cost=${res.cost.toFixed(4)}`);
             if (res.success && res.shapes.length > 0) {
                 const s = res.shapes[0]; // The GeneratedCut from Rust
 
@@ -712,7 +792,7 @@ export async function autoComputeSplitWithRefinement(
                 const startY = s.start[1];
                 const endX = s.end[0];
                 const endY = s.end[1];
-
+                console.log(` Rust returned Refined Cut ${s.id}: Start(${startX.toFixed(2)}, ${startY.toFixed(2)}) End(${endX.toFixed(2)}, ${endY.toFixed(2)}) with dovetail at t=${s.dovetail_t.toFixed(4)}`);
                 return {
                     ...cut,
                     // 1. Absolute Start Position
@@ -765,8 +845,17 @@ const runPSO = (nCuts: number, geo: GeometryCache): PSOResult => {
 
     // Initialize Swarm
     for (let i = 0; i < PSO_CONFIG.SWARM_SIZE; i++) {
+        // Smart Initialization: Deterministic seeding for the first ~25% of particles.
+        // This ensures exact axis-aligned cuts (0, 90 deg) and diagonals are always checked.
+        let angle = Math.random() * Math.PI;
+        
+        const seedCount = 32; // Scan every ~5.6 degrees
+        if (i < seedCount) {
+            angle = (i * Math.PI) / seedCount;
+        }
+
         const pos = [
-            Math.random() * Math.PI, 
+            angle, 
             ...Array(nCuts).fill(0).map(() => 0.1 + Math.random() * 0.8)
         ];
         

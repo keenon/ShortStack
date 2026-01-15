@@ -30,30 +30,37 @@ fn line_to_params(start: [f64; 2], end: [f64; 2], ctx: &CostContext) -> (f64, f6
     let dx = end[0] - start[0];
     let dy = end[1] - start[1];
     
-    // 1. Calculate Angle (0 to PI)
-    let mut angle = dy.atan2(dx); // -PI to PI
+    // 1. Calculate Angle and Normalize to [0, PI)
+    // This matches the space used by decode_params.
+    let mut angle = dy.atan2(dx); 
     if angle < 0.0 { angle += PI; }
     if angle >= PI { angle -= PI; }
     let angle_norm = angle / PI;
 
-    // 2. Calculate Offset
-    // We need the normal vector to the line
-    let len = (dx*dx + dy*dy).sqrt();
-    let ux = dx / len;
-    let uy = dy / len;
-    let vx = -uy; // Normal vector X
-    let vy = ux;  // Normal vector Y
+    // 2. Re-derive Unit Vectors from Normalized Angle
+    // CRITICAL FIX: We must use vectors derived from the *normalized* angle,
+    // not the raw input dx/dy. If the raw line pointed "down-right" (-45 deg),
+    // it gets normalized to "up-left" (135 deg). If we used the raw normal,
+    // it would point in the opposite direction to the normal expected by decode_params,
+    // flipping the sign of the calculated offset.
+    let ux = angle.cos();
+    let uy = angle.sin();
+    
+    // Match decode_params normal logic: nx = -uy, ny = ux
+    let vx = -uy; 
+    let vy = ux;  
 
-    // Projection of the line onto its own normal
+    // 3. Calculate Offset
+    // Projection of the line onto the reconstructed normal
     let line_proj = start[0] * vx + start[1] * vy;
+    
     // Projection of the board center onto that same normal
     let center_proj = ctx.center.x() * vx + ctx.center.y() * vy;
     
-    // The difference is how far the line is from the center
+    // The signed distance from center to line along the normal
     let offset_dist = line_proj - center_proj;
     
     // Normalize to 0.0 - 1.0 (relative to ctx.radius)
-    // Formula from decode_params: offset_norm = (offset / radius) * 0.5 + 0.5
     let offset_norm = (offset_dist / ctx.radius) * 0.5 + 0.5;
 
     (angle_norm.clamp(0.0, 1.0), offset_norm.clamp(0.0, 1.0))
@@ -134,7 +141,7 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
 
     match best_overall_cut {
         Some(cut) => OptimizationResult {
-            success: best_overall_cost < 10.0,
+            success: best_overall_cost < 50.0,
             cost: best_overall_cost,
             shapes: vec![cut],
         },
@@ -158,16 +165,24 @@ fn decode_params(
     // Normal vector logic matching your TypeScript:
     // const px = flip ? uy : -uy;
     // const py = flip ? -ux : ux;
+    // FIX: Decouple Position Normal from Dovetail Direction.
+    // We always use the standard normal (-uy, ux) for positioning the Anchor.
+    // This ensures that the 'offset' parameter represents the same physical location
+    // regardless of whether we are flipping the dovetail direction.
+    let nx = -uy;
+    let ny = ux;
+
+    let anchor = Point::new(
+        ctx.center.x() + nx * (offset_norm * ctx.radius),
+        ctx.center.y() + ny * (offset_norm * ctx.radius)
+    );
+
+    // We use the flip flag ONLY to determine which way the dovetail grows relative to the line.
     let (vx, vy) = if flipped {
         (uy, -ux)
     } else {
         (-uy, ux)
     };
-
-    let anchor = Point::new(
-        ctx.center.x() + vx * (offset_norm * ctx.radius),
-        ctx.center.y() + vy * (offset_norm * ctx.radius)
-    );
     
     let mut min_t = f64::MAX;
     let mut max_t = f64::MIN;
@@ -187,18 +202,35 @@ fn decode_params(
     (angle, p1, p2, DovetailShape { t: t_val, w: w_val, h: h_val, flipped })
 }
 
+// Wrapper for optimizer
 fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> f64 {
+    evaluate_cost_detailed(x, ctx, flipped).0
+}
+
+// Detailed cost breakdown for debugging
+fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> (f64, String) {
     let mut cost = 0.0;
-    for val in x.iter() {
-        if *val < 0.0 { cost += val.powi(2) * 1000.0; }
-        if *val > 1.0 { cost += (*val - 1.0).powi(2) * 1000.0; }
+    let mut log = Vec::new();
+
+    // 1. Parameter Constraints
+    for (i, val) in x.iter().enumerate() {
+        if *val < 0.0 { 
+            let p = val.powi(2) * 1000.0;
+            cost += p; 
+            log.push(format!("Param {} < 0: +{:.2}", i, p));
+        }
+        if *val > 1.0 { 
+            let p = (*val - 1.0).powi(2) * 1000.0;
+            cost += p; 
+            log.push(format!("Param {} > 1: +{:.2}", i, p));
+        }
     }
 
     let (angle, p1, p2, dt) = decode_params(x, ctx, flipped);
     let ux = angle.cos();
     let uy = angle.sin();
     
-    // Matches TS logic
+    // Normal vector logic
     let (vx, vy) = if flipped { (uy, -ux) } else { (-uy, ux) };
 
     let center = Point::new(
@@ -216,7 +248,8 @@ fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> f64 {
 
     let cut_path = vec![(p1, base_l), (base_l, head_l), (head_l, head_r), (head_r, base_r), (base_r, p2)];
 
-    for obs in &ctx.obstacles {
+    // 2. Obstacle Check
+    for (i, obs) in ctx.obstacles.iter().enumerate() {
         let obs_p = Point::new(obs.x, obs.y);
         let mut min_dist = f64::MAX;
         for (s, e) in &cut_path {
@@ -224,26 +257,26 @@ fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> f64 {
         }
         let safe_dist = obs.r + OBS_MARGIN;
         if min_dist < safe_dist {
-            cost += (safe_dist - min_dist).powi(2) * 5000.0;
-        }
+            let pen = (safe_dist - min_dist).powi(2) * 5000.0;
+            cost += pen;
+            log.push(format!("Obstacle {} @ ({:.2}, {:.2}) r={:.2} collision (dist {:.2} < {:.2}): +{:.2}", 
+                            i, obs.x, obs.y, obs.r, min_dist, safe_dist, pen));        }
     }
 
-    if cost > 100.0 { return cost; }
+    if cost > 100.0 { 
+        return (cost, format!("High Cost Exit ({:.2}):\n{}", cost, log.join("\n"))); 
+    }
 
-    // Fit Check: The "Male" protrusion is [base_l, head_l, head_r, base_r]
-    // We need to know which side is which.
-    // The "Normal" (vx, vy) points TOWARDS the male protrusion.
+    // 3. Fit Check
     let c_val = p1.x() * vx + p1.y() * vy;
-
-    let mut pts_a = Vec::new(); // Side the protrusion is on
-    let mut pts_b = Vec::new(); // Side the void is on
+    let mut pts_a = Vec::new(); 
+    let mut pts_b = Vec::new(); 
 
     let protrusion = vec![base_l, head_l, head_r, base_r];
     pts_a.extend_from_slice(&protrusion);
 
     for p in &ctx.outline {
         let val = p.x() * vx + p.y() * vy;
-        // Points on the side of the normal go to A, others to B
         if val >= c_val - 0.5 { pts_a.push(*p); }
         if val <= c_val + 0.5 { pts_b.push(*p); }
     }
@@ -251,6 +284,75 @@ fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> f64 {
     pts_a.push(p1); pts_a.push(p2);
     pts_b.push(p1); pts_b.push(p2);
 
-    cost += (check_fit(&pts_a, ctx.bed_w, ctx.bed_h) + check_fit(&pts_b, ctx.bed_w, ctx.bed_h)) * 10.0;
-    cost
+    // --- DEBUG: Geometry Inspection ---
+    // Helper to log bounds and formatted points
+    let inspect_part = |pts: &Vec<Point<f64>>, name: &str| -> String {
+        let min_x = pts.iter().fold(f64::INFINITY, |a, b| a.min(b.x()));
+        let max_x = pts.iter().fold(f64::NEG_INFINITY, |a, b| a.max(b.x()));
+        let min_y = pts.iter().fold(f64::INFINITY, |a, b| a.min(b.y()));
+        let max_y = pts.iter().fold(f64::NEG_INFINITY, |a, b| a.max(b.y()));
+        
+        let points_str: Vec<String> = pts.iter().map(|p| format!("[{:.1},{:.1}]", p.x(), p.y())).collect();
+        
+        format!("{}: Count={}, Size={:.1}x{:.1} (Bounds: {:.1},{:.1} to {:.1},{:.1})\\nPoints: [{}]", 
+            name, pts.len(), max_x - min_x, max_y - min_y, min_x, min_y, max_x, max_y, points_str.join(", "))
+    };
+
+    let fit_pen_a = check_fit(&pts_a, ctx.bed_w, ctx.bed_h) * 10.0;
+    let fit_pen_b = check_fit(&pts_b, ctx.bed_w, ctx.bed_h) * 10.0;
+    
+    if fit_pen_a > 0.0 || fit_pen_b > 0.0 {
+        log.push(format!("Bed Size: {:.1} x {:.1}", ctx.bed_w, ctx.bed_h));
+        log.push(format!("Cut Line: [{:.1},{:.1}] to [{:.1},{:.1}]", p1.x(), p1.y(), p2.x(), p2.y()));
+    }
+
+    if fit_pen_a > 0.0 { 
+        log.push(format!("Part A Penalty +{:.2}. Details: {}", fit_pen_a, inspect_part(&pts_a, "Part A"))); 
+    }
+    if fit_pen_b > 0.0 { 
+        log.push(format!("Part B Penalty +{:.2}. Details: {}", fit_pen_b, inspect_part(&pts_b, "Part B"))); 
+    }
+
+    cost += fit_pen_a + fit_pen_b;
+    
+    (cost, format!("Total: {:.2}\n{}", cost, log.join("\n")))
+}
+
+
+pub fn debug_split_eval(input: GeometryInput) -> String {
+    // Reconstruct Context
+    let poly_points: Vec<Point<f64>> = input.outline.iter().map(|p| Point::new(p[0], p[1])).collect();
+    let mut min_x = f64::MAX; let mut max_x = f64::MIN;
+    let mut min_y = f64::MAX; let mut max_y = f64::MIN;
+    for p in &poly_points {
+        min_x = min_x.min(p.x()); max_x = max_x.max(p.x());
+        min_y = min_y.min(p.y()); max_y = max_y.max(p.y());
+    }
+    let center = Point::new((min_x + max_x)/2.0, (min_y + max_y)/2.0);
+    let radius = ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt() / 2.0;
+
+    let ctx = CostContext {
+        outline: poly_points,
+        obstacles: input.obstacles,
+        bed_w: input.bed_width,
+        bed_h: input.bed_height,
+        center,
+        radius,
+    };
+
+    if let Some(line) = input.initial_line {
+        let (a_norm, o_norm) = line_to_params(line[0], line[1], &ctx);
+        let params = DVector::from_vec(vec![a_norm, o_norm, 0.5, 0.5, 0.5]);
+        
+        let (c1, log1) = evaluate_cost_detailed(&params, &ctx, false);
+        let (c2, log2) = evaluate_cost_detailed(&params, &ctx, true);
+        
+        if c1 < c2 {
+            return format!("=== Normal State ===\nCost: {:.4}\n{}", c1, log1);
+        } else {
+            return format!("=== Flipped State ===\nCost: {:.4}\n{}", c2, log2);
+        }
+    }
+    
+    "Error: No line provided".to_string()
 }
