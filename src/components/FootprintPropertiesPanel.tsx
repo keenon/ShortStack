@@ -864,8 +864,33 @@ const FootprintPropertiesPanel = ({
                 <input type="text" value={sl.name} onChange={(e) => updateShape(sl.id, "name", e.target.value)} />
             </div>
             <div className="prop-group">
-                <label>Dovetail Count</label>
-                <ExpressionEditor value={sl.dovetailCount} onChange={(v) => updateShape(sl.id, "dovetailCount", v)} params={params} placeholder="3" />
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'5px'}}>
+                    <label style={{margin:0}}>Dovetails</label>
+                    <button className="secondary small-btn" style={{padding:'2px 6px'}} onClick={() => {
+                        const newPos = [...(sl.dovetailPositions || [])];
+                        // Smart add: halfway between largest gap or 0.5
+                        newPos.push("0.5"); 
+                        newPos.sort((a,b) => parseFloat(a) - parseFloat(b));
+                        updateShape(sl.id, "dovetailPositions", newPos);
+                    }}>+</button>
+                </div>
+                <div style={{display:'flex', flexDirection:'column', gap:'4px'}}>
+                    {(sl.dovetailPositions || []).map((pos, idx) => (
+                        <div key={idx} style={{display:'flex', gap:'5px', alignItems:'center'}}>
+                            <span style={{fontSize:'0.8em', color:'#888', width:'15px'}}>{idx+1}</span>
+                            <ExpressionEditor value={pos} onChange={(v) => {
+                                const newPos = [...sl.dovetailPositions];
+                                newPos[idx] = v;
+                                updateShape(sl.id, "dovetailPositions", newPos);
+                            }} params={params} placeholder="0.5" />
+                            <button className="icon-btn danger" style={{padding:'0 4px'}} onClick={() => {
+                                const newPos = sl.dovetailPositions.filter((_, i) => i !== idx);
+                                updateShape(sl.id, "dovetailPositions", newPos);
+                            }}>×</button>
+                        </div>
+                    ))}
+                    {(!sl.dovetailPositions || sl.dovetailPositions.length === 0) && <div className="empty-hint">No dovetails.</div>}
+                </div>
             </div>
             <div className="prop-group">
                 <label>Dovetail Width (mm)</label>
@@ -879,7 +904,7 @@ const FootprintPropertiesPanel = ({
                 <label className="checkbox-label">
                     <input 
                         type="checkbox" 
-                        checked={!!(sl as any).flip} 
+                        checked={!!sl.flip} 
                         onChange={(e) => updateShape(sl.id, "flip", e.target.checked)} 
                     />
                     Flip Dovetails

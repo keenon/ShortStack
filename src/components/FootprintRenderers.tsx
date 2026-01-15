@@ -130,7 +130,7 @@ export const RecursiveShapeRenderer = ({
   isSelected: boolean;
   isParentSelected: boolean;
   onMouseDown: (e: React.MouseEvent, id: string, pointIndex?: number) => void;
-  onHandleDown: (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => void;
+  onHandleDown: (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out' | 'dovetail') => void;
   onDoubleClick?: (e: React.MouseEvent, id: string) => void; // NEW
   handleRadius: number;
   rootFootprint: Footprint; // NEW
@@ -203,27 +203,51 @@ export const RecursiveShapeRenderer = ({
 
   // SPLIT LINE RENDERER
   if (shape.type === "splitLine") {
-      if (onlyHandles) return null; // No handles yet implemented for manual tweak
       const sl = shape as FootprintSplitLine;
       const x1 = evaluateExpression(sl.x, params);
       const y1 = evaluateExpression(sl.y, params);
-      const x2 = x1 + evaluateExpression(sl.endX, params);
-      const y2 = y1 + evaluateExpression(sl.endY, params);
-      const count = Math.round(evaluateExpression(sl.dovetailCount, params));
+      const dx = evaluateExpression(sl.endX, params);
+      const dy = evaluateExpression(sl.endY, params);
+      const x2 = x1 + dx;
+      const y2 = y1 + dy;
+      
+      const positions = (sl.dovetailPositions || []).map(p => evaluateExpression(p, params));
       const width = evaluateExpression(sl.dovetailWidth, params);
       const height = evaluateExpression((sl as any).dovetailHeight, params) || (width * 0.8);
-      const flip = !!(sl as any).flip;
+      const flip = !!sl.flip;
 
-      // Generate points in global visual space
-      // Note: Y is inverted for visualization in parent components usually?
-      // RecursiveShapeRenderer generally receives Y-up math coords, and renders them. 
-      // The parent SVG flips Y if needed. Here we assume we draw in standard math coords and apply transform.
-      
-      const pts = generateDovetailPoints(x1, y1, x2, y2, count, width, height, flip);
+      // If handles only pass, just render the grips
+      if (onlyHandles) {
+          if (!isSelected) return null;
+          // Render Drag Handles for each dovetail
+          return (
+              <g>
+                  {positions.map((t, idx) => {
+                      const hx = x1 + dx * t;
+                      const hy = -(y1 + dy * t);
+                      const isHovered = hoveredPointIndex === idx;
+                      return (
+                          <circle 
+                              key={idx}
+                              cx={hx} cy={hy} 
+                              r={handleRadius * (isHovered ? 1.2 : 0.8)} 
+                              fill={isHovered ? "#ffaa00" : "#fff"} stroke="#646cff" strokeWidth={1} vectorEffect="non-scaling-stroke"
+                              style={{ cursor: 'pointer' }}
+                              onMouseDown={(e) => { e.stopPropagation(); onHandleDown(e, shape.id, idx, 'dovetail'); }}
+                              onMouseEnter={() => setHoveredPointIndex && setHoveredPointIndex(idx)}
+                              onMouseLeave={() => setHoveredPointIndex && setHoveredPointIndex(null)}
+                          />
+                      );
+                  })}
+              </g>
+          );
+      }
+
+      // Main geometry
+      const pts = generateDovetailPoints(x1, y1, x2, y2, positions, width, height, flip);
       let d = `M ${pts[0].x} ${-pts[0].y}`;
       for(let i=1; i<pts.length; i++) d += ` L ${pts[i].x} ${-pts[i].y}`;
 
-      // UPDATED: Subtle styling when not selected
       const stroke = isSelected ? selectionColor : "#ff00ff";
       const opacity = isSelected ? 1.0 : 0.4;
       const widthStr = isSelected ? 2 : 1;
@@ -231,7 +255,6 @@ export const RecursiveShapeRenderer = ({
       return (
           <g style={{ cursor: 'pointer', opacity }} onMouseDown={(e) => onMouseDown(e, shape.id)}>
               <path d={d} fill="none" stroke={stroke} strokeWidth={widthStr} strokeDasharray="5,2" vectorEffect="non-scaling-stroke" />
-              {/* Hit area */}
               <path d={d} fill="none" stroke="transparent" strokeWidth={10} vectorEffect="non-scaling-stroke" />
           </g>
       );

@@ -12,7 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 export function generateDovetailPoints(
     startX: number, startY: number, 
     endX: number, endY: number, 
-    count: number, 
+    positions: number[], 
     width: number,
     heightOverride?: number,
     flip?: boolean
@@ -33,10 +33,12 @@ export function generateDovetailPoints(
     const neckW = width;
     const headW = width * 1.5;
     const height = heightOverride !== undefined ? heightOverride : width * 0.8;
-    const segmentLen = len / count;
+    
+    // Sort positions to draw sequentially along the line
+    const sortedPos = [...positions].sort((a,b) => a - b);
 
-    for (let i = 0; i < count; i++) {
-        const centerDist = (i + 0.5) * segmentLen;
+    for (const t of sortedPos) {
+        const centerDist = t * len;
         const centerX = startX + ux * centerDist;
         const centerY = startY + uy * centerDist;
         const baseStartDist = centerDist - neckW / 2;
@@ -262,15 +264,15 @@ export function checkSplitPartSizes(
         const sy = evaluateExpression(sl.y, params);
         const ex = sx + evaluateExpression(sl.endX, params);
         const ey = sy + evaluateExpression(sl.endY, params);
-        const count = Math.round(evaluateExpression(sl.dovetailCount, params));
+        const posArr = sl.dovetailPositions ? sl.dovetailPositions.map(p => evaluateExpression(p, params)) : [0.5];
         const width = evaluateExpression(sl.dovetailWidth, params);
         const height = evaluateExpression((sl as any).dovetailHeight, params) || (width * 0.8);
-        const flip = !!(sl as any).flip;
+        const flip = !!sl.flip;
         const dx = ex - sx; const dy = ey - sy;
         const len = Math.sqrt(dx*dx + dy*dy);
         const axisX = len > 0 ? dx/len : 1;
         const axisY = len > 0 ? dy/len : 0;
-        const dovetailPts = generateDovetailPoints(sx, sy, ex, ey, count, width, height, flip);
+        const dovetailPts = generateDovetailPoints(sx, sy, ex, ey, posArr, width, height, flip);
         const boundaryPoints: {x:number, y:number}[] = [];
         dovetailPts.forEach(p => { if (isPointInPolygon(p, outlinePoints)) boundaryPoints.push(p); });
         const farStart = { x: sx - axisX * 10000, y: sy - axisY * 10000 };
@@ -390,7 +392,11 @@ export function findSafeSplitLine(
               if (hits < 2 || checkClearance(fS, fE, false) < 0.5) continue;
               const hL = Math.max(Math.abs(minT), Math.abs(maxT)) * 1.2 + 10;
               const cS = { x: cMidX - uX*hL, y: cMidY - uY*hL }; const cE = { x: cMidX + uX*hL, y: cMidY + uY*hL };
-              const pts = generateDovetailPoints(cS.x, cS.y, cE.x, cE.y, c, width);
+              // Convert count to positions
+              const positions = [];
+              for(let k=0; k<c; k++) positions.push((k + 0.5) / c);
+              
+              const pts = generateDovetailPoints(cS.x, cS.y, cE.x, cE.y, positions, width);
               let valid = true; for(let k=2; k<pts.length-1; k+=4) if (!isPointInPolygon(pts[k], outlinePoints) || !isPointInPolygon(pts[k+1], outlinePoints)) { valid=false; break; }
               if (!valid) continue;
               let dClear = Infinity; for(let k=0; k<pts.length-1; k++) { if (k%4===0) continue; const cl=checkClearance(pts[k], pts[k+1], true); if (cl < 0.5) { valid=false; break; } dClear=Math.min(dClear, cl); }
@@ -565,7 +571,7 @@ export function autoComputeSplit(
                 y: sy.toFixed(4),
                 endX: (ex - sx).toFixed(4),
                 endY: (ey - sy).toFixed(4),
-                dovetailCount: "1", 
+                dovetailPositions: ["0.5"], 
                 dovetailWidth: "15",
                 assignedLayers: {},
                 ignoredLayerIds
@@ -741,13 +747,12 @@ export async function optimizeCutWithDovetail(
         
         return {
             ...cut,
-            x: rStart.x.toFixed(4), // Use clipped start if available, else Rust's
+            x: rStart.x.toFixed(4),
             y: rStart.y.toFixed(4),
             endX: (rEnd.x - rStart.x).toFixed(4),
             endY: (rEnd.y - rStart.y).toFixed(4),
+            dovetailPositions: [optShape.dovetail_t.toFixed(4)],
             dovetailWidth: optShape.dovetail_width.toFixed(4),
-            // We assume the type allows storing height or we map it to width ratio if not
-            // For now, let's assume we can store it or ignore it if not supported
             dovetailHeight: optShape.dovetail_height.toFixed(4), 
             flip: false 
         } as any;
