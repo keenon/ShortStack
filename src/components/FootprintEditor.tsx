@@ -225,6 +225,17 @@ type FootprintEditorState = {
   selectedShapeIds: string[];
 };
 
+const MouseIcon = ({ left, right, middle, scroll }: { left?: boolean, right?: boolean, middle?: boolean, scroll?: boolean }) => (
+    <svg width="14" height="20" viewBox="0 0 14 20" className="mouse-icon-inline">
+        <rect x="0.5" y="0.5" width="13" height="19" rx="4.5" fill="none" stroke="#666" strokeWidth="1" />
+        <line x1="0.5" y1="7" x2="13.5" y2="7" stroke="#666" strokeWidth="1" />
+        <line x1="7" y1="0.5" x2="7" y2="7" stroke="#666" strokeWidth="1" />
+        {left && <path d="M 0.5 5 A 4.5 4.5 0 0 1 7 0.5 L 7 7 L 0.5 7 Z" fill="#b0b0b0" />}
+        {right && <path d="M 7 0.5 A 4.5 4.5 0 0 1 13.5 5 L 13.5 7 L 7 7 Z" fill="#b0b0b0" />}
+        {(middle || scroll) && <rect x="6" y="2.5" width="2" height="4" rx="1" fill={scroll ? "#ffaa00" : "#b0b0b0"} />}
+    </svg>
+);
+
 export default function FootprintEditor({ footprint: initialFootprint, allFootprints, onUpdate, onClose, onEditChild, params, stackup, meshAssets, onRegisterMesh }: Props) {
   // --- HISTORY HOOK ---
   // Updated to include selection in the present state
@@ -277,7 +288,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   // SPLIT TOOL STATE
   const [isSplitToolActive, setIsSplitToolActive] = useState(false);
   const [bedSize, setBedSize] = useState({ width: 256, height: 256 });
-  const [splitToolOptions, setSplitToolOptions] = useState<{ignoredLayerIds: string[]}>({ ignoredLayerIds: [] });
+  const [splitToolOptions, setSplitToolOptions] = useState<{ignoredLayerIds: string[]}>(() => ({ ignoredLayerIds: stackup.filter(l => l.type !== 'Carved/Printed').map(l => l.id) }));
 
   // Visualization of obstacles for Split Tool
   const visualObstacles = useMemo(() => {
@@ -3209,7 +3220,28 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                     )}
                 </svg>
                 <div ref={coordRef} className="coord-display">0.00, 0.00</div>
-                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Left Drag: Select | Alt + Drag: Rotate | Right/Middle Drag: Pan | Scroll: Zoom</div>
+                <div className="canvas-hint-container">
+                    <div className="canvas-hint-content">
+                        <div style={{ marginBottom: '6px', borderBottom: '1px solid #333', paddingBottom: '4px', fontSize: '1.1em', color: '#d4d4d4', fontWeight: 'bold' }}>
+                            Viewport Controls
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '8px 16px', alignItems: 'center' }}>
+                            <span style={{ color: '#888' }}>Select</span> 
+                            <span><MouseIcon left /> Drag</span>
+                            
+                            <span style={{ color: '#888' }}>Rotate</span> 
+                            <span><span className="kbd-key">Alt</span><span style={{ padding: "0 6px", opacity: 0.6 }}>+</span><MouseIcon left /> Drag</span>
+                            
+                            <span style={{ color: '#888' }}>Pan</span> 
+                            <span><MouseIcon right /><span style={{ padding: "0 6px", opacity: 0.6 }}>/</span><MouseIcon middle /> Drag</span>
+                            
+                            <span style={{ color: '#888' }}>Zoom</span> 
+                            <span><MouseIcon scroll /> Scroll</span>
+                        </div>
+                    </div>
+                    <div className="canvas-hint-trigger">?</div>
+                </div>
+                <div className="grid-display">Grid: {parseFloat(gridSize.toPrecision(1))}mm</div>
             </div>
             
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
