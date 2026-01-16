@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 // UPDATER IMPORTS
+import { getVersion } from '@tauri-apps/api/app';
 import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
@@ -24,7 +25,7 @@ type Tab = "stackup" | "footprint" | "layout" | "parameters" | "fabrication";
 
 function App() {
   const [currentPath, setCurrentPath] = useState<string | null>(null);
-  
+  const [version, setVersion] = useState<string>("");
   const [params, setParams] = useState<Parameter[]>([]);
   const [stackup, setStackup] = useState<StackupLayer[]>([]);
   const [footprints, setFootprints] = useState<Footprint[]>([]);
@@ -53,6 +54,7 @@ function App() {
       }
     };
     checkForUpdates();
+    getVersion().then(v => setVersion(v));
   }, []);
 
   // --- INSTALL UPDATE ---
@@ -403,13 +405,15 @@ function App() {
   if (!currentPath) {
     return (
       <div className="container welcome-screen">
-        <h1>Project Manager</h1>
-        <div className="row">
-          <button onClick={createProject}>Create New Project</button>
-          <button onClick={loadProject}>Load Existing Project</button>
-        </div>
-        {updateBanner}
+    <div className="welcome-content"> {/* Added a wrapper div */}
+      <h1>ShortStack <span className="version-tag">v{version}</span></h1>
+      <div className="row">
+        <button className="premium-btn" onClick={createProject}> New Project</button>
+        <button className="premium-btn" onClick={loadProject}>Load Project</button>
       </div>
+    </div>
+    {updateBanner}
+  </div>
     );
   }
 
