@@ -4,14 +4,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText, FootprintSplitLine } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments , checkSplitPartSizes, findSafeSplitLine, collectGlobalObstacles } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
+import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit, autoComputeSplitWithRefinement } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
 import { useUndoHistory } from "../hooks/useUndoHistory"; 
 import { collectExportShapesAsync } from "../utils/exportUtils";
 import './FootprintEditor.css';
+import { split } from "three/tsl";
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
 let GLOBAL_CLIPBOARD: { 
@@ -223,6 +225,17 @@ type FootprintEditorState = {
   selectedShapeIds: string[];
 };
 
+const MouseIcon = ({ left, right, middle, scroll }: { left?: boolean, right?: boolean, middle?: boolean, scroll?: boolean }) => (
+    <svg width="14" height="20" viewBox="0 0 14 20" className="mouse-icon-inline">
+        <rect x="0.5" y="0.5" width="13" height="19" rx="4.5" fill="none" stroke="#666" strokeWidth="1" />
+        <line x1="0.5" y1="7" x2="13.5" y2="7" stroke="#666" strokeWidth="1" />
+        <line x1="7" y1="0.5" x2="7" y2="7" stroke="#666" strokeWidth="1" />
+        {left && <path d="M 0.5 5 A 4.5 4.5 0 0 1 7 0.5 L 7 7 L 0.5 7 Z" fill="#b0b0b0" />}
+        {right && <path d="M 7 0.5 A 4.5 4.5 0 0 1 13.5 5 L 13.5 7 L 7 7 Z" fill="#b0b0b0" />}
+        {(middle || scroll) && <rect x="6" y="2.5" width="2" height="4" rx="1" fill={scroll ? "#ffaa00" : "#b0b0b0"} />}
+    </svg>
+);
+
 export default function FootprintEditor({ footprint: initialFootprint, allFootprints, onUpdate, onClose, onEditChild, params, stackup, meshAssets, onRegisterMesh }: Props) {
   // --- HISTORY HOOK ---
   // Updated to include selection in the present state
@@ -274,8 +287,8 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
 
   // SPLIT TOOL STATE
   const [isSplitToolActive, setIsSplitToolActive] = useState(false);
-  const [bedSize, setBedSize] = useState({ width: 250, height: 250 });
-  const [splitToolOptions, setSplitToolOptions] = useState<{ignoredLayerIds: string[]}>({ ignoredLayerIds: [] });
+  const [bedSize, setBedSize] = useState({ width: 256, height: 256 });
+  const [splitToolOptions, setSplitToolOptions] = useState<{ignoredLayerIds: string[]}>(() => ({ ignoredLayerIds: stackup.filter(l => l.type !== 'Carved/Printed').map(l => l.id) }));
 
   // Visualization of obstacles for Split Tool
   const visualObstacles = useMemo(() => {
@@ -307,6 +320,8 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   
   const splitStart = useRef<{x:number, y:number} | null>(null);
   const [splitPreview, setSplitPreview] = useState<{x1:number, y1:number, x2:number, y2:number} | null>(null);
+
+
 
   // Rotation State
   const [rotationGuide, setRotationGuide] = useState<{ center: {x:number, y:number}, current: {x:number, y:number} } | null>(null);
@@ -394,10 +409,11 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   type DragMode = 'move' | 'resize';
   type ResizeHandle = 'top' | 'bottom' | 'left' | 'right' | 'ring';
 
+  const coordRef = useRef<HTMLDivElement>(null);
   const dragTargetRef = useRef<{ 
       id: string; 
       pointIdx?: number; 
-      handleType?: 'in' | 'out' | 'symmetric';
+      handleType?: 'in' | 'out' | 'symmetric' | 'dovetail';
       mode: DragMode;
       resizeHandle?: ResizeHandle;
       initialVal?: string; // Original expression for width/height/dia
@@ -697,17 +713,48 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                     };
                 }
 
-                // 6. Handle Split Line Vector Rotation
+                // 6. Handle Split Line Vector Rotation with Snapping
                 if (s.type === "splitLine") {
                     const ex = evaluateExpression((startState as any).endX, params);
                     const ey = evaluateExpression((startState as any).endY, params);
                     
-                    // Rotate the relative vector (Standard Math rotation, note hCos/hSin uses negative angle)
+                    // Rotate the relative vector
                     const nex = ex * hCos - ey * hSin;
                     const ney = ex * hSin + ey * hCos;
                     
+                    // Tentative Position (Geometry only)
                     newProps.endX = modifyExpression((startState as any).endX, nex - ex);
                     newProps.endY = modifyExpression((startState as any).endY, ney - ey);
+
+                    // Perform Snap Check
+                    // Evaluate current tentative Global Start
+                    const currentX = evaluateExpression(newProps.x, params);
+                    const currentY = evaluateExpression(newProps.y, params);
+                    
+                    // Run Snapping Search
+                    const snapRes = findSafeSplitLine(
+                        footprintRef.current, allFootprints, params, stackup, 
+                        {x: currentX, y: currentY}, 
+                        {x: currentX + nex, y: currentY + ney},
+                        { searchRadius: 10, angleRange: 5 }, // Tight snapping corridor
+                        (startState as any).ignoredLayerIds
+                    );
+
+                    if (snapRes.result) {
+                        // Override with Snapped Geometry
+                        // We need to calculate deltas relative to StartState to preserve expression structure
+                        const startXVal = evaluateExpression(startState.x, params);
+                        const startYVal = evaluateExpression(startState.y, params);
+                        
+                        newProps.x = modifyExpression(startState.x, snapRes.result.start.x - startXVal);
+                        newProps.y = modifyExpression(startState.y, snapRes.result.start.y - startYVal);
+                        
+                        const newDX = snapRes.result.end.x - snapRes.result.start.x;
+                        const newDY = snapRes.result.end.y - snapRes.result.start.y;
+                        
+                        newProps.endX = modifyExpression((startState as any).endX, newDX - ex);
+                        newProps.endY = modifyExpression((startState as any).endY, newDY - ey);
+                    }
                 }
 
                 return { ...s, ...newProps };
@@ -880,7 +927,8 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
       // SAFETY CHECKS
       // 1. Minimum Length Check
-      const dist = Math.sqrt((pos.x - splitStart.current.x)**2 + (pos.y - splitStart.current.y)**2); // Visual dist
+      const dist = Math.sqrt((mathEnd.x - splitStart.current.x)**2 + (mathEnd.y - splitStart.current.y)**2); // Visual dist
+      console.log("Split Line Length:", dist);
       if (dist < 5) {
           setSplitPreview(null);
           splitStart.current = null;
@@ -888,29 +936,53 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
           return;
       }
 
-      // 2. Intersection Check (Must touch/cross board AABB at minimum)
-      const aabb = getFootprintAABB(footprintRef.current, params, allFootprints);
-      if (aabb) {
-          // Simple check: does segment intersect bounding box?
-          // We convert mouse pos (Visual Y) to Math Y for check
-          // const sMath = { x: splitStart.current!.x, y: splitStart.current!.y };
-          // Check intersection of sMath->mathEnd with aabb (which is Visual Y, so flip AABB Ys or flip Point Ys)
-          // `getFootprintAABB` returns Visual Y. 
-          // `mathEnd` is Math Y. `splitStart` is Math Y.
-          // Let's use Visual Coords for the check since we have `pos` and `splitStart.current` (wait splitStart is Math).
-          // Re-convert splitStart to visual
-          const vStart = { x: splitStart.current!.x, y: -splitStart.current!.y };
-          const vEnd = { x: pos.x, y: pos.y };
-          
-          // Helper to check rect intersection
-          const minX = Math.min(vStart.x, vEnd.x), maxX = Math.max(vStart.x, vEnd.x);
-          const minY = Math.min(vStart.y, vEnd.y), maxY = Math.max(vStart.y, vEnd.y);
-          
-          if (maxX < aabb.x1 || minX > aabb.x2 || maxY < aabb.y1 || minY > aabb.y2) {
-               // Completely outside bounding box
+      // 2. Intersection Check (Must touch/cross board outline)
+      const outlinePoints = getTessellatedBoardOutline(footprintRef.current, params, allFootprints);
+      if (outlinePoints.length > 0) {
+          let hasOverlap = false;
+          const sX = splitStart.current!.x;
+          const sY = splitStart.current!.y;
+          const eX = mathEnd.x;
+          const eY = mathEnd.y;
+
+          // A. Check Edge Intersections
+          for (let i = 0; i < outlinePoints.length; i++) {
+              const p1 = outlinePoints[i];
+              const p2 = outlinePoints[(i + 1) % outlinePoints.length];
+              
+              // Standard segment intersection math
+              const d1x = eX - sX;     const d1y = eY - sY;
+              const d2x = p2.x - p1.x; const d2y = p2.y - p1.y;
+              const det = -d2x * d1y + d1x * d2y;
+              
+              if (Math.abs(det) > 1e-6) {
+                  const s = (-d1y * (sX - p1.x) + d1x * (sY - p1.y)) / det;
+                  const t = ( d2x * (sY - p1.y) - d2y * (sX - p1.x)) / det;
+                  if (s >= 0 && s <= 1 && t >= 0 && t <= 1) {
+                      hasOverlap = true;
+                      break;
+                  }
+              }
+          }
+
+          // B. Check Containment (if start/end inside)
+          if (!hasOverlap) {
+              const midX = (sX + eX) / 2;
+              const midY = (sY + eY) / 2;
+              let inside = false;
+              for (let i = 0, j = outlinePoints.length - 1; i < outlinePoints.length; j = i++) {
+                  const xi = outlinePoints[i].x, yi = outlinePoints[i].y;
+                  const xj = outlinePoints[j].x, yj = outlinePoints[j].y;
+                  const intersect = ((yi > midY) !== (yj > midY)) && (midX < (xj - xi) * (midY - yi) / (yj - yi) + xi);
+                  if (intersect) inside = !inside;
+              }
+              if (inside) hasOverlap = true;
+          }
+
+          if (!hasOverlap) {
+               // Completely outside board outline
                setSplitPreview(null);
                splitStart.current = null;
-            //    setIsSplitToolActive(false); // Auto-exit tool
                return;
           }
       }
@@ -927,7 +999,6 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                                 stackup, 
                                 splitStart.current!, 
                                 mathEnd,
-                                bedSize,
                                 undefined, // Default search options
                                 splitToolOptions.ignoredLayerIds // Pass global tool defaults
                             );
@@ -949,8 +1020,10 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
               y: result.start.y.toFixed(4),
               endX: (result.end.x - result.start.x).toFixed(4),
               endY: (result.end.y - result.start.y).toFixed(4),
-              dovetailCount: result.count.toString(),
-              dovetailWidth: "10", // Default width
+              dovetailPositions: result.positions.map(pos => pos.toString()),
+              dovetailWidth: result.width.toString(),
+              dovetailHeight: result.height.toString(),
+              flipDovetails: result.flip,
               assignedLayers: {},
               // Apply current tool options
               ignoredLayerIds: splitToolOptions.ignoredLayerIds
@@ -1254,7 +1327,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       window.addEventListener('mouseup', handleShapeMouseUp);
   };
 
-  const handleHandleMouseDown = (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out') => {
+  const handleHandleMouseDown = (e: React.MouseEvent, id: string, pointIndex: number, type: 'in' | 'out' | 'dovetail') => {
       // Only allow Left Click (0) for shape interaction.
       // This allows Right Click (2) and Middle Click (1) to bubble up to camera panning.
       if (e.button !== 0) return;
@@ -1348,6 +1421,37 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
 
               // --- UPDATED POINT MOVE LOGIC WITH SOFT SNAP ---
               if (pointIdx !== undefined && s.id === targetId) {
+                  // Handle Split Line Dovetail Sliding
+                  if (s.type === 'splitLine' && (startShape as any).dovetailPositions) {
+                      // Project mouse onto the line segment to find new t
+                      const sx = evaluateExpression(startShape.x, params);
+                      const sy = -evaluateExpression(startShape.y, params);
+                      const exRel = evaluateExpression((startShape as any).endX, params);
+                      const eyRel = -evaluateExpression((startShape as any).endY, params);
+                      
+                      // Line vector
+                      const lx = exRel;
+                      const ly = eyRel;
+                      const l2 = lx*lx + ly*ly;
+                      
+                      if (l2 > 0.0001) {
+                          const mWorld = getMouseWorldPos(e.clientX, e.clientY);
+                          // Vector from Start to Mouse
+                          const mx = mWorld.x - sx;
+                          const my = mWorld.y - sy;
+                          
+                          // Project
+                          let t = (mx * lx + my * ly) / l2;
+                          t = Math.max(0.05, Math.min(0.95, t)); // Clamp with padding
+                          
+                          const newPositions = [...(startShape as any).dovetailPositions];
+                          newPositions[pointIdx] = t.toFixed(4);
+                          
+                          return { ...s, dovetailPositions: newPositions } as any;
+                      }
+                      return s;
+                  }
+
                   // Handle Wire Guide direction handle specifically
                   if (startShape.type === "wireGuide") {
                       if (startShape.handle) {
@@ -1477,16 +1581,19 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                   const endXRel = evaluateExpression((startShape as any).endX, params);
                   const endYRel = evaluateExpression((startShape as any).endY, params);
                   
+                  const start = { x: tentX, y: tentY };
+                  const end = { x: tentX + endXRel, y: tentY + endYRel };
                   // Run local search for valid snap with rotation
                   // OPTIMIZATION: Use smaller search radius and angle range during drag
                   const snapRes = findSafeSplitLine(
                       footprintRef.current, allFootprints, params, stackup, 
-                      {x: tentX, y: tentY}, 
-                      {x: tentX + endXRel, y: tentY + endYRel},
-                      bedSize,
+                      start, 
+                      end,
                       { searchRadius: 5, angleRange: 5 },
                       startShape.ignoredLayerIds
                   );
+                  
+
 
                   if (snapRes.result) {
                       return { 
@@ -2086,6 +2193,7 @@ const handleUngroup = (unionId: string) => {
                 setSplitPreview(null);
                 splitStart.current = null;
                 setProcessingMessage(null);
+
             } else {
                 // Standard behavior: Clear selection if not in tool
                 setSelectedShapeIds([]);
@@ -2726,6 +2834,59 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
         return colors[i % colors.length];
     };
 
+
+  // EXTRACTED AUTO-SPLIT LOGIC
+  const handleRunAutoSplit = async () => {
+        if (!footprint.isBoard) { alert("Please enable 'Standalone Board' first."); return; }
+        
+        const preCheck = checkSplitPartSizes(footprint, params, allFootprints, bedSize);
+        if (preCheck.maxExcess < 1.0) {
+            alert("No split needed! The footprint already fits within the bed dimensions.");
+            return;
+        }
+
+        setProcessingMessage("Running Global Search...");
+        
+        // Yield to UI to show spinner
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        try {
+            const res = await autoComputeSplitWithRefinement(
+                footprint, allFootprints, params, stackup, 
+                bedSize, { clearance: 2, desiredCuts: 1 }, 
+                splitToolOptions.ignoredLayerIds
+            );
+            
+            setProcessingMessage(null);
+            
+            if (res.log) console.log(res.log);
+            console.log("Auto-split result:", res);
+
+            if (res.success && res.shapes && res.shapes.length > 0) {
+                const newIds = res.shapes.map(s => s.id);
+                updateHistory({ 
+                    footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                    selectedShapeIds: newIds
+                });
+            } else {
+                if (res.shapes && res.shapes.length > 0) {
+                    alert(`Warning: Perfect fit not found. Found ${res.shapes.length} cuts with excess: ${res.maxExcess?.toFixed(1)}mm`);
+                    const newIds = res.shapes.map(s => s.id);
+                    updateHistory({ 
+                        footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                        selectedShapeIds: newIds
+                    });
+                } else {
+                    alert("Global search failed completely. Check obstacle layers or try increasing bed size.");
+                }
+            }
+        } catch (e) {
+            console.error(e);
+            setProcessingMessage(null);
+            alert("An error occurred during optimization.");
+        }
+  };
+
   return (
     <div className="footprint-editor-container">
       {/* PROCESSING OVERLAY */}
@@ -2761,45 +2922,6 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
         >
             <IconSplit /> Split
         </button>
-        {(isSplitToolActive || (selectedShapeIds.length === 1 && footprint.shapes.find(s => s.id === selectedShapeIds[0])?.type === 'splitLine')) && (() => {
-            const activeSplit = selectedShapeIds.length === 1 ? footprint.shapes.find(s => s.id === selectedShapeIds[0]) as any : null;
-            const currentW = activeSplit?.bedWidth || bedSize.width;
-            const currentH = activeSplit?.bedHeight || bedSize.height;
-            
-            const handleBedChange = (field: 'width' | 'height', val: string) => {
-                const num = parseFloat(val);
-                if (activeSplit) {
-                    // Update shape property
-                    updateShape(activeSplit.id, field === 'width' ? 'bedWidth' : 'bedHeight', num);
-                } else {
-                    // Update global tool default
-                    setBedSize(prev => ({ ...prev, [field]: num }));
-                }
-            };
-
-            return (
-                <div style={{display:'flex', gap:'5px', marginLeft:'10px', alignItems:'center'}}>
-                    <span style={{fontSize:'0.8em', color:'#aaa'}}>Bed:</span>
-                    <input 
-                        type="number" 
-                        className="toolbar-name-input" 
-                        style={{width:'80px'}} 
-                        value={currentW} 
-                        onChange={e => handleBedChange('width', e.target.value)} 
-                        title="Print Bed Width" 
-                    />
-                    <span style={{color:'#666'}}>x</span>
-                    <input 
-                        type="number" 
-                        className="toolbar-name-input" 
-                        style={{width:'80px'}} 
-                        value={currentH} 
-                        onChange={e => handleBedChange('height', e.target.value)} 
-                        title="Print Bed Height" 
-                    />
-                </div>
-            );
-        })()}
         {footprint.isBoard && <button onClick={() => addShape("boardOutline")}><IconOutline /> Outline</button>}
         
         {/* Footprint Dropdown */}
@@ -2878,6 +3000,12 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                     className="fp-canvas" 
                     viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
                     onMouseDown={handleMouseDown}
+                    onMouseMove={(e) => {
+                        if (coordRef.current) {
+                            const w = getMouseWorldPos(e.clientX, e.clientY);
+                            coordRef.current.innerText = `${w.x.toFixed(2)}, ${(-w.y).toFixed(2)}`;
+                        }
+                    }}
                     style={{ cursor: isDragging.current ? 'grabbing' : 'default' }}
                 >
                     <defs>
@@ -3006,6 +3134,8 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         </g>
                     )}
 
+
+
                     
                     {/* SPLIT PART SIZE CHECK - Using Unified Hull Logic */}
                     {splitPartHulls.map((part, i) => {
@@ -3016,79 +3146,28 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         const hullColor = part.valid ? "rgba(0, 255, 0, 0.05)" : "rgba(255, 0, 0, 0.05)";
                         const hullStroke = part.valid ? "rgba(0, 255, 0, 0.3)" : "rgba(255, 0, 0, 0.3)";
                         
-                        // 2. Bed Visualization logic (Simplified for unified check)
-                        let bedPoly = null;
-                        if (part.corners.length === 4) {
-                            // OBB Center and Axes
-                            const c = part.corners;
-                            const center = { x: (c[0].x + c[2].x)/2, y: (c[0].y + c[2].y)/2 };
-                            const u = { x: c[1].x - c[0].x, y: c[1].y - c[0].y };
-                            const v = { x: c[2].x - c[1].x, y: c[2].y - c[1].y };
-                            const uLen = Math.sqrt(u.x*u.x + u.y*u.y);
-                            const vLen = Math.sqrt(v.x*v.x + v.y*v.y);
-                            const uHat = { x: u.x/uLen, y: u.y/uLen };
-                            const vHat = { x: v.x/vLen, y: v.y/vLen };
-
-                            const bedLong = Math.max(bedSize.width, bedSize.height);
-                            const bedShort = Math.min(bedSize.width, bedSize.height);
-                            const isULong = uLen >= vLen;
-                            
-                            let renderW, renderH;
-                            if (isULong) { renderW = bedLong; renderH = bedShort; }
-                            else { renderW = bedShort; renderH = bedLong; }
-
-                            const halfW = renderW / 2;
-                            const halfH = renderH / 2;
-                            
-                            const bc = [
-                                { x: center.x - uHat.x*halfW - vHat.x*halfH, y: center.y - uHat.y*halfW - vHat.y*halfH },
-                                { x: center.x + uHat.x*halfW - vHat.x*halfH, y: center.y + uHat.y*halfW - vHat.y*halfH },
-                                { x: center.x + uHat.x*halfW + vHat.x*halfH, y: center.y + uHat.y*halfW + vHat.y*halfH },
-                                { x: center.x - uHat.x*halfW + vHat.x*halfH, y: center.y - uHat.y*halfW + vHat.y*halfH }
-                            ];
-                            
-                            bedPoly = (
-                                <polygon 
-                                    points={bc.map(p => `${p.x},${-p.y}`).join(' ')} 
-                                    fill="none" 
-                                    stroke={part.valid ? "cyan" : "orange"} 
-                                    strokeWidth={1} 
-                                    strokeDasharray="2,2" 
-                                    vectorEffect="non-scaling-stroke" 
-                                    opacity={0.6}
-                                />
-                            );
-                        }
+                        // 2. Bed Visualization logic (World Space)
+                        const bedPoly = part.corners.length === 4 ? (
+                            <polygon 
+                                points={part.corners.map(p => `${p.x},${-p.y}`).join(' ')} 
+                                fill="none" 
+                                stroke={part.valid ? "#00ff00" : "orange"} 
+                                strokeWidth={2} 
+                                strokeDasharray="4,4" 
+                                vectorEffect="non-scaling-stroke" 
+                                opacity={0.8}
+                            />
+                        ) : null;
 
                         return (
                             <g key={'size-check-'+i} pointerEvents="none">
                                 <polygon points={hullPts} fill={hullColor} stroke={hullStroke} strokeWidth={1} strokeDasharray="4,4" vectorEffect="non-scaling-stroke" />
                                 {bedPoly}
-                                {!part.valid && part.corners.length > 0 && (
-                                    <>
-                                        <polygon 
-                                            points={part.corners.map(p => `${p.x},${-p.y}`).join(' ')} 
-                                            fill="none" 
-                                            stroke="red" 
-                                            strokeWidth={2} 
-                                            vectorEffect="non-scaling-stroke" 
-                                        />
-                                        <text 
-                                            x={part.corners[0].x} 
-                                            y={-part.corners[0].y} 
-                                            fill="red" 
-                                            fontSize={6} 
-                                            fontWeight="bold" 
-                                            dy={-2}
-                                            style={{ textShadow: '0 0 2px black' }}
-                                        >
-                                            OVERSIZE
-                                        </text>
-                                    </>
-                                )}
+                                {/* Oversize indicator removed */}
                             </g>
                         );
                     })}
+
 
                     {splitPreview && (
                         <line 
@@ -3140,7 +3219,29 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         />
                     )}
                 </svg>
-                <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Left Drag: Select | Alt + Drag: Rotate | Right/Middle Drag: Pan | Scroll: Zoom</div>
+                <div ref={coordRef} className="coord-display">0.00, 0.00</div>
+                <div className="canvas-hint-container">
+                    <div className="canvas-hint-content">
+                        <div style={{ marginBottom: '6px', borderBottom: '1px solid #333', paddingBottom: '4px', fontSize: '1.1em', color: '#d4d4d4', fontWeight: 'bold' }}>
+                            Viewport Controls
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '8px 16px', alignItems: 'center' }}>
+                            <span style={{ color: '#888' }}>Select</span> 
+                            <span><MouseIcon left /> Drag</span>
+                            
+                            <span style={{ color: '#888' }}>Rotate</span> 
+                            <span><span className="kbd-key">Alt</span><span style={{ padding: "0 6px", opacity: 0.6 }}>+</span><MouseIcon left /> Drag</span>
+                            
+                            <span style={{ color: '#888' }}>Pan</span> 
+                            <span><MouseIcon right /><span style={{ padding: "0 6px", opacity: 0.6 }}>/</span><MouseIcon middle /> Drag</span>
+                            
+                            <span style={{ color: '#888' }}>Zoom</span> 
+                            <span><MouseIcon scroll /> Scroll</span>
+                        </div>
+                    </div>
+                    <div className="canvas-hint-trigger">?</div>
+                </div>
+                <div className="grid-display">Grid: {parseFloat(gridSize.toPrecision(1))}mm</div>
             </div>
             
             <div style={{ display: viewMode === "3D" ? 'contents' : 'none' }}>
@@ -3191,6 +3292,9 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                 scrollToTieDownId={scrollToTieDownId}
                 // @ts-ignore - passing extra props for split tool logic
                 isSplitToolActive={isSplitToolActive}
+                bedSize={bedSize}
+                setBedSize={setBedSize}
+                onAutoSplit={handleRunAutoSplit}
                 splitToolOptions={splitToolOptions}
                 setSplitToolOptions={setSplitToolOptions}
               />

@@ -220,8 +220,9 @@ export async function collectExportShapesAsync(
                 exportObj.end_x = vecX * cos - vecY * sin;
                 exportObj.end_y = vecX * sin + vecY * cos;
                 
-                exportObj.dovetail_count = evaluateExpression(sl.dovetailCount, params);
+                exportObj.dovetail_positions = (sl.dovetailPositions || ["0.5"]).map(p => evaluateExpression(p, params));
                 exportObj.dovetail_width = evaluateExpression(sl.dovetailWidth, params);
+                exportObj.dovetail_height = evaluateExpression(sl.dovetailHeight, params);
                 
                 result.push(exportObj);
             }

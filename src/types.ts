@@ -136,15 +136,17 @@ export interface FootprintText extends BaseShape {
   anchor: "start" | "middle" | "end";
 }
 
-// NEW: Split Line for fabrication slicing
+// Split Line for fabrication slicing
 export interface FootprintSplitLine extends BaseShape {
   type: "splitLine";
   x: string;
   y: string;
   endX: string; // Relative to x
   endY: string; // Relative to y
-  dovetailCount: string;
+  flip?: boolean; // Flip dovetail side
+  dovetailPositions: string[]; // 0-1 Positions along line
   dovetailWidth: string; // Width of the neck
+  dovetailHeight: string; // Height of the dovetail
 }
 
 export type FootprintShape = FootprintCircle | FootprintRect | FootprintLine | FootprintReference | FootprintWireGuide | FootprintBoardOutline | FootprintPolygon | FootprintUnion | FootprintText | FootprintSplitLine;

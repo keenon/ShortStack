@@ -33,6 +33,9 @@ const FootprintPropertiesPanel = ({
   isSplitToolActive,
   splitToolOptions,
   setSplitToolOptions,
+  bedSize,
+  setBedSize,
+  onAutoSplit,
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -61,6 +64,9 @@ const FootprintPropertiesPanel = ({
   isSplitToolActive?: boolean;
   splitToolOptions?: { ignoredLayerIds: string[] };
   setSplitToolOptions?: (opts: { ignoredLayerIds: string[] }) => void;
+  bedSize?: { width: number, height: number };
+  setBedSize?: (size: { width: number, height: number }) => void;
+  onAutoSplit?: () => void;
 }) => {
   
   // Get available wire guides for Snapping
@@ -155,6 +161,41 @@ const FootprintPropertiesPanel = ({
             <p style={{fontSize:'0.9em', color:'#aaa', marginBottom:'20px'}}>
                 Configure default settings for new split lines.
             </p>
+
+            {/* BED SIZE CONTROLS */}
+            <div className="prop-section">
+                <h4>Print Bed Dimensions</h4>
+                <div style={{display:'flex', gap:'10px', alignItems:'center', marginBottom:'15px'}}>
+                    <div style={{flex:1}}>
+                        <label style={{fontSize:'0.8em', color:'#888'}}>Width (mm)</label>
+                        <input 
+                            type="number" 
+                            className="toolbar-name-input" 
+                            style={{width:'100%', margin:0}} 
+                            value={bedSize?.width || 256} 
+                            onChange={e => setBedSize && setBedSize({ ...bedSize!, width: parseFloat(e.target.value) })} 
+                        />
+                    </div>
+                    <span style={{paddingTop:'15px', color:'#666'}}>x</span>
+                    <div style={{flex:1}}>
+                        <label style={{fontSize:'0.8em', color:'#888'}}>Height (mm)</label>
+                        <input 
+                            type="number" 
+                            className="toolbar-name-input" 
+                            style={{width:'100%', margin:0}} 
+                            value={bedSize?.height || 256} 
+                            onChange={e => setBedSize && setBedSize({ ...bedSize!, height: parseFloat(e.target.value) })} 
+                        />
+                    </div>
+                </div>
+                
+                <button 
+                    style={{width:'100%', background: '#2d4b38', border:'1px solid #487e5b', padding:'10px'}}
+                    onClick={onAutoSplit}
+                >
+                    ✨ Run Auto-Split
+                </button>
+            </div>
 
             <div className="prop-section">
                 <h4>Ignored Obstacle Layers</h4>
@@ -864,12 +905,51 @@ const FootprintPropertiesPanel = ({
                 <input type="text" value={sl.name} onChange={(e) => updateShape(sl.id, "name", e.target.value)} />
             </div>
             <div className="prop-group">
-                <label>Dovetail Count</label>
-                <ExpressionEditor value={sl.dovetailCount} onChange={(v) => updateShape(sl.id, "dovetailCount", v)} params={params} placeholder="3" />
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'5px'}}>
+                    <label style={{margin:0}}>Dovetails</label>
+                    <button className="secondary small-btn" style={{padding:'2px 6px'}} onClick={() => {
+                        const newPos = [...(sl.dovetailPositions || [])];
+                        // Smart add: halfway between largest gap or 0.5
+                        newPos.push("0.5"); 
+                        newPos.sort((a,b) => parseFloat(a) - parseFloat(b));
+                        updateShape(sl.id, "dovetailPositions", newPos);
+                    }}>+</button>
+                </div>
+                <div style={{display:'flex', flexDirection:'column', gap:'4px'}}>
+                    {(sl.dovetailPositions || []).map((pos, idx) => (
+                        <div key={idx} style={{display:'flex', gap:'5px', alignItems:'center'}}>
+                            <span style={{fontSize:'0.8em', color:'#888', width:'15px'}}>{idx+1}</span>
+                            <ExpressionEditor value={pos} onChange={(v) => {
+                                const newPos = [...sl.dovetailPositions];
+                                newPos[idx] = v;
+                                updateShape(sl.id, "dovetailPositions", newPos);
+                            }} params={params} placeholder="0.5" />
+                            <button className="icon-btn danger" style={{padding:'0 4px'}} onClick={() => {
+                                const newPos = sl.dovetailPositions.filter((_, i) => i !== idx);
+                                updateShape(sl.id, "dovetailPositions", newPos);
+                            }}>×</button>
+                        </div>
+                    ))}
+                    {(!sl.dovetailPositions || sl.dovetailPositions.length === 0) && <div className="empty-hint">No dovetails.</div>}
+                </div>
             </div>
             <div className="prop-group">
                 <label>Dovetail Width (mm)</label>
                 <ExpressionEditor value={sl.dovetailWidth} onChange={(v) => updateShape(sl.id, "dovetailWidth", v)} params={params} placeholder="10" />
+            </div>
+            <div className="prop-group">
+                <label>Dovetail Height (mm)</label>
+                <ExpressionEditor value={sl.dovetailHeight} onChange={(v) => updateShape(sl.id, "dovetailHeight", v)} params={params} placeholder="8" />
+            </div>
+            <div className="prop-group">
+                <label className="checkbox-label">
+                    <input 
+                        type="checkbox" 
+                        checked={!!sl.flip} 
+                        onChange={(e) => updateShape(sl.id, "flip", e.target.checked)} 
+                    />
+                    Flip Dovetails
+                </label>
             </div>
             <div className="prop-section">
                 <h4>Position</h4>
