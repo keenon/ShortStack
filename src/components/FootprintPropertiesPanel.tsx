@@ -33,6 +33,9 @@ const FootprintPropertiesPanel = ({
   isSplitToolActive,
   splitToolOptions,
   setSplitToolOptions,
+  bedSize,
+  setBedSize,
+  onAutoSplit,
 }: {
   footprint: Footprint;
   allFootprints: Footprint[];
@@ -61,6 +64,9 @@ const FootprintPropertiesPanel = ({
   isSplitToolActive?: boolean;
   splitToolOptions?: { ignoredLayerIds: string[] };
   setSplitToolOptions?: (opts: { ignoredLayerIds: string[] }) => void;
+  bedSize?: { width: number, height: number };
+  setBedSize?: (size: { width: number, height: number }) => void;
+  onAutoSplit?: () => void;
 }) => {
   
   // Get available wire guides for Snapping
@@ -155,6 +161,41 @@ const FootprintPropertiesPanel = ({
             <p style={{fontSize:'0.9em', color:'#aaa', marginBottom:'20px'}}>
                 Configure default settings for new split lines.
             </p>
+
+            {/* BED SIZE CONTROLS */}
+            <div className="prop-section">
+                <h4>Print Bed Dimensions</h4>
+                <div style={{display:'flex', gap:'10px', alignItems:'center', marginBottom:'15px'}}>
+                    <div style={{flex:1}}>
+                        <label style={{fontSize:'0.8em', color:'#888'}}>Width (mm)</label>
+                        <input 
+                            type="number" 
+                            className="toolbar-name-input" 
+                            style={{width:'100%', margin:0}} 
+                            value={bedSize?.width || 256} 
+                            onChange={e => setBedSize && setBedSize({ ...bedSize!, width: parseFloat(e.target.value) })} 
+                        />
+                    </div>
+                    <span style={{paddingTop:'15px', color:'#666'}}>x</span>
+                    <div style={{flex:1}}>
+                        <label style={{fontSize:'0.8em', color:'#888'}}>Height (mm)</label>
+                        <input 
+                            type="number" 
+                            className="toolbar-name-input" 
+                            style={{width:'100%', margin:0}} 
+                            value={bedSize?.height || 256} 
+                            onChange={e => setBedSize && setBedSize({ ...bedSize!, height: parseFloat(e.target.value) })} 
+                        />
+                    </div>
+                </div>
+                
+                <button 
+                    style={{width:'100%', background: '#2d4b38', border:'1px solid #487e5b', padding:'10px'}}
+                    onClick={onAutoSplit}
+                >
+                    ✨ Run Auto-Split
+                </button>
+            </div>
 
             <div className="prop-section">
                 <h4>Ignored Obstacle Layers</h4>
