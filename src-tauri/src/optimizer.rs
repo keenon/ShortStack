@@ -3,7 +3,7 @@ use cmaes::{CMAESOptions, DVector, PlotOptions};
 use geo::{Point, LineString, Polygon, Euclidean, Distance};
 use std::f64::consts::PI;
 
-const OBS_MARGIN: f64 = 1.5;
+const OBS_MARGIN: f64 = 2.0;
 const MIN_W: f64 = 5.0;
 const MAX_W: f64 = 25.0;
 const MIN_H: f64 = 4.0;
@@ -34,44 +34,62 @@ struct CostContext {
     radius: f64,
 }
 
-fn line_to_params(start: [f64; 2], end: [f64; 2], ctx: &CostContext) -> (f64, f64) {
+fn line_to_params(start: [f64; 2], end: [f64; 2], ctx: &CostContext) -> (f64, f64, f64) {
     let dx = end[0] - start[0];
     let dy = end[1] - start[1];
     
-    // 1. Calculate Angle and Normalize to [0, PI)
-    // This matches the space used by decode_params.
+    // 1. Calculate Angle (0 to PI)
     let mut angle = dy.atan2(dx); 
     if angle < 0.0 { angle += PI; }
     if angle >= PI { angle -= PI; }
     let angle_norm = angle / PI;
 
-    // 2. Re-derive Unit Vectors from Normalized Angle
-    // CRITICAL FIX: We must use vectors derived from the *normalized* angle,
-    // not the raw input dx/dy. If the raw line pointed "down-right" (-45 deg),
-    // it gets normalized to "up-left" (135 deg). If we used the raw normal,
-    // it would point in the opposite direction to the normal expected by decode_params,
-    // flipping the sign of the calculated offset.
+    // 2. Unit Vectors
     let ux = angle.cos();
     let uy = angle.sin();
     
-    // Match decode_params normal logic: nx = -uy, ny = ux
-    let vx = -uy; 
-    let vy = ux;  
+    // Position Normal (Standardized)
+    let nx = -uy; 
+    let ny = ux;
 
-    // 3. Calculate Offset
-    // Projection of the line onto the reconstructed normal
-    let line_proj = start[0] * vx + start[1] * vy;
-    
-    // Projection of the board center onto that same normal
-    let center_proj = ctx.center.x() * vx + ctx.center.y() * vy;
-    
-    // The signed distance from center to line along the normal
+    // 3. Offset
+    let line_proj = start[0] * nx + start[1] * ny;
+    let center_proj = ctx.center.x() * nx + ctx.center.y() * ny;
     let offset_dist = line_proj - center_proj;
-    
-    // Normalize to 0.0 - 1.0 (relative to ctx.radius)
     let offset_norm = (offset_dist / ctx.radius) * 0.5 + 0.5;
 
-    (angle_norm.clamp(0.0, 1.0), offset_norm.clamp(0.0, 1.0))
+    // 4. Longitudinal Position (t)
+    // We need to map the user's line midpoint to the 't' parameter (0..1)
+    // relative to the board intersection.
+    
+    // Anchor point used by decode_params
+    let anchor_x = ctx.center.x() + nx * (offset_dist);
+    let anchor_y = ctx.center.y() + ny * (offset_dist);
+
+    // Calculate extents of the board outline projected onto this infinite line
+    let mut min_t = f64::MAX;
+    let mut max_t = f64::MIN;
+    for p in &ctx.outline {
+        let t = (p.x() - anchor_x) * ux + (p.y() - anchor_y) * uy;
+        min_t = min_t.min(t);
+        max_t = max_t.max(t);
+    }
+
+    // User's midpoint
+    let user_mid_x = (start[0] + end[0]) / 2.0;
+    let user_mid_y = (start[1] + end[1]) / 2.0;
+    
+    // Project user midpoint onto the line relative to anchor
+    let user_t_raw = (user_mid_x - anchor_x) * ux + (user_mid_y - anchor_y) * uy;
+    
+    // Normalize based on board extents
+    let mut geometric_t = 0.5;
+    if (max_t - min_t).abs() > 1e-6 {
+        geometric_t = (user_t_raw - min_t) / (max_t - min_t);
+    }
+
+    let t_seed = (geometric_t - 0.1) / 0.8;
+    (angle_norm.clamp(0.0, 1.0), offset_norm.clamp(0.0, 1.0), t_seed.clamp(0.0, 1.0))
 }
 
 pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
@@ -97,59 +115,93 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
         radius,
     };
 
-    // Default starting point (the middle of everything)
-    let mut initial_mean = vec![0.5, 0.5, 0.5, 0.5, 0.5];
-    let mut sigma = 0.2;
+    // 1. Generate Structured Seeds
+    // The optimization landscape is full of local optima (dovetails stuck in holes).
+    // Instead of one giant run, we do many fast runs starting from different angles/offsets.
+    let mut seeds = Vec::new();
 
-    // If we have a seed, overwrite the Angle and Offset parameters
     if let Some(line) = input.initial_line {
-        let (a_norm, o_norm) = line_to_params(line[0], line[1], &ctx);
-        initial_mean[0] = a_norm;
-        initial_mean[1] = o_norm;
+        let (a_norm, o_norm, t_seed) = line_to_params(line[0], line[1], &ctx);
         
-        // We reduce sigma because the line is "known", 
-        // but we keep it high enough to let the dovetail (T, W, H) explore
-        sigma = 0.1; 
+        // 1. Trust the Input Seed (Highest priority)
+        // Sigma 0.1: Allows fine-tuning but keeps the line mostly where it is.
+        seeds.push((vec![a_norm, o_norm, t_seed, 0.5, 0.5], 0.1));
+
+        // 2. Longitudinal Grid Search (Targeted Restarts)
+        // We trust the Angle/Offset (the "Cut Line"), but the dovetail position (T)
+        // is highly sensitive to obstacles. We scan the entire length of the line.
+        let t_steps = vec![0.15, 0.30, 0.45, 0.60, 0.75, 0.90];
+        
+        // We also try two different dovetail widths (Thin vs Thick) to help fit into gaps.
+        let w_steps = vec![0.3, 0.7]; 
+
+        for t in t_steps {
+            for w in &w_steps {
+                // Restart with Angle/Offset fixed to input, but T/W varied.
+                // Sigma 0.05: Very tight on Angle/Offset to preserve the user's trajectory choice,
+                // while allowing T/W to converge locally from this new basin.
+                seeds.push((vec![a_norm, o_norm, t, *w, 0.5], 0.1));
+            }
+        }
+    } else {
+        // Fallback global search if no line provided
+        seeds.push((vec![0.5, 0.5, 0.5, 0.5, 0.5], 0.2));
+        for i in 0..4 {
+            seeds.push((vec![i as f64/4.0, 0.5, 0.5, 0.5, 0.5], 0.2));
+        }
     }
 
     let mut best_overall_cost = f64::MAX;
     let mut best_overall_cut: Option<GeneratedCut> = None;
 
+    // Run Optimization on all seeds
     for flip_state in [false, true] {
-        let ctx_clone = ctx.clone();
-        
-        let mut cmaes_state = CMAESOptions::new(initial_mean.clone(), sigma)
-            .population_size(20)
-            .max_generations(100)
-            .build(move |x: &DVector<f64>| evaluate_cost(x, &ctx_clone, flip_state))
-            .unwrap();
+        for (seed_vec, run_sigma) in &seeds {
+            
+            let ctx_clone = ctx.clone();
+            
+            // Fast CMA-ES settings: 
+            // - Population 40: Enough to optimize 5 dimensions
+            // - Generations 200: Enough to converge local basin
+            let mut cmaes_state = CMAESOptions::new(seed_vec.clone(), *run_sigma)
+                .population_size(40)
+                .max_generations(200)
+                .enable_printing(1000)
+                .build(move |x: &DVector<f64>| evaluate_cost(x, &ctx_clone, flip_state))
+                .unwrap();
 
-        let result = cmaes_state.run();
+            let result = cmaes_state.run();
 
-        if let Some(best) = result.overall_best {
-            if best.value < best_overall_cost {
-                best_overall_cost = best.value;
-                
-                let (_, p1, p2, dt) = decode_params(&best.point, &ctx, flip_state);
-                best_overall_cut = Some(GeneratedCut {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    start: [p1.x(), p1.y()],
-                    end: [p2.x(), p2.y()],
-                    dovetail_width: dt.w,
-                    dovetail_height: dt.h,
-                    dovetail_t: dt.t,
-                    flipped: flip_state,
-                });
+            if let Some(best) = result.overall_best {
+                if best.value < best_overall_cost {
+                    best_overall_cost = best.value;
+                    
+                    let (_, p1, p2, dt) = decode_params(&best.point, &ctx, flip_state);
+                    best_overall_cut = Some(GeneratedCut {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        start: [p1.x(), p1.y()],
+                        end: [p2.x(), p2.y()],
+                        dovetail_width: dt.w,
+                        dovetail_height: dt.h,
+                        dovetail_t: dt.t,
+                        flipped: flip_state,
+                    });
+                }
             }
+
+            // Early Exit: If we found a valid solution, stop trying seeds for this flip state.
+            // Cost < 1.0 means no collisions and good fit.
+            if best_overall_cost < 1.0 { break; }
         }
         
-        // Optimization: If we found a nearly perfect fit (cost ~0), stop early
-        if best_overall_cost < 0.1 { break; }
+        // Global Early Exit: If valid solution found, don't even check flipped state (unless we want to optimize further?)
+        // Let's optimize for speed: if it fits, it sits.
+        if best_overall_cost < 1.0 { break; }
     }
 
     match best_overall_cut {
         Some(cut) => OptimizationResult {
-            success: best_overall_cost < 50.0,
+            success: best_overall_cost < 1.0,
             cost: best_overall_cost,
             shapes: vec![cut],
         },
@@ -370,8 +422,8 @@ pub fn debug_split_eval(input: GeometryInput) -> DebugEvalResult {
     };
 
     if let Some(line) = input.initial_line {
-        let (a_norm, o_norm) = line_to_params(line[0], line[1], &ctx);
-        let params = DVector::from_vec(vec![a_norm, o_norm, 0.5, 0.5, 0.5]);
+        let (a_norm, o_norm, t_seed) = line_to_params(line[0], line[1], &ctx);
+        let params = DVector::from_vec(vec![a_norm, o_norm, t_seed, 0.5, 0.5]);
         
         let (c1, log1, pts1_a, pts1_b) = evaluate_cost_detailed(&params, &ctx, false);
         let (c2, log2, pts2_a, pts2_b) = evaluate_cost_detailed(&params, &ctx, true);

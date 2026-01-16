@@ -716,63 +716,6 @@ export async function evaluateRustSplitLineCost(
             [end.x, end.y]
         ]
     };
-
-    // DEBUG LOGGING
-    try {
-        // Construct a temp split line matching the drag coordinates
-        const tempSplit: any = {
-            id: "debug-temp",
-            type: "splitLine",
-            x: start.x.toString(),
-            y: start.y.toString(),
-            endX: (end.x - start.x).toString(),
-            endY: (end.y - start.y).toString(),
-            dovetailPositions: ["0.5"], // Dummy dovetail
-            dovetailWidth: "15",
-            dovetailHeight: "12",
-            flip: false
-        };
-
-        // Inject into footprint clone
-        const tempFp = { 
-            ...footprint, 
-            shapes: [...footprint.shapes.filter(s => s.type === "boardOutline"), tempSplit] 
-        };
-
-        let partsToLog = precomputedParts;
-        let sourceLabel = "UI Memoized Hulls";
-
-        if (1) {
-            sourceLabel = "Local Simulation";
-            const jsCalc = checkSplitPartSizes(tempFp, params, allFootprints, bedSize);
-            partsToLog = jsCalc.parts;
-        }
-
-        console.group("JS Side Local Calculation");
-        console.log(`Bed Size: ${bedSize.width} x ${bedSize.height}`);
-        
-        partsToLog.forEach((p, i) => {
-            if (p.hull.length === 0) {
-                console.log(`Part ${String.fromCharCode(65+i)}: Empty/Invalid`);
-                return;
-            }
-            const minX = Math.min(...p.hull.map(h => h.x));
-            const maxX = Math.max(...p.hull.map(h => h.x));
-            const minY = Math.min(...p.hull.map(h => h.y));
-            const maxY = Math.max(...p.hull.map(h => h.y));
-            
-            const pointsStr = p.hull.map(h => `[${h.x.toFixed(1)},${h.y.toFixed(1)}]`).join(", ");
-            
-            console.log(`-- Source: ${sourceLabel} --`);
-            console.log(`Part ${String.fromCharCode(65+i)}: Count=${p.hull.length}, Size=${(maxX-minX).toFixed(1)}x${(maxY-minY).toFixed(1)} (Bounds: ${minX.toFixed(1)},${minY.toFixed(1)} to ${maxX.toFixed(1)},${maxY.toFixed(1)})`);
-            console.log(`Points: [${pointsStr}]`);
-            console.log(`Excess: ${p.excess.toFixed(2)}`);
-        });
-        console.groupEnd();
-
-    } catch (e) {
-        console.error("Local JS simulation failed", e);
-    }
     
     console.log("--- Sending to Rust ---");
     console.groupEnd();
