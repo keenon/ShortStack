@@ -2934,7 +2934,10 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                                 
                                 if (res.log) console.log(res.log);
                                 console.log("Auto-split result:", res);
-
+                                if (res.rustDebugPoints) {
+                                    const mapPts = (pts: number[][]) => pts.map(p => ({x: p[0], y: p[1]}));
+                                    setRustDebugHulls({ a: mapPts(res.rustDebugPoints.a), b: mapPts(res.rustDebugPoints.b) });
+                                }
                                 if (res.success && res.shapes && res.shapes.length > 0) {
                                     const newIds = res.shapes.map(s => s.id);
                                     updateHistory({ 
@@ -3181,7 +3184,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                                 <circle key={'ra'+i} cx={p.x} cy={-p.y} r={2} fill="white" opacity={0.5} />
                             ))}
                             {rustDebugHulls.b.map((p, i) => (
-                                <circle key={'rb'+i} cx={p.x} cy={-p.y} r={2} fill="white" opacity={0.5} />
+                                <circle key={'rb'+i} cx={p.x} cy={-p.y} r={2} fill="yellow" opacity={0.5} />
                             ))}
                         </g>
                     )}

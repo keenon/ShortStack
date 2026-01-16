@@ -27,6 +27,8 @@ pub struct OptimizationResult {
     pub success: bool,
     pub cost: f64,
     pub shapes: Vec<GeneratedCut>,
+    pub debug_points_a: Vec<[f64; 2]>,
+    pub debug_points_b: Vec<[f64; 2]>,
 }
 
 #[derive(Debug, Serialize)]

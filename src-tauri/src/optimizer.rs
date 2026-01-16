@@ -24,7 +24,7 @@ pub struct DebugEvalResult {
     points_b: Vec<[f64; 2]>,
 }
 
-#[derive(Clone)] // Added Clone
+#[derive(Clone)]
 struct CostContext {
     outline: Vec<Point<f64>>,
     obstacles: Vec<Obstacle>,
@@ -32,6 +32,9 @@ struct CostContext {
     bed_h: f64,
     center: Point<f64>,
     radius: f64,
+    // Inductive Bias: Target normalized Angle/Offset from PSO
+    target_angle: Option<f64>,
+    target_offset: Option<f64>,
 }
 
 fn line_to_params(start: [f64; 2], end: [f64; 2], ctx: &CostContext) -> (f64, f64, f64) {
@@ -106,45 +109,43 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
     let center = Point::new((min_x + max_x)/2.0, (min_y + max_y)/2.0);
     let radius = ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt() / 2.0;
 
-    let ctx = CostContext {
+    // Initialize Context
+    let mut ctx = CostContext {
         outline: poly_points,
         obstacles: input.obstacles,
         bed_w: input.bed_width,
         bed_h: input.bed_height,
         center,
         radius,
+        target_angle: None,
+        target_offset: None,
     };
 
-    // 1. Generate Structured Seeds
-    // The optimization landscape is full of local optima (dovetails stuck in holes).
-    // Instead of one giant run, we do many fast runs starting from different angles/offsets.
     let mut seeds = Vec::new();
 
     if let Some(line) = input.initial_line {
         let (a_norm, o_norm, t_seed) = line_to_params(line[0], line[1], &ctx);
         
-        // 1. Trust the Input Seed (Highest priority)
-        // Sigma 0.1: Allows fine-tuning but keeps the line mostly where it is.
+        // 1. SET BIAS: Guide optimizer to stay near this line
+        ctx.target_angle = Some(a_norm);
+        ctx.target_offset = Some(o_norm);
+
+        // 2. Seed 1: Trust input exactly
         seeds.push((vec![a_norm, o_norm, t_seed, 0.5, 0.5], 0.1));
 
-        // 2. Longitudinal Grid Search (Targeted Restarts)
-        // We trust the Angle/Offset (the "Cut Line"), but the dovetail position (T)
-        // is highly sensitive to obstacles. We scan the entire length of the line.
-        let t_steps = vec![0.15, 0.30, 0.45, 0.60, 0.75, 0.90];
-        
-        // We also try two different dovetail widths (Thin vs Thick) to help fit into gaps.
+        // 3. Grid Search along the line (varying T and Width)
+        // Since we have a Bias setting, the optimizer will pull these back to the line
+        // even if they drift, but starting at different T helps avoid local minima holes.
+        let t_steps = vec![0.10, 0.25, 0.40, 0.50, 0.55, 0.70, 0.85];
         let w_steps = vec![0.3, 0.7]; 
 
         for t in t_steps {
             for w in &w_steps {
-                // Restart with Angle/Offset fixed to input, but T/W varied.
-                // Sigma 0.05: Very tight on Angle/Offset to preserve the user's trajectory choice,
-                // while allowing T/W to converge locally from this new basin.
                 seeds.push((vec![a_norm, o_norm, t, *w, 0.5], 0.1));
             }
         }
     } else {
-        // Fallback global search if no line provided
+        // Fallback global search
         seeds.push((vec![0.5, 0.5, 0.5, 0.5, 0.5], 0.2));
         for i in 0..4 {
             seeds.push((vec![i as f64/4.0, 0.5, 0.5, 0.5, 0.5], 0.2));
@@ -154,19 +155,49 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
     let mut best_overall_cost = f64::MAX;
     let mut best_overall_cut: Option<GeneratedCut> = None;
 
-    // Run Optimization on all seeds
     for flip_state in [false, true] {
         for (seed_vec, run_sigma) in &seeds {
             
+            // --- FAST CHECK & LOGGING ---
+            let seed_dvec = DVector::from_vec(seed_vec.clone());
+            // Call detailed to get points
+            let (seed_cost, _log, pts_a, pts_b) = evaluate_cost_detailed(&seed_dvec, &ctx, flip_state);
+            
+            println!("[Optimizer] Checking Seed (Flip={}): T={:.2} W={:.2} Cost={:.4}", flip_state, seed_vec[2], seed_vec[3], seed_cost);
+
+            if seed_cost < 1.0 {
+                println!("[Optimizer] EARLY EXIT on Seed");
+                best_overall_cost = seed_cost;
+                let (_, p1, p2, dt) = decode_params(&seed_dvec, &ctx, flip_state);
+                
+                let cut = GeneratedCut {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    start: [p1.x(), p1.y()],
+                    end: [p2.x(), p2.y()],
+                    dovetail_width: dt.w,
+                    dovetail_height: dt.h,
+                    dovetail_t: dt.t,
+                    flipped: flip_state,
+                };
+                println!("debug points A: {:?}", pts_a);
+                println!("debug points B: {:?}", pts_b);
+                return OptimizationResult {
+                    success: seed_cost < 1.0,
+                    cost: seed_cost,
+                    shapes: vec![cut],
+                    debug_points_a: pts_a,
+                    debug_points_b: pts_b,
+                };
+            }
+            // ----------------------------
+
             let ctx_clone = ctx.clone();
             
-            // Fast CMA-ES settings: 
-            // - Population 40: Enough to optimize 5 dimensions
-            // - Generations 200: Enough to converge local basin
+            // CMA-ES
             let mut cmaes_state = CMAESOptions::new(seed_vec.clone(), *run_sigma)
                 .population_size(40)
-                .max_generations(200)
-                .enable_printing(1000)
+                .max_generations(250)
+                .enable_printing(2000) // Silent mostly
                 .build(move |x: &DVector<f64>| evaluate_cost(x, &ctx_clone, flip_state))
                 .unwrap();
 
@@ -188,14 +219,9 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
                     });
                 }
             }
-
-            // Early Exit: If we found a valid solution, stop trying seeds for this flip state.
-            // Cost < 1.0 means no collisions and good fit.
+            // Stopping Condition: If nearly zero, we found a valid, non-colliding, compliant fit.
             if best_overall_cost < 1.0 { break; }
         }
-        
-        // Global Early Exit: If valid solution found, don't even check flipped state (unless we want to optimize further?)
-        // Let's optimize for speed: if it fits, it sits.
         if best_overall_cost < 1.0 { break; }
     }
 
@@ -204,8 +230,13 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
             success: best_overall_cost < 1.0,
             cost: best_overall_cost,
             shapes: vec![cut],
+            debug_points_a: vec![], // Loop return handles mostly
+            debug_points_b: vec![],
         },
-        None => OptimizationResult { success: false, cost: f64::MAX, shapes: vec![] }
+        None => OptimizationResult { 
+            success: false, cost: f64::MAX, shapes: vec![],
+            debug_points_a: vec![], debug_points_b: vec![]
+        }
     }
 }
 
@@ -269,81 +300,109 @@ fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> f64 {
 
 // Detailed cost breakdown for debugging
 fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> (f64, String, Vec<[f64; 2]>, Vec<[f64; 2]>) {
-    let mut cost = 0.0;
-    let mut log = Vec::new();
+    let mut cost_hard = 0.0; // Fit, Collision, Params
+    let mut cost_soft = 0.0; // Bias, Centering
+    
+    // Detailed Accumulators for Logging
+    let mut c_param = 0.0;
+    let mut c_bias = 0.0;
+    let mut c_obs_hit = 0.0;
+    let mut c_obs_prox = 0.0;
+    let mut c_fit = 0.0;
 
-    // 1. Parameter Constraints
+    // 1. Parameter Constraints (Hard)
     for (i, val) in x.iter().enumerate() {
-        if *val < 0.0 { 
-            let p = val.powi(2) * 1000.0;
-            cost += p; 
-            log.push(format!("Param {} < 0: +{:.2}", i, p));
+        if *val < 0.0 { c_param += val.powi(2) * 1000.0; }
+        if *val > 1.0 { c_param += (*val - 1.0).powi(2) * 1000.0; }
+    }
+    cost_hard += c_param;
+
+    // 2. Inductive Bias (Soft with Deadzone)
+    // We want to penalize deviating from PSO line, but allow a "valley" of 0 cost
+    // so the optimizer feels successful if it stays close.
+    let deadzone = 0.02;
+    if let (Some(t_ang), Some(t_off)) = (ctx.target_angle, ctx.target_offset) {
+        // Angle Deadzone
+        let mut d_ang = (x[0] - t_ang).abs();
+        if d_ang > 0.5 { d_ang = 1.0 - d_ang; } // Wrap
+        if d_ang > deadzone { 
+            c_bias += (d_ang - deadzone).powi(2) * 100000.0; 
         }
-        if *val > 1.0 { 
-            let p = (*val - 1.0).powi(2) * 1000.0;
-            cost += p; 
-            log.push(format!("Param {} > 1: +{:.2}", i, p));
+
+        // Offset Deadzone
+        let d_off = (x[1] - t_off).abs();
+        if d_off > deadzone {
+            c_bias += (d_off - deadzone).powi(2) * 100000.0;
         }
     }
+    cost_soft += c_bias;
 
     let (angle, p1, p2, dt) = decode_params(x, ctx, flipped);
     let ux = angle.cos();
     let uy = angle.sin();
-    
-    // Normal vector logic
     let (vx, vy) = if flipped { (uy, -ux) } else { (-uy, ux) };
 
-    let center = Point::new(
-        p1.x() + (p2.x() - p1.x()) * dt.t,
-        p1.y() + (p2.y() - p1.y()) * dt.t
-    );
-
+    // Geometry Generation
+    let center = Point::new(p1.x() + (p2.x() - p1.x()) * dt.t, p1.y() + (p2.y() - p1.y()) * dt.t);
     let base_half = dt.w / 2.0;
     let head_half = (dt.w * 1.5) / 2.0; 
-    
     let base_l = Point::new(center.x() - ux * base_half, center.y() - uy * base_half);
     let base_r = Point::new(center.x() + ux * base_half, center.y() + uy * base_half);
     let head_l = Point::new(center.x() - ux * head_half + vx * dt.h, center.y() - uy * head_half + vy * dt.h);
     let head_r = Point::new(center.x() + ux * head_half + vx * dt.h, center.y() + uy * head_half + vy * dt.h);
-
     let cut_path = vec![(p1, base_l), (base_l, head_l), (head_l, head_r), (head_r, base_r), (base_r, p2)];
 
-    // 2. Obstacle Check
-    for (i, obs) in ctx.obstacles.iter().enumerate() {
+    // 3. Obstacle Check (SDF)
+    let SENSOR_RANGE = 4.0; // mm
+    let mut min_sdf = f64::MAX;
+
+    for obs in &ctx.obstacles {
         let obs_p = Point::new(obs.x, obs.y);
-        let mut min_dist = f64::MAX;
+        let mut min_dist_segment = f64::MAX;
         for (s, e) in &cut_path {
-            min_dist = min_dist.min(dist_point_segment(obs_p, *s, *e));
+            min_dist_segment = min_dist_segment.min(dist_point_segment(obs_p, *s, *e));
         }
-        let safe_dist = obs.r + OBS_MARGIN;
-        if min_dist < safe_dist {
-            let pen = (safe_dist - min_dist).powi(2) * 5000.0;
-            cost += pen;
-            log.push(format!("Obstacle {} @ ({:.2}, {:.2}) r={:.2} collision (dist {:.2} < {:.2}): +{:.2}", 
-                            i, obs.x, obs.y, obs.r, min_dist, safe_dist, pen));        }
+        
+        let sdf = min_dist_segment - obs.r;
+        min_sdf = min_sdf.min(sdf);
+
+        if sdf < 0.0 {
+            // Penetration (Hard)
+            c_obs_hit += 10000.0 + sdf.powi(2) * 500000.0;
+        } else if sdf < OBS_MARGIN {
+            // Margin Violation (Hard)
+            c_obs_hit += (OBS_MARGIN - sdf).powi(2) * 5000.0;
+        } else if sdf < SENSOR_RANGE {
+            // Safe Zone Gradient (Soft) - Decays to 0 at SENSOR_RANGE
+            // This pulls the line towards the center of gaps
+            let weight = (1.0 - sdf / SENSOR_RANGE).powi(2);
+            c_obs_prox += weight * 0.1; 
+        }
+    }
+    cost_hard += c_obs_hit;
+    cost_soft += c_obs_prox;
+
+    if cost_hard > 500.0 { 
+        // Optimization: Don't compute fit if we are already crashing hard
+        let msg = format!("High Cost Exit (Collision): {:.2}", cost_hard);
+        return (cost_hard + cost_soft, msg, vec![], vec![]);
     }
 
-    if cost > 100.0 { 
-        return (cost, format!("High Cost Exit ({:.2}):\\n{}", cost, log.join("\\n")), vec![], vec![]);
-    }
-
-    // 3. Fit Check
+    // 4. Fit Check
     let c_val = p1.x() * vx + p1.y() * vy;
     let mut pts_a = Vec::new(); 
     let mut pts_b = Vec::new(); 
-
     let protrusion = vec![base_l, head_l, head_r, base_r];
     pts_a.extend_from_slice(&protrusion);
 
     for p in &ctx.outline {
         let val = p.x() * vx + p.y() * vy;
+        // Padding of 0.5 prevents numerical jitter at the cut line from dropping points
         if val >= c_val - 0.5 { pts_a.push(*p); }
         if val <= c_val + 0.5 { pts_b.push(*p); }
     }
 
-    // FIX: Instead of pushing the infinite line endpoints (p1, p2) which might be 
-    // far outside the board, we calculate exact intersections with the outline.
-    // This ensures the Convex Hull is tight to the actual board geometry.
+    // Explicitly add intersection points to close the shapes cleanly
     let mut intersections_found = false;
     for i in 0..ctx.outline.len() {
         let o1 = ctx.outline[i];
@@ -355,48 +414,54 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
         }
     }
     
-    // Fallback: If no intersections (e.g. line is exactly on edge or floating), 
-    // keep p1/p2 to ensure we have a shape, though this case implies a bad cut.
     if !intersections_found {
+        // Fallback: If we missed the outline (e.g. line outside), preserve endpoints so we see 'something'
         pts_a.push(p1); pts_a.push(p2);
         pts_b.push(p1); pts_b.push(p2);
     }
 
-    // --- DEBUG: Geometry Inspection ---
-    // Helper to log bounds and formatted points
-    let inspect_part = |pts: &Vec<Point<f64>>, name: &str| -> String {
-        let min_x = pts.iter().fold(f64::INFINITY, |a, b| a.min(b.x()));
-        let max_x = pts.iter().fold(f64::NEG_INFINITY, |a, b| a.max(b.x()));
-        let min_y = pts.iter().fold(f64::INFINITY, |a, b| a.min(b.y()));
-        let max_y = pts.iter().fold(f64::NEG_INFINITY, |a, b| a.max(b.y()));
-        
-        let points_str: Vec<String> = pts.iter().map(|p| format!("[{:.1},{:.1}]", p.x(), p.y())).collect();
-        
-        format!("{}: Count={}, Size={:.1}x{:.1} (Bounds: {:.1},{:.1} to {:.1},{:.1})\\nPoints: [{}]", 
-            name, pts.len(), max_x - min_x, max_y - min_y, min_x, min_y, max_x, max_y, points_str.join(", "))
+    // --- MEASURE HULLS FOR LOGGING ---
+    // Helper to get dimensions of a set of points (Approximate via AABB for log speed)
+    let get_dims = |pts: &Vec<Point<f64>>| -> (f64, f64) {
+        if pts.is_empty() { return (0.0, 0.0); }
+        let (mut min_x, mut max_x) = (f64::MAX, f64::MIN);
+        let (mut min_y, mut max_y) = (f64::MAX, f64::MIN);
+        for p in pts {
+            min_x = min_x.min(p.x()); max_x = max_x.max(p.x());
+            min_y = min_y.min(p.y()); max_y = max_y.max(p.y());
+        }
+        (max_x - min_x, max_y - min_y)
     };
 
-    let fit_pen_a = check_fit(&pts_a, ctx.bed_w, ctx.bed_h) * 10.0;
-    let fit_pen_b = check_fit(&pts_b, ctx.bed_w, ctx.bed_h) * 10.0;
-    
-    if fit_pen_a > 0.0 || fit_pen_b > 0.0 {
-        log.push(format!("Bed Size: {:.1} x {:.1}", ctx.bed_w, ctx.bed_h));
-        log.push(format!("Cut Line: [{:.1},{:.1}] to [{:.1},{:.1}]", p1.x(), p1.y(), p2.x(), p2.y()));
-    }
+    let (w_a, h_a) = get_dims(&pts_a);
+    let (w_b, h_b) = get_dims(&pts_b);
 
-    if fit_pen_a > 0.0 { 
-        log.push(format!("Part A Penalty +{:.2}. Details: {}", fit_pen_a, inspect_part(&pts_a, "Part A"))); 
-    }
-    if fit_pen_b > 0.0 { 
-        log.push(format!("Part B Penalty +{:.2}. Details: {}", fit_pen_b, inspect_part(&pts_b, "Part B"))); 
-    }
-
-    cost += fit_pen_a + fit_pen_b;
+    let pen_a = check_fit(&pts_a, ctx.bed_w, ctx.bed_h);
+    let pen_b = check_fit(&pts_b, ctx.bed_w, ctx.bed_h);
+    c_fit = (pen_a + pen_b) * 100.0;
     
+    cost_hard += c_fit;
+
+    // Final Cost
+    let total = cost_hard + cost_soft;
+
+    // Elaborate Logging
+    // We break down exactly why Fit failed (or didn't) by showing sizes vs bed
+    let log_msg = format!(
+        "Total: {:.4} (Hard: {:.2} Soft: {:.2})\\n  [PARAMS] Penalty: {:.2}\\n  [COLLISION] Cost: {:.2} (Min Dist: {:.2})\\n  [FIT] Cost: {:.2}\\n    Bed: {:.1}x{:.1}\\n    Part A: {} pts, Size {:.1}x{:.1} (Penalty {:.2})\\n    Part B: {} pts, Size {:.1}x{:.1} (Penalty {:.2})\\n  [BIAS] Cost: {:.2}",
+        total, cost_hard, cost_soft, 
+        c_param, 
+        c_obs_hit, min_sdf, 
+        c_fit, ctx.bed_w, ctx.bed_h,
+        pts_a.len(), w_a, h_a, pen_a * 100.0,
+        pts_b.len(), w_b, h_b, pen_b * 100.0,
+        c_bias
+    );
+
     let raw_a = pts_a.iter().map(|p| [p.x(), p.y()]).collect();
     let raw_b = pts_b.iter().map(|p| [p.x(), p.y()]).collect();
 
-    (cost, format!("Total: {:.2}\\n{}", cost, log.join("\\n")), raw_a, raw_b)
+    (total, log_msg, raw_a, raw_b)
 }
 
 
@@ -419,6 +484,8 @@ pub fn debug_split_eval(input: GeometryInput) -> DebugEvalResult {
         bed_h: input.bed_height,
         center,
         radius,
+        target_angle: None,
+        target_offset: None,
     };
 
     if let Some(line) = input.initial_line {

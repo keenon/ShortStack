@@ -476,7 +476,7 @@ export function autoComputeSplit(
     bedSize: { width: number, height: number },
     options: { clearance: number, desiredCuts: number } = { clearance: 0.0, desiredCuts: 1 },
     ignoredLayerIds: string[] = []
-): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, debugLines?: any[], log?: string } {
+): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, debugLines?: any[], log?: string, rustDebugPoints?: {a: number[][], b: number[][]} } {
     
     // 1. Prepare Geometry
     const rawOutline = getTessellatedBoardOutline(footprint, params, allFootprints);
@@ -675,6 +675,8 @@ interface RustOptimizationResult {
     success: boolean;
     cost: number;
     shapes: RustGeneratedCut[];
+    debug_points_a: number[][];
+    debug_points_b: number[][];
 }
 
 // --- UPDATED AUTO SPLIT ---
@@ -761,14 +763,20 @@ export async function autoComputeSplitWithRefinement(
         .map(o => ({ x: o.x, y: o.y, r: o.r }));
         
     const refinedShapes: FootprintSplitLine[] = [];
+    let lastDebug: {a: number[][], b: number[][]} | undefined;
     
     // Helper to call our optimizer with pre-collected obstacles
     const optimize = async (cut: FootprintSplitLine) => {
         const outline = getTessellatedBoardOutline(footprint, params, allFootprints);
         // Prepare input strictly matching Rust expectations
+        const cSx = parseFloat(cut.x);
+        const cSy = parseFloat(cut.y);
+        const cEx = cSx + parseFloat(cut.endX);
+        const cEy = cSy + parseFloat(cut.endY);
+
         const initialLineSeed: [[number, number], [number, number]] = [
-            [cut.x, cut.y].map(v => parseFloat(v)) as [number, number],
-            [cut.endX, cut.endY].map(v => parseFloat(v)) as [number, number]
+            [cSx, cSy],
+            [cEx, cEy]
         ];
         const input: RustGeometryInput = {
             outline: outline.map(p => [p.x, p.y]),
@@ -781,6 +789,7 @@ export async function autoComputeSplitWithRefinement(
         try {
             const res = await invoke<RustOptimizationResult>("compute_smart_split", { input });
             console.log(`Refinement result for cut ${cut.id}: Success=${res.success} Cost=${res.cost.toFixed(4)}`);
+            lastDebug = { a: res.debug_points_a, b: res.debug_points_b };
             if (res.success && res.shapes.length > 0) {
                 const s = res.shapes[0]; // The GeneratedCut from Rust
 
@@ -790,6 +799,7 @@ export async function autoComputeSplitWithRefinement(
                 const endX = s.end[0];
                 const endY = s.end[1];
                 console.log(` Rust returned Refined Cut ${s.id}: Start(${startX.toFixed(2)}, ${startY.toFixed(2)}) End(${endX.toFixed(2)}, ${endY.toFixed(2)}) with dovetail at t=${s.dovetail_t.toFixed(4)}`);
+                
                 return {
                     ...cut,
                     // 1. Absolute Start Position
@@ -827,7 +837,8 @@ export async function autoComputeSplitWithRefinement(
     return {
         ...psoResult,
         shapes: refinedShapes,
-        log: psoResult.log + ` | Refined ${refinedShapes.length} cuts.`
+        log: psoResult.log + ` | Refined ${refinedShapes.length} cuts.`,
+        rustDebugPoints: lastDebug
     };
 }
 
