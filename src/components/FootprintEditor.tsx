@@ -398,6 +398,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   type DragMode = 'move' | 'resize';
   type ResizeHandle = 'top' | 'bottom' | 'left' | 'right' | 'ring';
 
+  const coordRef = useRef<HTMLDivElement>(null);
   const dragTargetRef = useRef<{ 
       id: string; 
       pointIdx?: number; 
@@ -2836,6 +2837,64 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
         return colors[i % colors.length];
     };
 
+
+  // EXTRACTED AUTO-SPLIT LOGIC
+  const handleRunAutoSplit = async () => {
+        if (!footprint.isBoard) { alert("Please enable 'Standalone Board' first."); return; }
+        
+        const preCheck = checkSplitPartSizes(footprint, params, allFootprints, bedSize);
+        if (preCheck.maxExcess < 1.0) {
+            alert("No split needed! The footprint already fits within the bed dimensions.");
+            return;
+        }
+
+        setProcessingMessage("Running Global Search...");
+        
+        // Yield to UI to show spinner
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        try {
+            const res = await autoComputeSplitWithRefinement(
+                footprint, allFootprints, params, stackup, 
+                bedSize, { clearance: 2, desiredCuts: 1 }, 
+                splitToolOptions.ignoredLayerIds
+            );
+            
+            setProcessingMessage(null);
+            
+            if (res.log) console.log(res.log);
+            console.log("Auto-split result:", res);
+
+            if (res.success && res.shapes && res.shapes.length > 0) {
+                const newIds = res.shapes.map(s => s.id);
+                updateHistory({ 
+                    footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                    selectedShapeIds: newIds
+                });
+            } else {
+                if (res.shapes && res.shapes.length > 0) {
+                    alert(`Warning: Perfect fit not found. Found ${res.shapes.length} cuts with excess: ${res.maxExcess?.toFixed(1)}mm`);
+                    const newIds = res.shapes.map(s => s.id);
+                    updateHistory({ 
+                        footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                        selectedShapeIds: newIds
+                    });
+                } else {
+                    alert("Global search failed completely. Check obstacle layers or try increasing bed size.");
+                }
+            }
+            if (res.debugLines) setDebugLines(res.debugLines);
+            if (res.rustDebugPoints) {
+                const mapPts = (pts: number[][]) => pts.map(p => ({x: p[0], y: p[1]}));
+                setRustDebugHulls({ a: mapPts(res.rustDebugPoints.a), b: mapPts(res.rustDebugPoints.b) });
+            }
+        } catch (e) {
+            console.error(e);
+            setProcessingMessage(null);
+            alert("An error occurred during optimization.");
+        }
+  };
+
   return (
     <div className="footprint-editor-container">
       {/* PROCESSING OVERLAY */}
@@ -2871,106 +2930,6 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
         >
             <IconSplit /> Split
         </button>
-        {(isSplitToolActive || (selectedShapeIds.length === 1 && footprint.shapes.find(s => s.id === selectedShapeIds[0])?.type === 'splitLine')) && (() => {
-            const activeSplit = selectedShapeIds.length === 1 ? footprint.shapes.find(s => s.id === selectedShapeIds[0]) as any : null;
-            const currentW = activeSplit?.bedWidth || bedSize.width;
-            const currentH = activeSplit?.bedHeight || bedSize.height;
-            
-            const handleBedChange = (field: 'width' | 'height', val: string) => {
-                const num = parseFloat(val);
-                if (activeSplit) {
-                    // Update shape property
-                    updateShape(activeSplit.id, field === 'width' ? 'bedWidth' : 'bedHeight', num);
-                } else {
-                    // Update global tool default
-                    setBedSize(prev => ({ ...prev, [field]: num }));
-                }
-            };
-
-            return (
-                <div style={{display:'flex', gap:'5px', marginLeft:'10px', alignItems:'center'}}>
-                    <span style={{fontSize:'0.8em', color:'#aaa'}}>Bed:</span>
-                    <input 
-                        type="number" 
-                        className="toolbar-name-input" 
-                        style={{width:'80px'}} 
-                        value={currentW} 
-                        onChange={e => handleBedChange('width', e.target.value)} 
-                        title="Print Bed Width" 
-                    />
-                    <span style={{color:'#666'}}>x</span>
-                    <input 
-                        type="number" 
-                        className="toolbar-name-input" 
-                        style={{width:'80px'}} 
-                        value={currentH} 
-                        onChange={e => handleBedChange('height', e.target.value)} 
-                        title="Print Bed Height" 
-                    />
-                                        <button 
-                        style={{marginLeft:'10px', fontSize:'0.9em', background: '#2d4b38', border:'1px solid #487e5b'}}
-                        onClick={async () => {
-                            if (!footprint.isBoard) { alert("Please enable 'Standalone Board' first."); return; }
-                            
-                            const preCheck = checkSplitPartSizes(footprint, params, allFootprints, bedSize);
-                            if (preCheck.maxExcess < 1.0) {
-                                alert("No split needed! The footprint already fits within the bed dimensions.");
-                                return;
-                            }
-
-                            setProcessingMessage("Running Global Search...");
-                            
-                            // Yield to UI to show spinner
-                            await new Promise(resolve => setTimeout(resolve, 50));
-
-                            try {
-                                const res = await autoComputeSplitWithRefinement(
-                                    footprint, allFootprints, params, stackup, 
-                                    bedSize, { clearance: 2, desiredCuts: 1 }, 
-                                    splitToolOptions.ignoredLayerIds
-                                );
-                                
-                                setProcessingMessage(null);
-                                
-                                if (res.log) console.log(res.log);
-                                console.log("Auto-split result:", res);
-                                if (res.rustDebugPoints) {
-                                    const mapPts = (pts: number[][]) => pts.map(p => ({x: p[0], y: p[1]}));
-                                    setRustDebugHulls({ a: mapPts(res.rustDebugPoints.a), b: mapPts(res.rustDebugPoints.b) });
-                                }
-                                if (res.success && res.shapes && res.shapes.length > 0) {
-                                    const newIds = res.shapes.map(s => s.id);
-                                    updateHistory({ 
-                                        footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
-                                        selectedShapeIds: newIds
-                                    });
-                                } else {
-                                    // Fallback or Failure
-                                    if (res.shapes && res.shapes.length > 0) {
-                                        alert(`Warning: Perfect fit not found. Found ${res.shapes.length} cuts with excess: ${res.maxExcess?.toFixed(1)}mm`);
-                                        // Still apply the best effort result
-                                        const newIds = res.shapes.map(s => s.id);
-                                        updateHistory({ 
-                                            footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
-                                            selectedShapeIds: newIds
-                                        });
-                                    } else {
-                                        alert("Global search failed completely. Check obstacle layers or try increasing bed size.");
-                                    }
-                                }
-                                if (res.debugLines) setDebugLines(res.debugLines);
-                            } catch (e) {
-                                console.error(e);
-                                setProcessingMessage(null);
-                                alert("An error occurred during optimization.");
-                            }
-                        }}
-                    >
-                        Auto-Split
-                    </button>
-                </div>
-            );
-        })()}
         {footprint.isBoard && <button onClick={() => addShape("boardOutline")}><IconOutline /> Outline</button>}
         
         {/* Footprint Dropdown */}
@@ -3049,6 +3008,12 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                     className="fp-canvas" 
                     viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
                     onMouseDown={handleMouseDown}
+                    onMouseMove={(e) => {
+                        if (coordRef.current) {
+                            const w = getMouseWorldPos(e.clientX, e.clientY);
+                            coordRef.current.innerText = `${w.x.toFixed(2)}, ${(-w.y).toFixed(2)}`;
+                        }
+                    }}
                     style={{ cursor: isDragging.current ? 'grabbing' : 'default' }}
                 >
                     <defs>
@@ -3280,6 +3245,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         />
                     )}
                 </svg>
+                <div ref={coordRef} className="coord-display">0.00, 0.00</div>
                 <div className="canvas-hint">Grid: {parseFloat(gridSize.toPrecision(1))}mm | Left Drag: Select | Alt + Drag: Rotate | Right/Middle Drag: Pan | Scroll: Zoom</div>
             </div>
             
@@ -3331,6 +3297,9 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                 scrollToTieDownId={scrollToTieDownId}
                 // @ts-ignore - passing extra props for split tool logic
                 isSplitToolActive={isSplitToolActive}
+                bedSize={bedSize}
+                setBedSize={setBedSize}
+                onAutoSplit={handleRunAutoSplit}
                 splitToolOptions={splitToolOptions}
                 setSplitToolOptions={setSplitToolOptions}
               />
