@@ -2,7 +2,6 @@
 import { create, all } from "mathjs";
 import * as THREE from "three"; // Added THREE import
 import { Footprint, Parameter, StackupLayer, LayerAssignment, FootprintReference, Point, FootprintWireGuide, FootprintRect, FootprintShape, FootprintUnion, FootprintText, FootprintLine, FootprintPolygon, FootprintCircle, FootprintSplitLine } from "../types";
-import {generateDovetailPoints, getTessellatedBoardOutline, findSafeSplitLine, checkSplitPartSizes} from "./splitUtils"; // Ensure splitUtils is imported for type augmentation
 export {generateDovetailPoints, getTessellatedBoardOutline, findSafeSplitLine, checkSplitPartSizes} from "./splitUtils"; // Re-export for external use
 
 // --- CUSTOM MATHJS INSTANCE ---

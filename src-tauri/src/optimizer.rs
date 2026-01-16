@@ -1,8 +1,6 @@
 use crate::geometry::*;
-use cmaes::{CMAESOptions, DVector, PlotOptions};
+use cmaes::{CMAESOptions, DVector};
 use geo::{Point, LineString, Polygon, Euclidean, Distance};
-use geo::algorithm::euclidean_distance::EuclideanDistance;
-use geo::algorithm::contains::Contains;
 use std::f64::consts::PI;
 
 const OBS_MARGIN: f64 = 2.0;
@@ -15,15 +13,12 @@ struct DovetailShape {
     t: f64, 
     w: f64, 
     h: f64, 
-    flipped: bool // Added this
 }
 
 #[derive(serde::Serialize)]
 pub struct DebugEvalResult {
     log: String,
     cost: f64,
-    points_a: Vec<[f64; 2]>,
-    points_b: Vec<[f64; 2]>,
 }
 
 #[derive(Clone)]
@@ -163,14 +158,12 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
             // --- FAST CHECK & LOGGING ---
             let seed_dvec = DVector::from_vec(seed_vec.clone());
             // Call detailed to get points
-            let (seed_cost, _log, pts_a, pts_b) = evaluate_cost_detailed(&seed_dvec, &ctx, flip_state);
+            let (seed_cost, _log) = evaluate_cost_detailed(&seed_dvec, &ctx, flip_state);
             
 
 
             if seed_cost < 1.0 {
-
-                best_overall_cost = seed_cost;
-                let (_, p1, p2, dt) = decode_params(&seed_dvec, &ctx, flip_state);
+                let (_, p1, p2, dt) = decode_params(&seed_dvec, &ctx);
                 
                 let cut = GeneratedCut {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -206,7 +199,7 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
                 if best.value < best_overall_cost {
                     best_overall_cost = best.value;
                     
-                    let (_, p1, p2, dt) = decode_params(&best.point, &ctx, flip_state);
+                    let (_, p1, p2, dt) = decode_params(&best.point, &ctx);
                     best_overall_cut = Some(GeneratedCut {
                         id: uuid::Uuid::new_v4().to_string(),
                         start: [p1.x(), p1.y()],
@@ -239,7 +232,6 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
 fn decode_params(
     x: &DVector<f64>, 
     ctx: &CostContext, 
-    flipped: bool // Passed in from loop
 ) -> (f64, Point<f64>, Point<f64>, DovetailShape) {
     let safe_x: Vec<f64> = x.iter().map(|v| v.clamp(0.0, 1.0)).collect();
 
@@ -249,13 +241,6 @@ fn decode_params(
     let ux = angle.cos();
     let uy = angle.sin();
     
-    // Normal vector logic matching your TypeScript:
-    // const px = flip ? uy : -uy;
-    // const py = flip ? -ux : ux;
-    // FIX: Decouple Position Normal from Dovetail Direction.
-    // We always use the standard normal (-uy, ux) for positioning the Anchor.
-    // This ensures that the 'offset' parameter represents the same physical location
-    // regardless of whether we are flipping the dovetail direction.
     let nx = -uy;
     let ny = ux;
 
@@ -263,13 +248,6 @@ fn decode_params(
         ctx.center.x() + nx * (offset_norm * ctx.radius),
         ctx.center.y() + ny * (offset_norm * ctx.radius)
     );
-
-    // We use the flip flag ONLY to determine which way the dovetail grows relative to the line.
-    let (vx, vy) = if flipped {
-        (uy, -ux)
-    } else {
-        (-uy, ux)
-    };
     
     let mut min_t = f64::MAX;
     let mut max_t = f64::MIN;
@@ -286,7 +264,7 @@ fn decode_params(
     let w_val = MIN_W + safe_x[3] * (MAX_W - MIN_W);
     let h_val = MIN_H + safe_x[4] * (MAX_H - MIN_H);
 
-    (angle, p1, p2, DovetailShape { t: t_val, w: w_val, h: h_val, flipped })
+    (angle, p1, p2, DovetailShape { t: t_val, w: w_val, h: h_val })
 }
 
 // Wrapper for optimizer
@@ -295,7 +273,7 @@ fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> f64 {
 }
 
 // Detailed cost breakdown for debugging
-fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> (f64, String, Vec<[f64; 2]>, Vec<[f64; 2]>) {
+fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> (f64, String) {
     let mut cost_hard = 0.0; // Fit, Collision, Params
     let mut cost_soft = 0.0; // Bias, Centering
     
@@ -304,10 +282,9 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
     let mut c_bias = 0.0;
     let mut c_obs_hit = 0.0;
     let mut c_obs_prox = 0.0;
-    let mut c_fit = 0.0;
 
     // 1. Parameter Constraints (Hard)
-    for (i, val) in x.iter().enumerate() {
+    for val in x.iter() {
         if *val < 0.0 { c_param += val.powi(2) * 1000.0; }
         if *val > 1.0 { c_param += (*val - 1.0).powi(2) * 1000.0; }
     }
@@ -333,7 +310,7 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
     }
     cost_soft += c_bias;
 
-    let (angle, p1, p2, dt) = decode_params(x, ctx, flipped);
+    let (angle, p1, p2, dt) = decode_params(x, ctx);
     let ux = angle.cos();
     let uy = angle.sin();
     let (vx, vy) = if flipped { (uy, -ux) } else { (-uy, ux) };
@@ -349,7 +326,7 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
     let cut_path = vec![(p1, base_l), (base_l, head_l), (head_l, head_r), (head_r, base_r), (base_r, p2)];
 
     // 3. Obstacle Check (SDF)
-    let SENSOR_RANGE = 4.0; // mm
+    let sensor_range = 4.0; // mm
     let mut min_sdf = f64::MAX;
 
     for obs in &ctx.obstacles {
@@ -369,8 +346,8 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
                     c_obs_hit += 10000.0 + sdf.powi(2) * 500000.0;
                 } else if sdf < OBS_MARGIN {
                     c_obs_hit += (OBS_MARGIN - sdf).powi(2) * 5000.0;
-                } else if sdf < SENSOR_RANGE {
-                    let weight = (1.0 - sdf / SENSOR_RANGE).powi(2);
+                } else if sdf < sensor_range {
+                    let weight = (1.0 - sdf / sensor_range).powi(2);
                     c_obs_prox += weight * 0.1; 
                 }
             },
@@ -386,7 +363,7 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
                     let seg = geo::Line::new(s, e);
                     
                     // distance is 0 if intersecting or inside
-                    let dist = seg.euclidean_distance(&poly);
+                    let dist = Euclidean::distance(&seg, &poly);
                     
                     if dist < 0.001 {
                         // Hard Collision
@@ -405,7 +382,7 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
     if cost_hard > 500.0 { 
         // Optimization: Don't compute fit if we are already crashing hard
         let msg = format!("High Cost Exit (Collision): {:.2}", cost_hard);
-        return (cost_hard + cost_soft, msg, vec![], vec![]);
+        return (cost_hard + cost_soft, msg);
     }
 
     // 4. Fit Check
@@ -441,24 +418,10 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
     }
 
     // --- MEASURE HULLS FOR LOGGING ---
-    // Helper to get dimensions of a set of points (Approximate via AABB for log speed)
-    let get_dims = |pts: &Vec<Point<f64>>| -> (f64, f64) {
-        if pts.is_empty() { return (0.0, 0.0); }
-        let (mut min_x, mut max_x) = (f64::MAX, f64::MIN);
-        let (mut min_y, mut max_y) = (f64::MAX, f64::MIN);
-        for p in pts {
-            min_x = min_x.min(p.x()); max_x = max_x.max(p.x());
-            min_y = min_y.min(p.y()); max_y = max_y.max(p.y());
-        }
-        (max_x - min_x, max_y - min_y)
-    };
-
-    let (w_a, h_a) = get_dims(&pts_a);
-    let (w_b, h_b) = get_dims(&pts_b);
 
     let pen_a = check_fit(&pts_a, ctx.bed_w, ctx.bed_h);
     let pen_b = check_fit(&pts_b, ctx.bed_w, ctx.bed_h);
-    c_fit = (pen_a + pen_b) * 100.0;
+    let c_fit = (pen_a + pen_b) * 100.0;
     
     cost_hard += c_fit;
 
@@ -469,10 +432,7 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
     // We break down exactly why Fit failed (or didn't) by showing sizes vs bed
     let log_msg = format!("Cost: {:.4} (Collision: {:.1}, Fit: {:.1})", total, c_obs_hit, c_fit);
 
-    let raw_a = pts_a.iter().map(|p| [p.x(), p.y()]).collect();
-    let raw_b = pts_b.iter().map(|p| [p.x(), p.y()]).collect();
-
-    (total, log_msg, raw_a, raw_b)
+    (total, log_msg)
 }
 
 
@@ -503,25 +463,21 @@ pub fn debug_split_eval(input: GeometryInput) -> DebugEvalResult {
         let (a_norm, o_norm, t_seed) = line_to_params(line[0], line[1], &ctx);
         let params = DVector::from_vec(vec![a_norm, o_norm, t_seed, 0.5, 0.5]);
         
-        let (c1, log1, pts1_a, pts1_b) = evaluate_cost_detailed(&params, &ctx, false);
-        let (c2, log2, pts2_a, pts2_b) = evaluate_cost_detailed(&params, &ctx, true);
+        let (c1, log1) = evaluate_cost_detailed(&params, &ctx, false);
+        let (c2, log2) = evaluate_cost_detailed(&params, &ctx, true);
         
         if c1 < c2 {
             return DebugEvalResult {
                 log: format!("=== Normal State ===\\nCost: {:.4}\\n{}", c1, log1),
                 cost: c1,
-                points_a: pts1_a,
-                points_b: pts1_b
             };
         } else {
             return DebugEvalResult {
                 log: format!("=== Flipped State ===\\nCost: {:.4}\\n{}", c2, log2),
                 cost: c2,
-                points_a: pts2_a,
-                points_b: pts2_b
             };
         }
     }
     
-    DebugEvalResult { log: "Error: No line provided".to_string(), cost: -1.0, points_a: vec![], points_b: vec![] }
+    DebugEvalResult { log: "Error: No line provided".to_string(), cost: -1.0 }
 }

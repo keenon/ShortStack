@@ -6,14 +6,13 @@ import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference,
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
-import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit, autoComputeSplitWithRefinement } from "../utils/splitUtils";
+import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplitWithRefinement } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
 import { useUndoHistory } from "../hooks/useUndoHistory"; 
 import { collectExportShapesAsync } from "../utils/exportUtils";
 import './FootprintEditor.css';
-import { split } from "three/tsl";
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
 let GLOBAL_CLIPBOARD: { 
@@ -1012,10 +1011,11 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
               setProcessingMessage(null);
               return;
           }
+          const existingSplits = footprintRef.current.shapes.filter(s => s.type === 'splitLine').length;
           const newSplit: FootprintSplitLine = {
               id: crypto.randomUUID(),
               type: "splitLine",
-              name: "Fabrication Split",
+              name: `Fabrication Split ${existingSplits + 1}`,
               x: result.start.x.toFixed(4),
               y: result.start.y.toFixed(4),
               endX: (result.end.x - result.start.x).toFixed(4),
@@ -2863,9 +2863,14 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
             console.log("Auto-split result:", res);
 
             if (res.success && res.shapes && res.shapes.length > 0) {
-                const newIds = res.shapes.map(s => s.id);
+                const existingCount = footprint.shapes.filter(s => s.type === 'splitLine').length;
+                const renamedShapes = res.shapes.map((s, idx) => ({
+                    ...s,
+                    name: `Auto Split ${existingCount + idx + 1}`
+                }));
+                const newIds = renamedShapes.map(s => s.id);
                 updateHistory({ 
-                    footprint: { ...footprint, shapes: [...footprint.shapes, ...res.shapes] },
+                    footprint: { ...footprint, shapes: [...footprint.shapes, ...renamedShapes] },
                     selectedShapeIds: newIds
                 });
             } else {
@@ -2917,7 +2922,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
         <button onClick={() => addShape("text")}><IconText /> Comment</button>
         <button 
             className={isSplitToolActive ? "active" : ""} 
-            onClick={() => setIsSplitToolActive(!isSplitToolActive)}
+            onClick={() => { const next = !isSplitToolActive; setIsSplitToolActive(next); if (next) setSelectedShapeIds([]); }}
             style={isSplitToolActive ? { background: '#3b5b9d', borderColor: '#646cff', color: 'white' } : {}}
         >
             <IconSplit /> Split
