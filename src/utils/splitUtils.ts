@@ -647,11 +647,9 @@ export function autoComputeSplit(
 
 // --- RUST INTEROP TYPES ---
 
-interface RustObstacle {
-    x: number;
-    y: number;
-    r: number;
-}
+type RustObstacle = 
+    | { type: 'circle'; x: number; y: number; r: number }
+    | { type: 'poly'; points: number[][] };
 
 interface RustGeometryInput {
     outline: number[][]; // [[x,y], [x,y]]
@@ -702,9 +700,13 @@ export async function evaluateRustSplitLineCost(
     
     // Filter only through-hole circles, just like the Rust optimizer expects
     const rustObstacles = rawObstacles
-        .filter(o => o.isThrough && o.type === 'circle')
-        // @ts-ignore 
-        .map(o => ({ x: o.x, y: o.y, r: o.r }));
+        .filter(o => o.isThrough) // Allow all through obstacles
+        .map(o => {
+            if (o.type === 'circle') return { type: 'circle', x: o.x, y: o.y, r: o.r };
+            if (o.type === 'poly') return { type: 'poly', points: o.points.map(p => [p.x, p.y]) };
+            return null;
+        })
+        .filter(o => o !== null);
 
     // 2. Prepare Input Object
     const input = {
@@ -758,9 +760,13 @@ export async function autoComputeSplitWithRefinement(
         {x:0, y:0, angle:0}, footprint, ignoredLayerIds
     );
     const rustObstacles = rawObstacles
-        .filter(o => o.isThrough && o.type === 'circle')
-        // @ts-ignore (these obstacles are all circles)
-        .map(o => ({ x: o.x, y: o.y, r: o.r }));
+        .filter(o => o.isThrough) // Allow all through obstacles
+        .map(o => {
+            if (o.type === 'circle') return { type: 'circle' as const, x: o.x, y: o.y, r: o.r };
+            if (o.type === 'poly') return { type: 'poly' as const, points: o.points.map(p => [p.x, p.y]) };
+            return null;
+        })
+        .filter((o): o is RustObstacle => o !== null);
         
     const refinedShapes: FootprintSplitLine[] = [];
     let lastDebug: {a: number[][], b: number[][]} | undefined;

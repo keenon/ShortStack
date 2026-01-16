@@ -16,10 +16,10 @@ pub struct GeometryInput {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Obstacle {
-    pub x: f64,
-    pub y: f64,
-    pub r: f64,
+#[serde(tag = "type", rename_all = "camelCase")] 
+pub enum Obstacle {
+    Circle { x: f64, y: f64, r: f64 },
+    Poly { points: Vec<[f64; 2]> },
 }
 
 #[derive(Debug, Serialize)]
