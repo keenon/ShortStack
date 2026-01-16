@@ -1,6 +1,8 @@
 use crate::geometry::*;
 use cmaes::{CMAESOptions, DVector, PlotOptions};
 use geo::{Point, LineString, Polygon, Euclidean, Distance};
+use geo::algorithm::euclidean_distance::EuclideanDistance;
+use geo::algorithm::contains::Contains;
 use std::f64::consts::PI;
 
 const OBS_MARGIN: f64 = 2.0;
@@ -357,26 +359,50 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
     let mut min_sdf = f64::MAX;
 
     for obs in &ctx.obstacles {
-        let obs_p = Point::new(obs.x, obs.y);
-        let mut min_dist_segment = f64::MAX;
-        for (s, e) in &cut_path {
-            min_dist_segment = min_dist_segment.min(dist_point_segment(obs_p, *s, *e));
-        }
-        
-        let sdf = min_dist_segment - obs.r;
-        min_sdf = min_sdf.min(sdf);
+        match obs {
+            Obstacle::Circle { x, y, r } => {
+                let obs_p = Point::new(*x, *y);
+                let mut min_dist_segment = f64::MAX;
+                // Rule 1: NO part of the line (Straight or Dovetail) can touch circles
+                for (s, e) in &cut_path {
+                    min_dist_segment = min_dist_segment.min(dist_point_segment(obs_p, *s, *e));
+                }
+                
+                let sdf = min_dist_segment - r;
+                min_sdf = min_sdf.min(sdf);
 
-        if sdf < 0.0 {
-            // Penetration (Hard)
-            c_obs_hit += 10000.0 + sdf.powi(2) * 500000.0;
-        } else if sdf < OBS_MARGIN {
-            // Margin Violation (Hard)
-            c_obs_hit += (OBS_MARGIN - sdf).powi(2) * 5000.0;
-        } else if sdf < SENSOR_RANGE {
-            // Safe Zone Gradient (Soft) - Decays to 0 at SENSOR_RANGE
-            // This pulls the line towards the center of gaps
-            let weight = (1.0 - sdf / SENSOR_RANGE).powi(2);
-            c_obs_prox += weight * 0.1; 
+                if sdf < 0.0 {
+                    c_obs_hit += 10000.0 + sdf.powi(2) * 500000.0;
+                } else if sdf < OBS_MARGIN {
+                    c_obs_hit += (OBS_MARGIN - sdf).powi(2) * 5000.0;
+                } else if sdf < SENSOR_RANGE {
+                    let weight = (1.0 - sdf / SENSOR_RANGE).powi(2);
+                    c_obs_prox += weight * 0.1; 
+                }
+            },
+            Obstacle::Poly { points } => {
+                // Construct Polygon
+                let coords: Vec<Point<f64>> = points.iter().map(|p| Point::new(p[0], p[1])).collect();
+                let poly = Polygon::new(LineString::from(coords), vec![]);
+
+                // Rule 2: Only DOVETAIL segments (Indices 1, 2, 3) cannot touch Polygons.
+                // Straight segments (0 and 4) are allowed to bridge across holes.
+                for i in 1..=3 {
+                    let (s, e) = cut_path[i];
+                    let seg = geo::Line::new(s, e);
+                    
+                    // distance is 0 if intersecting or inside
+                    let dist = seg.euclidean_distance(&poly);
+                    
+                    if dist < 0.001 {
+                        // Hard Collision
+                        c_obs_hit += 5000.0; 
+                    } else if dist < OBS_MARGIN {
+                        // Soft Buffer
+                        c_obs_prox += (OBS_MARGIN - dist).powi(2) * 50.0;
+                    }
+                }
+            }
         }
     }
     cost_hard += c_obs_hit;
