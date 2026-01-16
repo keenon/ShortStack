@@ -856,11 +856,13 @@ self.onmessage = async (e: MessageEvent) => {
                         const startY = evaluate(sl.y, params);
                         const endX = startX + evaluate(sl.endX, params);
                         const endY = startY + evaluate(sl.endY, params);
-                        const count = Math.round(evaluate(sl.dovetailCount, params));
+                        const positions = (sl.dovetailPositions || []).map(p => evaluate(p, params));
                         const dWidth = evaluate(sl.dovetailWidth, params);
+                        const dHeight = evaluate(sl.dovetailHeight, params);
+                        const flip = !!sl.flip;
 
                         // Generate points in math coords (Y-Up)
-                        const pts = generateDovetailPoints(startX, startY, endX, endY, count, dWidth);
+                        const pts = generateDovetailPoints(startX, startY, endX, endY, positions, dWidth, dHeight, flip);
                         
                         // Map to Point[] for utility function
                         const linePoints: Point[] = pts.map(p => ({

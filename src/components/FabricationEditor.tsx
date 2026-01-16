@@ -111,12 +111,27 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
     
     const actualThickness = numSheets * sheetThickness;
     const delta = actualThickness - progThickness;
-    let numFiles = method === "Waterline laser cut" ? numSheets : 1;
+    
+    let numFiles = 1;
+    if (method === "Waterline laser cut") {
+        numFiles = numSheets;
+    } else if (method === "3D printed") {
+        const splitSettings = (activePlan as any).layerSplitSettings?.[layer.id];
+        if (splitSettings?.enabled) {
+            const availableLines = targetFootprint?.shapes.filter(s => s.type === "splitLine") || [];
+            const activeLines = splitSettings.lineIds || availableLines.map(s => s.id);
+            numFiles = activeLines.length + 1;
+        }
+    }
     
     let exportText = "Single file";
-    if (method === "Waterline laser cut") exportText = `Exports ${numSheets} DXF cuts`;
-    else if (method === "CNC") exportText = "Exports SVG depth map";
-    else if (method === "3D printed") exportText = "Exports STL mesh";
+    if (method === "Waterline laser cut") {
+        exportText = `Exports ${numSheets} DXF cuts`;
+    } else if (method === "CNC") {
+        exportText = "Exports SVG depth map";
+    } else if (method === "3D printed") {
+        exportText = numFiles > 1 ? `Exports ${numFiles} STL files` : "Exports STL mesh";
+    }
     
     return { method, numFiles, exportText, numSheets, actualThickness, delta, progThickness, sheetThickness };
   };

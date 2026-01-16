@@ -1,9 +1,9 @@
 [package]
 name = "shortstack"
-version = "0.4.5"
+version = "0.5.0"
 description = "ShortStack CAD"
 authors = ["you"]
-edition = "2021"
+edition = "2024"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

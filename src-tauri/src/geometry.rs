@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use geo::{
     algorithm::{convex_hull::ConvexHull},
-    Point, Polygon, LineString, Line, Euclidean, Distance
+    Point, LineString, Line, Euclidean, Distance
 };
 
 // --- Data Structures ---
@@ -133,11 +133,4 @@ pub fn dist_point_segment(p: Point<f64>, s_start: Point<f64>, s_end: Point<f64>)
     let line = Line::new(s_start, s_end);
     // p.euclidean_distance(&line)
     Euclidean::distance(&p, &line)
-}
-
-/// Helper to check if point is inside a polygon (Ray Casting)
-pub fn is_point_in_poly(p: Point<f64>, poly: &Vec<Point<f64>>) -> bool {
-    use geo::algorithm::contains::Contains;
-    let polygon = Polygon::new(LineString::from_iter(poly.clone()), vec![]);
-    polygon.contains(&p)
 }

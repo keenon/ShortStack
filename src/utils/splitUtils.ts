@@ -1,4 +1,4 @@
-import { Footprint, Parameter, StackupLayer, FootprintSplitLine, Point, FootprintShape } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintSplitLine } from "../types";
 import { 
     evaluateExpression, 
     resolvePoint, 
@@ -569,7 +569,6 @@ export function autoComputeSplit(
     const vx = -uy;
     const vy = ux;
 
-    const diag = Math.sqrt(w*w + h*h) * 1.5;
     const cx = (minX+maxX)/2;
     const cy = (minY+maxY)/2;
     const centerProj = cx*ux + cy*uy;
