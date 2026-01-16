@@ -108,6 +108,26 @@ pub fn check_fit(points: &Vec<Point<f64>>, bed_w: f64, bed_h: f64) -> f64 {
     min_excess * min_excess
 }
 
+pub fn get_intersection(p1: Point<f64>, p2: Point<f64>, p3: Point<f64>, p4: Point<f64>) -> Option<Point<f64>> {
+    let s1_x = p2.x() - p1.x();
+    let s1_y = p2.y() - p1.y();
+    let s2_x = p4.x() - p3.x();
+    let s2_y = p4.y() - p3.y();
+
+    let denom = -s2_x * s1_y + s1_x * s2_y;
+    // Parallel lines
+    if denom.abs() < 1e-9 { return None; }
+
+    let s = (-s1_y * (p1.x() - p3.x()) + s1_x * (p1.y() - p3.y())) / denom;
+    let t = ( s2_x * (p1.y() - p3.y()) - s2_y * (p1.x() - p3.x())) / denom;
+
+    if s >= 0.0 && s <= 1.0 && t >= 0.0 && t <= 1.0 {
+        // Collision detected
+        return Some(Point::new(p1.x() + (t * s1_x), p1.y() + (t * s1_y)));
+    }
+    None
+}
+
 /// Helper to get distance from a point to a line segment
 pub fn dist_point_segment(p: Point<f64>, s_start: Point<f64>, s_end: Point<f64>) -> f64 {
     let line = Line::new(s_start, s_end);
