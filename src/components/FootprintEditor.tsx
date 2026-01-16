@@ -6,7 +6,7 @@ import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference,
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
 import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
-import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit, autoComputeSplitWithRefinement, evaluateRustSplitLineCost } from "../utils/splitUtils";
+import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplit, autoComputeSplitWithRefinement } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
 import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
@@ -309,8 +309,8 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   
   const splitStart = useRef<{x:number, y:number} | null>(null);
   const [splitPreview, setSplitPreview] = useState<{x1:number, y1:number, x2:number, y2:number} | null>(null);
-  const [debugLines, setDebugLines] = useState<any[]>([]); // New Debug State
-  const [rustDebugHulls, setRustDebugHulls] = useState<{a: {x:number, y:number}[], b: {x:number, y:number}[]} | null>(null);
+
+
 
   // Rotation State
   const [rotationGuide, setRotationGuide] = useState<{ center: {x:number, y:number}, current: {x:number, y:number} } | null>(null);
@@ -1582,21 +1582,7 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                       startShape.ignoredLayerIds
                   );
                   
-                  evaluateRustSplitLineCost(
-                        footprintRef.current, 
-                        allFootprints, 
-                        params, 
-                        stackup, 
-                        bedSize, 
-                        start, 
-                        end,
-                        startShape.ignoredLayerIds,
-                        splitPartHulls
-                    ).then(res => {
-                            console.log(res.log);
-                            const mapPts = (pts: number[][]) => pts.map(p => ({x: p[0], y: p[1]}));
-                            setRustDebugHulls({ a: mapPts(res.pointsA), b: mapPts(res.pointsB) });
-                        });
+
 
                   if (snapRes.result) {
                       return { 
@@ -2196,7 +2182,7 @@ const handleUngroup = (unionId: string) => {
                 setSplitPreview(null);
                 splitStart.current = null;
                 setProcessingMessage(null);
-                setDebugLines([]);
+
             } else {
                 // Standard behavior: Clear selection if not in tool
                 setSelectedShapeIds([]);
@@ -2883,11 +2869,6 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                     alert("Global search failed completely. Check obstacle layers or try increasing bed size.");
                 }
             }
-            if (res.debugLines) setDebugLines(res.debugLines);
-            if (res.rustDebugPoints) {
-                const mapPts = (pts: number[][]) => pts.map(p => ({x: p[0], y: p[1]}));
-                setRustDebugHulls({ a: mapPts(res.rustDebugPoints.a), b: mapPts(res.rustDebugPoints.b) });
-            }
         } catch (e) {
             console.error(e);
             setProcessingMessage(null);
@@ -3142,17 +3123,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         </g>
                     )}
 
-                    {/* RUST DEBUG HULLS (WHITE) */}
-                    {rustDebugHulls && (
-                        <g pointerEvents="none">
-                            {rustDebugHulls.a.map((p, i) => (
-                                <circle key={'ra'+i} cx={p.x} cy={-p.y} r={2} fill="white" opacity={0.5} />
-                            ))}
-                            {rustDebugHulls.b.map((p, i) => (
-                                <circle key={'rb'+i} cx={p.x} cy={-p.y} r={2} fill="yellow" opacity={0.5} />
-                            ))}
-                        </g>
-                    )}
+
 
                     
                     {/* SPLIT PART SIZE CHECK - Using Unified Hull Logic */}
@@ -3186,15 +3157,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                         );
                     })}
 
-                    {debugLines.map((l, i) => (
-                        <line key={'dbg'+i}
-                            x1={l.x1} y1={-l.y1} x2={l.x2} y2={-l.y2}
-                            stroke={l.color || "rgba(255,255,0,0.5)"}
-                            strokeWidth={1}
-                            vectorEffect="non-scaling-stroke"
-                            pointerEvents="none"
-                        />
-                    ))}
+
                     {splitPreview && (
                         <line 
                             x1={splitPreview.x1} y1={splitPreview.y1} 

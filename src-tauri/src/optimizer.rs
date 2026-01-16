@@ -165,10 +165,10 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
             // Call detailed to get points
             let (seed_cost, _log, pts_a, pts_b) = evaluate_cost_detailed(&seed_dvec, &ctx, flip_state);
             
-            println!("[Optimizer] Checking Seed (Flip={}): T={:.2} W={:.2} Cost={:.4}", flip_state, seed_vec[2], seed_vec[3], seed_cost);
+
 
             if seed_cost < 1.0 {
-                println!("[Optimizer] EARLY EXIT on Seed");
+
                 best_overall_cost = seed_cost;
                 let (_, p1, p2, dt) = decode_params(&seed_dvec, &ctx, flip_state);
                 
@@ -181,14 +181,11 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
                     dovetail_t: dt.t,
                     flipped: flip_state,
                 };
-                println!("debug points A: {:?}", pts_a);
-                println!("debug points B: {:?}", pts_b);
+
                 return OptimizationResult {
                     success: seed_cost < 1.0,
                     cost: seed_cost,
                     shapes: vec![cut],
-                    debug_points_a: pts_a,
-                    debug_points_b: pts_b,
                 };
             }
             // ----------------------------
@@ -232,12 +229,9 @@ pub fn run_optimization(input: GeometryInput) -> OptimizationResult {
             success: best_overall_cost < 1.0,
             cost: best_overall_cost,
             shapes: vec![cut],
-            debug_points_a: vec![], // Loop return handles mostly
-            debug_points_b: vec![],
         },
         None => OptimizationResult { 
             success: false, cost: f64::MAX, shapes: vec![],
-            debug_points_a: vec![], debug_points_b: vec![]
         }
     }
 }
@@ -473,16 +467,7 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
 
     // Elaborate Logging
     // We break down exactly why Fit failed (or didn't) by showing sizes vs bed
-    let log_msg = format!(
-        "Total: {:.4} (Hard: {:.2} Soft: {:.2})\\n  [PARAMS] Penalty: {:.2}\\n  [COLLISION] Cost: {:.2} (Min Dist: {:.2})\\n  [FIT] Cost: {:.2}\\n    Bed: {:.1}x{:.1}\\n    Part A: {} pts, Size {:.1}x{:.1} (Penalty {:.2})\\n    Part B: {} pts, Size {:.1}x{:.1} (Penalty {:.2})\\n  [BIAS] Cost: {:.2}",
-        total, cost_hard, cost_soft, 
-        c_param, 
-        c_obs_hit, min_sdf, 
-        c_fit, ctx.bed_w, ctx.bed_h,
-        pts_a.len(), w_a, h_a, pen_a * 100.0,
-        pts_b.len(), w_b, h_b, pen_b * 100.0,
-        c_bias
-    );
+    let log_msg = format!("Cost: {:.4} (Collision: {:.1}, Fit: {:.1})", total, c_obs_hit, c_fit);
 
     let raw_a = pts_a.iter().map(|p| [p.x(), p.y()]).collect();
     let raw_b = pts_b.iter().map(|p| [p.x(), p.y()]).collect();

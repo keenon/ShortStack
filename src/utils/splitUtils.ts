@@ -476,7 +476,7 @@ export function autoComputeSplit(
     bedSize: { width: number, height: number },
     options: { clearance: number, desiredCuts: number } = { clearance: 0.0, desiredCuts: 1 },
     ignoredLayerIds: string[] = []
-): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, debugLines?: any[], log?: string, rustDebugPoints?: {a: number[][], b: number[][]} } {
+): { success: boolean, shapes?: FootprintSplitLine[], maxExcess?: number, log?: string } {
     
     // 1. Prepare Geometry
     const rawOutline = getTessellatedBoardOutline(footprint, params, allFootprints);
@@ -640,7 +640,6 @@ export function autoComputeSplit(
         success: sizeCheck.maxExcess < 1.0,
         shapes: generatedShapes,
         maxExcess: sizeCheck.maxExcess,
-        debugLines: [],
         log: `Auto-Split: ${generatedShapes.length} cuts. Cost: ${bestSolution.cost.toFixed(2)}`
     };
 }
@@ -678,61 +677,6 @@ interface RustOptimizationResult {
 }
 
 // --- UPDATED AUTO SPLIT ---
-
-export async function evaluateRustSplitLineCost(
-    footprint: Footprint,
-    allFootprints: Footprint[],
-    params: Parameter[],
-    stackup: any[], // StackupLayer[]
-    bedSize: { width: number, height: number },
-    start: {x: number, y: number},
-    end: {x: number, y: number},
-    ignoredLayerIds: string[] = [],
-    precomputedParts: any[] | null = null // NEW: Optional memoized hulls
-): Promise<{log: string, pointsA: number[][], pointsB: number[][]}> {
-    // 1. Prepare Geometry (Same method as auto-split to ensure consistency)
-    const outline = getTessellatedBoardOutline(footprint, params, allFootprints);
-    
-    const rawObstacles = collectGlobalObstacles(
-        footprint.shapes, params, allFootprints, stackup, 
-        {x:0, y:0, angle:0}, footprint, ignoredLayerIds
-    );
-    
-    // Filter only through-hole circles, just like the Rust optimizer expects
-    const rustObstacles = rawObstacles
-        .filter(o => o.isThrough) // Allow all through obstacles
-        .map(o => {
-            if (o.type === 'circle') return { type: 'circle', x: o.x, y: o.y, r: o.r };
-            if (o.type === 'poly') return { type: 'poly', points: o.points.map(p => [p.x, p.y]) };
-            return null;
-        })
-        .filter(o => o !== null);
-
-    // 2. Prepare Input Object
-    const input = {
-        outline: outline.map(p => [p.x, p.y]),
-        obstacles: rustObstacles,
-        bed_width: bedSize.width,
-        bed_height: bedSize.height,
-        // Pass the line as a seed. Rust will evaluate this specific line.
-        initial_line: [
-            [start.x, start.y],
-            [end.x, end.y]
-        ]
-    };
-    
-    console.log("--- Sending to Rust ---");
-    console.groupEnd();
-
-    try {
-        // Call the new debug command
-        const res = await invoke<any>("get_debug_eval", { input });
-        return { log: res.log, pointsA: res.points_a, pointsB: res.points_b };
-    } catch (e) {
-        console.error("Debug Eval Failed", e);
-        return { log: "Eval Failed", pointsA: [], pointsB: [] };
-    }
-}
 
 export async function autoComputeSplitWithRefinement(
     footprint: Footprint,

@@ -16,6 +16,7 @@
     border-bottom: 1px solid #333;
     flex-wrap: wrap;
     height: auto;
+    flex-shrink: 0; /* Prevents squashing when buttons wrap */
     min-height: 52px;
 }
 .fp-toolbar button {
