@@ -13,6 +13,7 @@ import ShapeListPanel from "./ShapeListPanel";
 import { useUndoHistory } from "../hooks/useUndoHistory"; 
 import { collectExportShapesAsync } from "../utils/exportUtils";
 import './FootprintEditor.css';
+import { split } from "three/tsl";
 
 // --- GLOBAL CLIPBOARD (Persists across footprint switches) ---
 let GLOBAL_CLIPBOARD: { 
@@ -309,6 +310,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const splitStart = useRef<{x:number, y:number} | null>(null);
   const [splitPreview, setSplitPreview] = useState<{x1:number, y1:number, x2:number, y2:number} | null>(null);
   const [debugLines, setDebugLines] = useState<any[]>([]); // New Debug State
+  const [rustDebugHulls, setRustDebugHulls] = useState<{a: {x:number, y:number}[], b: {x:number, y:number}[]} | null>(null);
 
   // Rotation State
   const [rotationGuide, setRotationGuide] = useState<{ center: {x:number, y:number}, current: {x:number, y:number} } | null>(null);
@@ -1587,10 +1589,13 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
                         bedSize, 
                         start, 
                         end,
-                        startShape.ignoredLayerIds
-                    ).then(cost => {
-                        console.log((cost));
-                    });
+                        startShape.ignoredLayerIds,
+                        splitPartHulls
+                    ).then(res => {
+                            console.log(res.log);
+                            const mapPts = (pts: number[][]) => pts.map(p => ({x: p[0], y: p[1]}));
+                            setRustDebugHulls({ a: mapPts(res.pointsA), b: mapPts(res.pointsB) });
+                        });
 
                   if (snapRes.result) {
                       return { 
@@ -3166,6 +3171,18 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                                 fill="#00ff00" 
                                 vectorEffect="non-scaling-stroke"
                             />
+                        </g>
+                    )}
+
+                    {/* RUST DEBUG HULLS (WHITE) */}
+                    {rustDebugHulls && (
+                        <g pointerEvents="none">
+                            {rustDebugHulls.a.map((p, i) => (
+                                <circle key={'ra'+i} cx={p.x} cy={-p.y} r={2} fill="white" opacity={0.5} />
+                            ))}
+                            {rustDebugHulls.b.map((p, i) => (
+                                <circle key={'rb'+i} cx={p.x} cy={-p.y} r={2} fill="white" opacity={0.5} />
+                            ))}
                         </g>
                     )}
 

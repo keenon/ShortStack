@@ -16,6 +16,14 @@ struct DovetailShape {
     flipped: bool // Added this
 }
 
+#[derive(serde::Serialize)]
+pub struct DebugEvalResult {
+    log: String,
+    cost: f64,
+    points_a: Vec<[f64; 2]>,
+    points_b: Vec<[f64; 2]>,
+}
+
 #[derive(Clone)] // Added Clone
 struct CostContext {
     outline: Vec<Point<f64>>,
@@ -208,7 +216,7 @@ fn evaluate_cost(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> f64 {
 }
 
 // Detailed cost breakdown for debugging
-fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> (f64, String) {
+fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) -> (f64, String, Vec<[f64; 2]>, Vec<[f64; 2]>) {
     let mut cost = 0.0;
     let mut log = Vec::new();
 
@@ -264,7 +272,7 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
     }
 
     if cost > 100.0 { 
-        return (cost, format!("High Cost Exit ({:.2}):\n{}", cost, log.join("\n"))); 
+        return (cost, format!("High Cost Exit ({:.2}):\\n{}", cost, log.join("\\n")), vec![], vec![]);
     }
 
     // 3. Fit Check
@@ -281,8 +289,26 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
         if val <= c_val + 0.5 { pts_b.push(*p); }
     }
 
-    pts_a.push(p1); pts_a.push(p2);
-    pts_b.push(p1); pts_b.push(p2);
+    // FIX: Instead of pushing the infinite line endpoints (p1, p2) which might be 
+    // far outside the board, we calculate exact intersections with the outline.
+    // This ensures the Convex Hull is tight to the actual board geometry.
+    let mut intersections_found = false;
+    for i in 0..ctx.outline.len() {
+        let o1 = ctx.outline[i];
+        let o2 = ctx.outline[(i + 1) % ctx.outline.len()];
+        if let Some(int_pt) = get_intersection(p1, p2, o1, o2) {
+            pts_a.push(int_pt);
+            pts_b.push(int_pt);
+            intersections_found = true;
+        }
+    }
+    
+    // Fallback: If no intersections (e.g. line is exactly on edge or floating), 
+    // keep p1/p2 to ensure we have a shape, though this case implies a bad cut.
+    if !intersections_found {
+        pts_a.push(p1); pts_a.push(p2);
+        pts_b.push(p1); pts_b.push(p2);
+    }
 
     // --- DEBUG: Geometry Inspection ---
     // Helper to log bounds and formatted points
@@ -315,11 +341,14 @@ fn evaluate_cost_detailed(x: &DVector<f64>, ctx: &CostContext, flipped: bool) ->
 
     cost += fit_pen_a + fit_pen_b;
     
-    (cost, format!("Total: {:.2}\n{}", cost, log.join("\n")))
+    let raw_a = pts_a.iter().map(|p| [p.x(), p.y()]).collect();
+    let raw_b = pts_b.iter().map(|p| [p.x(), p.y()]).collect();
+
+    (cost, format!("Total: {:.2}\\n{}", cost, log.join("\\n")), raw_a, raw_b)
 }
 
 
-pub fn debug_split_eval(input: GeometryInput) -> String {
+pub fn debug_split_eval(input: GeometryInput) -> DebugEvalResult {
     // Reconstruct Context
     let poly_points: Vec<Point<f64>> = input.outline.iter().map(|p| Point::new(p[0], p[1])).collect();
     let mut min_x = f64::MAX; let mut max_x = f64::MIN;
@@ -344,15 +373,25 @@ pub fn debug_split_eval(input: GeometryInput) -> String {
         let (a_norm, o_norm) = line_to_params(line[0], line[1], &ctx);
         let params = DVector::from_vec(vec![a_norm, o_norm, 0.5, 0.5, 0.5]);
         
-        let (c1, log1) = evaluate_cost_detailed(&params, &ctx, false);
-        let (c2, log2) = evaluate_cost_detailed(&params, &ctx, true);
+        let (c1, log1, pts1_a, pts1_b) = evaluate_cost_detailed(&params, &ctx, false);
+        let (c2, log2, pts2_a, pts2_b) = evaluate_cost_detailed(&params, &ctx, true);
         
         if c1 < c2 {
-            return format!("=== Normal State ===\nCost: {:.4}\n{}", c1, log1);
+            return DebugEvalResult {
+                log: format!("=== Normal State ===\\nCost: {:.4}\\n{}", c1, log1),
+                cost: c1,
+                points_a: pts1_a,
+                points_b: pts1_b
+            };
         } else {
-            return format!("=== Flipped State ===\nCost: {:.4}\n{}", c2, log2);
+            return DebugEvalResult {
+                log: format!("=== Flipped State ===\\nCost: {:.4}\\n{}", c2, log2),
+                cost: c2,
+                points_a: pts2_a,
+                points_b: pts2_b
+            };
         }
     }
     
-    "Error: No line provided".to_string()
+    DebugEvalResult { log: "Error: No line provided".to_string(), cost: -1.0, points_a: vec![], points_b: vec![] }
 }

@@ -1094,7 +1094,7 @@ async fn compute_smart_split(input: GeometryInput) -> Result<geometry::Optimizat
 }
 
 #[command]
-async fn get_debug_eval(input: GeometryInput) -> Result<String, String> {
+async fn get_debug_eval(input: GeometryInput) -> Result<optimizer::DebugEvalResult, String> {
     // Run CPU intensive task on a thread to avoid blocking UI
     let result = std::thread::spawn(move || {
         debug_split_eval(input)
