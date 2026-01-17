@@ -119,7 +119,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
         const splitSettings = (activePlan as any).layerSplitSettings?.[layer.id];
         if (splitSettings?.enabled) {
             const availableLines = targetFootprint?.shapes.filter(s => s.type === "splitLine") || [];
-            const activeLines = splitSettings.lineIds || availableLines.map(s => s.id);
+            const activeLines = splitSettings.lineIds !== undefined ? splitSettings.lineIds : availableLines.map(s => s.id);
             numFiles = activeLines.length + 1;
         }
     }
@@ -768,7 +768,14 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                         <input 
                                             type="checkbox" 
                                             checked={!!splitSettings.enabled} 
-                                            onChange={(e) => updateSplitSettings(layer.id, { enabled: e.target.checked })} 
+                                            onChange={(e) => {
+                                                const isChecked = e.target.checked;
+                                                const defaultLineIds = availableSplitLines.map(s => s.id);
+                                                updateSplitSettings(layer.id, { 
+                                                    enabled: isChecked,
+                                                    lineIds: isChecked ? (splitSettings.lineIds || defaultLineIds) : splitSettings.lineIds
+                                                });
+                                            }} 
                                         />
                                         Split into Parts
                                     </label>
@@ -788,18 +795,18 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                                             <label style={{ fontSize: '0.85em', color: '#888' }}>Active Split Lines:</label>
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px' }}>
                                                 {availableSplitLines.map(sl => {
-                                                    const isSelected = !splitSettings.lineIds || splitSettings.lineIds.includes(sl.id);
+                                                    const isSelected = splitSettings.lineIds ? splitSettings.lineIds.includes(sl.id) : true;
                                                     return (
                                                         <label key={sl.id} className="checkbox-label" style={{ fontSize: '0.85em' }}>
                                                             <input 
                                                                 type="checkbox" 
                                                                 checked={isSelected} 
                                                                 onChange={(e) => {
-                                                                    const current = splitSettings.lineIds || availableSplitLines.map(s => s.id);
-                                                                    let next;
-                                                                    if (e.target.checked) next = [...current, sl.id];
-                                                                    else next = current.filter((id: string) => id !== sl.id);
-                                                                    updateSplitSettings(layer.id, { enabled: true, lineIds: next });
+                                                                    const currentIds = splitSettings.lineIds || availableSplitLines.map(s => s.id);
+                                                                    let nextIds;
+                                                                    if (e.target.checked) nextIds = [...currentIds, sl.id];
+                                                                    else nextIds = currentIds.filter((id: string) => id !== sl.id);
+                                                                    updateSplitSettings(layer.id, { enabled: true, lineIds: nextIds });
                                                                 }} 
                                                             />
                                                             {sl.name}
