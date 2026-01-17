@@ -125,11 +125,11 @@ def main():
     args = sys.argv[1:]
     
     # Check for flag to disable recursive imports
-    follow_imports = True
-    if "--no-imports" in args:
-        follow_imports = False
-        args.remove("--no-imports")
-        print("🚫 Import following disabled.")
+    follow_imports = False
+    if "--with-imports" in args:
+        follow_imports = True
+        args.remove("--with-imports")
+        print("✅ Import following enabled.")
     
     keywords = args
     
