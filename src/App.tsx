@@ -15,13 +15,14 @@ import ParametersEditor from "./components/ParametersEditor";
 import StackupEditor from "./components/StackupEditor";
 import FootprintLibrary from "./components/FootprintLibrary";
 import FabricationEditor from "./components/FabricationEditor";
+import SimulationEditor from "./components/SimulationEditor";
 
 const TABLEAU_10 = [
   "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", 
   "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC"
 ];
 
-type Tab = "stackup" | "footprint" | "layout" | "parameters" | "fabrication";
+type Tab = "stackup" | "footprint" | "layout" | "parameters" | "fabrication" | "simulation";
 
 function App() {
   const [currentPath, setCurrentPath] = useState<string | null>(null);
@@ -431,39 +432,57 @@ function App() {
         <button className={`tab-btn ${activeTab === "footprint" ? "active" : ""}`} onClick={() => setActiveTab("footprint")}>Footprint Editor</button>
         <button className={`tab-btn ${activeTab === "parameters" ? "active" : ""}`} onClick={() => setActiveTab("parameters")}>Parameters Editor</button>
         <button className={`tab-btn ${activeTab === "fabrication" ? "active" : ""}`} onClick={() => setActiveTab("fabrication")}>Fabrication Editor</button>
+        <button className={`tab-btn ${activeTab === "simulation" ? "active" : ""}`} onClick={() => setActiveTab("simulation")}>Simulation</button>
       </nav>
 
       <main>
-        <div className={`tab-pane ${activeTab === "stackup" ? "active" : ""}`}>
-          <StackupEditor 
-            stackup={stackup} 
-            setStackup={setStackup} 
-            params={params} 
-          />
-        </div>
-        <div className={`tab-pane ${activeTab === "footprint" ? "active" : ""}`}>
-          <FootprintLibrary 
-            footprints={footprints}
-            setFootprints={setFootprints}
-            params={params}
-            stackup={stackup}
-            meshAssets={meshAssets}
-            onRegisterMesh={registerMeshAsset}
-          />
-        </div>
-        <div className={`tab-pane ${activeTab === "parameters" ? "active" : ""}`}>
-          <ParametersEditor params={params} setParams={setParams} />
-        </div>
-        <div className={`tab-pane ${activeTab === "fabrication" ? "active" : ""}`}>
-          <FabricationEditor 
-            fabPlans={fabPlans}
-            setFabPlans={setFabPlans}
-            footprints={footprints}
-            stackup={stackup}
-            params={params}
-            meshAssets={meshAssets}
-          />
-        </div>
+        {activeTab === "stackup" && (
+          <div className="tab-pane active">
+            <StackupEditor 
+              stackup={stackup} 
+              setStackup={setStackup} 
+              params={params} 
+            />
+          </div>
+        )}
+
+        {activeTab === "footprint" && (
+          <div className="tab-pane active">
+            <FootprintLibrary 
+              footprints={footprints}
+              setFootprints={setFootprints}
+              params={params}
+              stackup={stackup}
+              meshAssets={meshAssets}
+              onRegisterMesh={registerMeshAsset}
+            />
+          </div>
+        )}
+
+        {activeTab === "parameters" && (
+          <div className="tab-pane active">
+            <ParametersEditor params={params} setParams={setParams} />
+          </div>
+        )}
+
+        {activeTab === "fabrication" && (
+          <div className="tab-pane active">
+            <FabricationEditor 
+              fabPlans={fabPlans}
+              setFabPlans={setFabPlans}
+              footprints={footprints}
+              stackup={stackup}
+              params={params}
+              meshAssets={meshAssets}
+            />
+          </div>
+        )}
+
+        {activeTab === "simulation" && (
+          <div className="tab-pane active">
+            <SimulationEditor />
+          </div>
+        )}
       </main>
 
       {updateBanner}
