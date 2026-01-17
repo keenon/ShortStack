@@ -1,11 +1,179 @@
-import { Footprint, Parameter, StackupLayer, FootprintSplitLine } from "../types";
+import { Footprint, Parameter, StackupLayer, FootprintSplitLine, FootprintShape, FootprintReference, FootprintUnion } from "../types";
 import { 
     evaluateExpression, 
     resolvePoint, 
-    collectGlobalObstacles, 
     bezier1D 
 } from "./footprintUtils";
 import { invoke } from "@tauri-apps/api/core";
+
+export type Obstacle = 
+  | { type: 'circle', x: number, y: number, r: number, isThrough: boolean }
+  | { type: 'poly', points: {x:number, y:number}[], isThrough: boolean };
+
+/**
+ * Recursively collects all physical features that should be avoided by a split line.
+ * Distinguishes between "Through Holes" (critical avoidance) and "Channels/Pockets" (dovetail avoidance).
+ */
+export function collectGlobalObstacles(
+    shapes: FootprintShape[],
+    params: Parameter[],
+    allFootprints: Footprint[],
+    stackup: StackupLayer[],
+    transform = { x: 0, y: 0, angle: 0 },
+    contextFootprint?: Footprint,
+    ignoredLayerIds: string[] = []
+): Obstacle[] {
+    let obstacles: Obstacle[] = [];
+    const rad = transform.angle * (Math.PI / 180);
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+
+    const ctx = contextFootprint || { id: "unknown", name: "unknown", shapes: [], isBoard: false } as any;
+
+    for (const s of shapes) {
+        // 1. Calculate Shape's Origin in World Space relative to Container
+        const lx = (s.type === "line") ? 0 : evaluateExpression((s as any).x, params);
+        const ly = (s.type === "line") ? 0 : evaluateExpression((s as any).y, params);
+        const la = (s.type === "rect" || s.type === "footprint" || s.type === "union") 
+            ? evaluateExpression((s as any).angle, params) : 0;
+
+        // Apply Container Transform (transform.x/y/angle) to Shape Origin (lx, ly)
+        const gx = transform.x + (lx * cos - ly * sin);
+        const gy = transform.y + (lx * sin + ly * cos);
+        const gAngle = transform.angle + la;
+
+        // 2. RECURSE (References & Unions)
+        if (s.type === "footprint") {
+            const ref = s as FootprintReference;
+            const target = allFootprints.find(f => f.id === ref.footprintId);
+            if (target) {
+                obstacles = obstacles.concat(collectGlobalObstacles(
+                    target.shapes, params, allFootprints, stackup, 
+                    { x: gx, y: gy, angle: gAngle },
+                    target,
+                    ignoredLayerIds
+                ));
+            }
+            continue;
+        }
+
+        if (s.type === "union") {
+            const u = s as FootprintUnion;
+            obstacles = obstacles.concat(collectGlobalObstacles(
+                u.shapes, params, allFootprints, stackup,
+                { x: gx, y: gy, angle: gAngle },
+                ctx,
+                ignoredLayerIds
+            ));
+            continue;
+        }
+
+        // 3. CHECK DEPTH (Is this an obstacle?)
+        let isThrough = false;
+        let isCut = false;
+        if (s.type === "boardOutline" || s.type === "wireGuide") continue;
+        
+        if (s.assignedLayers) {
+            for (const layer of stackup) {
+                if (ignoredLayerIds.includes(layer.id)) continue;
+                const assign = s.assignedLayers[layer.id];
+                if (assign) {
+                    const layerThick = evaluateExpression(layer.thicknessExpression, params);
+                    let cutDepth = 0;
+                    if (layer.type === "Cut") cutDepth = layerThick;
+                    else {
+                        const val = evaluateExpression(typeof assign === 'object' ? assign.depth : assign, params);
+                        cutDepth = Math.max(0, val);
+                    }
+                    if (cutDepth > 0) isCut = true;
+                    if (cutDepth >= layerThick - 0.001) {
+                        isThrough = true;
+                    }
+                }
+            }
+        }
+
+        // Only care about cuts (ignore text/guides)
+        if (!isCut || !isThrough) continue; // For now, only consider through holes as obstacles
+        // 4. GENERATE GEOMETRY
+        // Rotation helpers for points inside the shape
+        const sRad = gAngle * (Math.PI / 180);
+        const sCos = Math.cos(sRad);
+        const sSin = Math.sin(sRad);
+
+        // Helper: Transform Point Local->World
+        // px, py are strictly local to the shape's own coordinate system
+        const toGlobal = (px: number, py: number) => ({
+            x: gx + (px * sCos - py * sSin),
+            y: gy + (px * sSin + py * sCos)
+        });
+
+        if (s.type === "circle") {
+            const r = evaluateExpression((s as any).diameter, params) / 2;
+            obstacles.push({ type: 'circle', x: gx, y: gy, r, isThrough });
+        }
+        else if (s.type === "rect") {
+            const w = evaluateExpression((s as any).width, params);
+            const h = evaluateExpression((s as any).height, params);
+            const hw = w/2; const hh = h/2;
+            const pts = [
+                toGlobal(hw, hh), toGlobal(-hw, hh), toGlobal(-hw, -hh), toGlobal(hw, -hh)
+            ];
+            obstacles.push({ type: 'poly', points: pts, isThrough });
+        }
+        else if (s.type === "line") {
+            const th = evaluateExpression((s as any).thickness, params);
+            if (th <= 0.001) continue;
+            
+            const rawPts = (s as any).points || [];
+            if (rawPts.length < 2) continue;
+
+            const globalPts = rawPts.map((p: any) => {
+                const res = resolvePoint(p, ctx, allFootprints, params, { x: gx, y: gy, angle: gAngle });
+                return toGlobal(res.x, res.y);
+            });
+
+            const half = th / 2;
+
+            for (let i = 0; i < globalPts.length - 1; i++) {
+                const p1 = globalPts[i];
+                const p2 = globalPts[i+1];
+
+                const dx = p2.x - p1.x;
+                const dy = p2.y - p1.y;
+                const len = Math.sqrt(dx*dx + dy*dy);
+                if (len <= 0.001) continue;
+
+                const nx = -dy / len * half;
+                const ny = dx / len * half;
+
+                // Create 4 corners of the segment box in World Space
+                const corners = [
+                    { x: p1.x + nx, y: p1.y + ny },
+                    { x: p2.x + nx, y: p2.y + ny },
+                    { x: p2.x - nx, y: p2.y - ny },
+                    { x: p1.x - nx, y: p1.y - ny }
+                ];
+
+                obstacles.push({ type: 'poly', points: corners, isThrough });
+            }
+        }
+        else if (s.type === "polygon") {
+            const rawPts = (s as any).points || [];
+            if (rawPts.length < 3) continue;
+            
+            // UPDATED: Use resolvePoint for Polygons as well
+            const polyPoints = rawPts.map((p: any) => {
+                const res = resolvePoint(p, ctx, allFootprints, params, { x: gx, y: gy, angle: gAngle });
+                return toGlobal(res.x, res.y);
+            });
+            
+            obstacles.push({ type: 'poly', points: polyPoints, isThrough });
+        }
+    }
+    return obstacles;
+}
+
 
 // --- PURE GEOMETRY HELPERS ---
 
