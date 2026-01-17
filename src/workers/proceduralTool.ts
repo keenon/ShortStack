@@ -285,10 +285,310 @@ export function generateProceduralTool(
             });
         });
 
-        // PLACEHOLDER: Triangulation logic is assumed to be here as in previous examples
-        // For brevity in this fix script, we assume the user has the robust triangulation code.
-        // If not, revert to fallback by throwing.
-        throw new Error("Triangulation Logic Not Included in Fix Script - Falling Back");
+        // --- RESTORED TRIANGULATION LOGIC ---
+        const rawIndices: number[] = [];
+        const safeMod = (n: number, m: number) => ((n % m) + m) % m;
+
+        // --- TRIANGULATION HELPERS ---
+        const isPointInPoly = (pt: THREE.Vector2, poly: THREE.Vector2[]) => {
+            let inside = false;
+            for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+                const xi = poly[i].x, yi = poly[i].y;
+                const xj = poly[j].x, yj = poly[j].y;
+                const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
+                    (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        };
+
+        const getSignedArea = (poly: THREE.Vector2[]) => {
+            let area = 0;
+            for (let i = 0; i < poly.length; i++) {
+                const j = (i + 1) % poly.length;
+                area += poly[i].x * poly[j].y - poly[j].x * poly[i].y;
+            }
+            return area * 0.5;
+        };
+
+        const triangulateFlat = (contours: THREE.Vector2[][], startIdx: number, reverse: boolean) => {
+            const contourOffsets: number[] = [];
+            let runningOffset = startIdx;
+            contours.forEach(c => {
+                contourOffsets.push(runningOffset);
+                runningOffset += c.length;
+            });
+
+            const solids: { poly: THREE.Vector2[], idx: number }[] = [];
+            const holes: { poly: THREE.Vector2[], idx: number }[] = [];
+
+            contours.forEach((c, i) => {
+                if (getSignedArea(c) > 0) {
+                    solids.push({ poly: c, idx: i });
+                } else {
+                    holes.push({ poly: c, idx: i });
+                }
+            });
+
+            solids.forEach(solid => {
+                const myHoles = holes.filter(h => isPointInPoly(h.poly[0], solid.poly));
+                const holeArrays = myHoles.map(h => h.poly);
+                const tris = THREE.ShapeUtils.triangulateShape(solid.poly, holeArrays);
+                
+                tris.forEach(t => {
+                    const getGlobalIndex = (localIdx: number) => {
+                        if (localIdx < solid.poly.length) return contourOffsets[solid.idx] + localIdx;
+                        let remaining = localIdx - solid.poly.length;
+                        for (let k = 0; k < myHoles.length; k++) {
+                            const hLen = myHoles[k].poly.length;
+                            if (remaining < hLen) return contourOffsets[myHoles[k].idx] + remaining;
+                            remaining -= hLen;
+                        }
+                        return 0;
+                    };
+                    const a = getGlobalIndex(t[0]);
+                    const b = getGlobalIndex(t[1]);
+                    const c = getGlobalIndex(t[2]);
+                    if (reverse) rawIndices.push(a, c, b);
+                    else rawIndices.push(a, b, c);
+                });
+            });
+        };
+
+        // --- TRIANGULATION EXECUTION ---
+        if (layerData.length > 0) {
+            triangulateFlat(layerData[0].contours, layerData[0].startIdx, false);
+            triangulateFlat(layerData[layerData.length - 1].contours, layerData[layerData.length - 1].startIdx, true);
+        }
+
+        // Triangulate between layers
+        const triangulateRobust = (polyA: THREE.Vector2[], polyB: THREE.Vector2[], idxStartA: number, idxStartB: number) => {
+            const lenA = polyA.length;
+            const lenB = polyB.length;
+            if (lenA < 3 || lenB < 3) return;
+
+            // DP Table Reused to avoid allocation spam
+            const dimCol = lenB + 1;
+            const costTable = new Float32Array((lenA + 1) * dimCol);
+            const fromTable = new Int8Array((lenA + 1) * dimCol); // 1: Up, 2: Left
+            const idx = (r: number, c: number) => r * dimCol + c;
+
+            // Area Weight Constant
+            const AREA_WEIGHT = 4.0; 
+
+            const getTriArea2x = (p1: THREE.Vector2, p2: THREE.Vector2, p3: THREE.Vector2) => {
+                return Math.abs(p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
+            };
+
+            // Added 'strictMode' flag to allow fallback if geometry is impossible
+            const solveForOffset = (offsetB: number) => {
+                costTable.fill(Infinity);
+                fromTable.fill(0);
+                costTable[0] = 0; 
+
+                for (let i = 0; i <= lenA; i++) {
+                    for (let j = 0; j <= lenB; j++) {
+                        if (i === 0 && j === 0) continue;
+                        
+                        // Current vertices being considered
+                        const pA = polyA[i % lenA];
+                        const pB = polyB[(j + offsetB) % lenB]; 
+
+                        const distSq = pA.distanceToSquared(pB);
+
+                        // Transition 1: Move along Poly A
+                        if (i > 0) {
+                            const c = costTable[idx(i - 1, j)];
+                            if (c !== Infinity) {
+                                const pPrevA = polyA[(i - 1) % lenA];
+                                const triArea = getTriArea2x(pPrevA, pB, pA) * 0.5;
+                                const newCost = c + distSq + (triArea * AREA_WEIGHT);
+
+                                if (newCost < costTable[idx(i, j)]) {
+                                    costTable[idx(i, j)] = newCost;
+                                    fromTable[idx(i, j)] = 1;
+                                }
+                            }
+                        }
+
+                        // Transition 2: Move along Poly B
+                        if (j > 0) {
+                            const c = costTable[idx(i, j - 1)];
+                            if (c !== Infinity) {
+                                const pPrevB = polyB[(j - 1 + offsetB) % lenB];
+                                const triArea = getTriArea2x(pA, pPrevB, pB) * 0.5;
+                                const newCost = c + distSq + (triArea * AREA_WEIGHT);
+                                
+                                if (newCost < costTable[idx(i, j)]) {
+                                    costTable[idx(i, j)] = newCost;
+                                    fromTable[idx(i, j)] = 2;
+                                }
+                            }
+                        }
+                    }
+                }
+                return costTable[idx(lenA, lenB)];
+            };
+
+            const generateIndices = (offsetB: number) => {
+                solveForOffset(offsetB); 
+                let curI = lenA;
+                let curJ = lenB;
+                
+                // --- INFINITE LOOP PROTECTION ---
+                let safety = 0;
+                const MAX_STEPS = (lenA + lenB) * 2; 
+
+                while ((curI > 0 || curJ > 0) && safety++ < MAX_STEPS) {
+                    let dir = fromTable[idx(curI, curJ)];
+                    
+                    // --- FALLBACK FOR BROKEN PATHS ---
+                    // If strict mode blocked all paths to this cell, dir will be 0.
+                    if (dir === 0) {
+                         if (curI > 0) dir = 1;
+                         else dir = 2;
+                    }
+
+                    const vA_curr = idxStartA + (curI % lenA);
+                    const vB_curr = idxStartB + ((curJ + offsetB) % lenB);
+                    
+                    if (dir === 1) {
+                        const vA_prev = idxStartA + safeMod(curI - 1, lenA);
+                        rawIndices.push(vA_prev, vB_curr, vA_curr);
+                        curI--;
+                    } else {
+                        const vB_prev = idxStartB + safeMod(curJ - 1 + offsetB, lenB);
+                        rawIndices.push(vA_curr, vB_prev, vB_curr);
+                        curJ--;
+                    }
+                }
+            };
+
+            let bestOffset = 0;
+            let minTotalCost = Infinity;
+            let geoBestOffset = 0;
+            let minGeoDist = Infinity;
+            
+            // Find geometric best start to limit search space
+            for(let i=0; i<lenB; i++) {
+                const d = polyA[0].distanceToSquared(polyB[i]);
+                if(d < minGeoDist) { minGeoDist = d; geoBestOffset = i; }
+            }
+
+            let searchStart = 0;
+            let searchCount = lenB;
+            if (lenB > 60) {
+                searchStart = geoBestOffset - 10;
+                searchCount = 20;
+            }
+
+            for (let k = 0; k < searchCount; k++) {
+                const offset = safeMod(searchStart + k, lenB);
+                const cost = solveForOffset(offset);
+                const pA = polyA[0];
+                const pB = polyB[offset];
+                const seamDistSq = pA.distanceToSquared(pB);
+                const totalCost = cost + seamDistSq;
+
+                if (totalCost < minTotalCost) {
+                    minTotalCost = totalCost;
+                    bestOffset = offset;
+                }
+            }
+            generateIndices(bestOffset);
+        };
+
+        for(let l=0; l<layerData.length-1; l++) {
+            const up = layerData[l];
+            const low = layerData[l+1];
+            
+            const upToLow = new Map<number, number[]>();
+            for(let i=0; i<up.contours.length; i++) upToLow.set(i, []);
+
+            low.contours.forEach((lowPoly, iLow) => {
+                const lowCenter = new THREE.Vector2();
+                lowPoly.forEach(p => lowCenter.add(p));
+                lowCenter.divideScalar(lowPoly.length);
+
+                let bestUp = -1;
+                let minDist = Infinity;
+
+                up.contours.forEach((upPoly, iUp) => {
+                    const upCenter = new THREE.Vector2();
+                    upPoly.forEach(p => upCenter.add(p));
+                    upCenter.divideScalar(upPoly.length);
+                    const d = upCenter.distanceToSquared(lowCenter);
+                    if (d < minDist) { minDist = d; bestUp = iUp; }
+                });
+
+                if (bestUp !== -1) upToLow.get(bestUp)!.push(iLow);
+            });
+
+            upToLow.forEach((childIndices, iUp) => {
+                const upPoly = up.contours[iUp];
+                if (childIndices.length === 1) {
+                    const iLow = childIndices[0];
+                    const lowPoly = low.contours[iLow];
+                    let sA = up.startIdx; for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+                    let sB = low.startIdx; for(let k=0; k<iLow; k++) sB += low.contours[k].length;
+                    triangulateRobust(upPoly, lowPoly, sA, sB);
+                } else if (childIndices.length === 0) {
+                     let sA = up.startIdx; for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+                     const tris = THREE.ShapeUtils.triangulateShape(upPoly, []);
+                     tris.forEach(t => rawIndices.push(sA + t[0], sA + t[2], sA + t[1]));
+                } else {
+                    const holes = childIndices.map(i => low.contours[i]);
+                    const holesReversed = holes.map(h => [...h].reverse());
+                    const tris = THREE.ShapeUtils.triangulateShape(upPoly, holesReversed);
+                    let sA = up.startIdx; for(let k=0; k<iUp; k++) sA += up.contours[k].length;
+                    tris.forEach(t => {
+                        const resolve = (localIdx: number) => {
+                            if (localIdx < upPoly.length) return sA + localIdx;
+                            let rem = localIdx - upPoly.length;
+                            for(let c=0; c<childIndices.length; c++) {
+                                const hLen = holes[c].length;
+                                if (rem < hLen) {
+                                    const realChildIdx = childIndices[c];
+                                    let sB = low.startIdx;
+                                    for(let k=0; k<realChildIdx; k++) sB += low.contours[k].length;
+                                    return sB + ((hLen - 1) - rem);
+                                }
+                                rem -= hLen;
+                            }
+                            return sA; 
+                        };
+                        rawIndices.push(resolve(t[0]), resolve(t[2]), resolve(t[1]));
+                    });
+                }
+            });
+        }
+
+        const uniqueVerts: number[] = [];
+        const vertMap = new Map<string, number>();
+        const oldToNew = new Int32Array(rawVertices.length / 3);
+        const decimalShift = 1 / 1e-5;
+
+        for(let i=0; i<rawVertices.length / 3; i++) {
+            const x = rawVertices[i*3], y = rawVertices[i*3+1], z = rawVertices[i*3+2];
+            const key = `${Math.round(x*decimalShift)}_${Math.round(y*decimalShift)}_${Math.round(z*decimalShift)}`;
+            if (vertMap.has(key)) oldToNew[i] = vertMap.get(key)!;
+            else { const newIdx = uniqueVerts.length / 3; uniqueVerts.push(x, y, z); vertMap.set(key, newIdx); oldToNew[i] = newIdx; }
+        }
+        const finalIndices: number[] = [];
+        for(let i=0; i<rawIndices.length; i+=3) {
+            const a = oldToNew[rawIndices[i]], b = oldToNew[rawIndices[i+1]], c = oldToNew[rawIndices[i+2]];
+            if (a === b || b === c || a === c) continue;
+            finalIndices.push(a, b, c);
+        }
+
+        const vertProperties = new Float32Array(uniqueVerts);
+        const triVerts = new Uint32Array(finalIndices);
+
+        const mesh = new manifoldModule.Mesh();
+        mesh.numProp = 3;
+        mesh.vertProperties = vertProperties;
+        mesh.triVerts = triVerts;
+        return { manifold: new manifoldModule.Manifold(mesh), vertProperties, triVerts };
         
         // Unreachable return in this specific stub, but needed for TS structure
         // return { manifold: new manifoldModule.Manifold(new manifoldModule.Mesh()), vertProperties: new Float32Array(), triVerts: new Uint32Array() };
