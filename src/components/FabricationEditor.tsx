@@ -548,8 +548,8 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
                     layerThickness: thickness,
                     bottomZ: currentZAccum,
                     carveSide: layer.carveSide
-                }).then(paths => {
-                    setActiveToolpaths(prev => ({ ...prev, [layer.id]: paths }));
+                }).then(result => {
+                    setActiveToolpaths(prev => ({ ...prev, [layer.id]: result.toolpaths }));
                 });
             } else {
                 setActiveToolpaths(prev => {
