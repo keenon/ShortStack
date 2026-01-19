@@ -42,7 +42,9 @@ pub async fn cmd_tetrahedralize(vertices: Vec<f64>, options: String, target_len:
     let handle = builder.spawn(move || {
         // --- STEP 1: Initial Weld ---
         // Converts triangle soup to a connected mesh
-        let (mut verts, mut faces) = weld_mesh(&vertices, 1e-5);
+        // ADAPTIVE WELD: Use 1% of target length to snap seams, or default to 0.01mm
+        let weld_epsilon = target_len.map(|l| l * 0.01).unwrap_or(1e-2); 
+        let (mut verts, mut faces) = weld_mesh(&vertices, weld_epsilon);
 
         // --- STEP 2: Regularization (Optional) ---
         if let Some(len) = target_len {

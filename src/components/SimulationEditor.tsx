@@ -408,7 +408,7 @@ export default function SimulationEditor() {
         <Canvas shadows camera={{ position: [50, 50, 50], fov: 45 }}>
             <color attach="background" args={['#1a1a1a']} />
             <Environment preset="city" />
-            <directionalLight position={[50, 80, 50]} intensity={1.5} castShadow shadow-mapSize={[4096, 4096]} shadow-bias={-0.0001} shadow-normalBias={0.05}>
+            <directionalLight position={[50, 80, 50]} intensity={1.5} castShadow shadow-mapSize={[4096, 4096]} shadow-bias={-0.001} shadow-normalBias={0.1}>
                 <orthographicCamera attach="shadow-camera" args={[-500, 500, 500, -500]} far={400} />
             </directionalLight>
             <hemisphereLight intensity={0.4} groundColor="#333" />
@@ -420,7 +420,7 @@ export default function SimulationEditor() {
             <OrbitControls ref={controlsRef} makeDefault autoRotate={autoRotate} autoRotateSpeed={0.5} onStart={handleUserInteraction} onEnd={handleUserInteraction} />
 
             <group position={modelPosition}>
-                {previewGeo && !tetMesh && <mesh geometry={previewGeo} castShadow receiveShadow><meshStandardMaterial color="#aaa" roughness={0.3} metalness={0.2} side={THREE.DoubleSide} /></mesh>}
+                {previewGeo && !tetMesh && <mesh geometry={previewGeo} castShadow receiveShadow><meshStandardMaterial color="#aaa" roughness={0.3} metalness={0.2} side={THREE.DoubleSide} shadowSide={THREE.BackSide} /></mesh>}
                 {tetMesh && (
                     <>
                         {viewMode === 'volume' ? 

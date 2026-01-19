@@ -26,13 +26,13 @@ pub fn regularize(
     println!("Regularizer: Current Tris: {}, Target: {}", current_tri_count, target_tri_count);
 
     // 3. DECIMATE (Simplify) if too dense
-    if current_tri_count > (target_tri_count * 2) {
+    if current_tri_count > target_tri_count {
         println!("Regularizer: Decimating...");
-        let (d_verts, d_tris) = decimate_mesh(&verts, &tris, target_tri_count);
+        let (d_verts, d_tris) = decimate_mesh(&verts, &tris, target_tri_count, target_edge_len * 0.25);
         verts = d_verts;
         tris = d_tris;
     }
-    
+
     // 4. SUBDIVIDE if too sparse
     let max_len_sq = (target_edge_len * 1.5).powi(2);
     let max_iters = 3;
@@ -45,10 +45,13 @@ pub fn regularize(
         println!("Regularizer: Subdivision Pass {} - Split {} edges", i+1, split_count);
     }
 
-    // 5. Flatten
-    let flat_verts: Vec<f64> = verts.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
+    // 5. Prune Degenerates & Duplicates (Fixes "self-intersecting facets" errors)
+    let (p_verts, p_tris) = prune_mesh(&verts, &tris);
     
-    (flat_verts, tris)
+    // 6. Flatten
+    let flat_verts: Vec<f64> = p_verts.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
+    
+    (flat_verts, p_tris)
 }
 
 fn calculate_surface_area(verts: &[Vector3<f64>], indices: &[usize]) -> f64 {
@@ -62,7 +65,7 @@ fn calculate_surface_area(verts: &[Vector3<f64>], indices: &[usize]) -> f64 {
     area
 }
 
-fn decimate_mesh(verts: &[Vector3<f64>], indices: &[usize], target_count: usize) -> (Vec<Vector3<f64>>, Vec<usize>) {
+fn decimate_mesh(verts: &[Vector3<f64>], indices: &[usize], target_count: usize, target_error: f64) -> (Vec<Vector3<f64>>, Vec<usize>) {
     // meshopt expects f32, so we convert f64 -> f32
     let verts_f32: Vec<f32> = verts.iter().flat_map(|v| [v.x as f32, v.y as f32, v.z as f32]).collect();
     let indices_u32: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
@@ -75,11 +78,12 @@ fn decimate_mesh(verts: &[Vector3<f64>], indices: &[usize], target_count: usize)
     // Stride is 12 bytes (3 * f32)
     let adapter = VertexDataAdapter::new(vertex_data, 12, 0).expect("Failed to create vertex adapter");
 
-    let simplified_indices = meshopt::simplify_sloppy(
+    let simplified_indices = meshopt::simplify(
         &indices_u32, 
         &adapter, 
         target_index_count, 
-        1e-1, // Relaxed error threshold (allows geometry to move slightly to fix topology)
+        target_error as f32,
+        SimplifyOptions::Regularize,
         None
     );
     // -------------------
@@ -187,4 +191,51 @@ fn subdivide_long_edges(
     }
 
     (new_verts, new_indices, split_count)
+}
+
+
+
+/// Removes zero-area triangles and duplicate faces
+fn prune_mesh(verts: &[Vector3<f64>], indices: &[usize]) -> (Vec<Vector3<f64>>, Vec<usize>) {
+    let mut unique_faces = std::collections::HashSet::new();
+    let mut valid_indices = Vec::with_capacity(indices.len());
+    
+    for chunk in indices.chunks_exact(3) {
+        let (idx0, idx1, idx2) = (chunk[0], chunk[1], chunk[2]);
+        if idx0 == idx1 || idx1 == idx2 || idx2 == idx0 { continue; }
+
+        let v0 = verts[idx0];
+        let v1 = verts[idx1];
+        let v2 = verts[idx2];
+        
+        // Area Check (Cross product magnitude)
+        let area_sq = (v1 - v0).cross(&(v2 - v0)).norm_squared();
+        if area_sq < 1e-12 { continue; } // Too small
+
+        // Duplicate Check (Sorted Indices)
+        let mut key = [idx0, idx1, idx2];
+        key.sort_unstable();
+        
+        if unique_faces.insert(key) {
+            valid_indices.push(idx0);
+            valid_indices.push(idx1);
+            valid_indices.push(idx2);
+        }
+    }
+
+    // Re-compact vertices
+    let mut unique_map: HashMap<usize, usize> = HashMap::new();
+    let mut new_verts = Vec::new();
+    let mut final_indices = Vec::with_capacity(valid_indices.len());
+
+    for idx in valid_indices {
+        let new_idx = *unique_map.entry(idx).or_insert_with(|| {
+            let k = new_verts.len();
+            new_verts.push(verts[idx]);
+            k
+        });
+        final_indices.push(new_idx);
+    }
+    
+    (new_verts, final_indices)
 }
