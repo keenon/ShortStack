@@ -20,3 +20,5 @@ bug.py
 *.stl
 *.geo
 *.exe
+!gmsh_windows.exe
+*.msh*
