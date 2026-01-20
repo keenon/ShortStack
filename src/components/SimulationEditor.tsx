@@ -164,7 +164,13 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             part_index: partIndex
         };
 
-        const gmshResult: any = await invoke("run_gmsh_meshing", { req: feaRequest });
+        // Call the sidecar via Rust
+        console.log("Invoking run_gmsh_meshing with:", feaRequest);
+        const gmshResult: any = await invoke("run_gmsh_meshing", { req: feaRequest })
+            .catch(err => {
+                console.error("Backend Command Failed:", err);
+                throw new Error("Backend invoke failed: " + (typeof err === 'string' ? err : JSON.stringify(err)));
+            });
         
         setGmshMetrics({
             volume: gmshResult.volume,

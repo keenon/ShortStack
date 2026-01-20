@@ -5,7 +5,7 @@ pub mod mesh;
 pub mod tetgen;
 pub mod mesh_utils;
 pub mod regularizer;
-
+pub mod gmsh_interop;
 #[cfg(test)]
 mod tests;
-pub mod gmsh_interop;
+

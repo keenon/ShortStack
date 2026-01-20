@@ -432,7 +432,7 @@ export function computeAnalyzablePart(payload: any, manifoldModule: any, report:
         
         for (let i=0; i<components.length; i++) {
             const comp = components[i];
-            const vol = comp.getProperties().volume;
+            const vol = comp.volume();
             sortedComponents.push({ mesh: comp, volume: vol });
         }
         
@@ -447,12 +447,11 @@ export function computeAnalyzablePart(payload: any, manifoldModule: any, report:
         safeReport(`Processing Part ${reqIndex + 1}/${sortedComponents.length}...`, 0.95);
 
         const finalManifold = selected.mesh;
-        const props = finalManifold.getProperties();
         const mesh = finalManifold.getMesh();
 
         return {
-            volume: props.volume,
-            surfaceArea: props.surfaceArea,
+            volume: finalManifold.volume(),
+            surfaceArea: finalManifold.surfaceArea(),
             meshData: {
                 vertices: Array.from(mesh.vertProperties),
                 indices: Array.from(mesh.triVerts)
