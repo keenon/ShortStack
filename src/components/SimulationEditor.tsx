@@ -78,6 +78,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   const [bounds, setBounds] = useState<Bounds | null>(null);
 
   const [selectedLayerId, setSelectedLayerId] = useState<string>("");
+  const [partIndex, setPartIndex] = useState<number>(0); // For split parts
   
   const controlsRef = useRef<any>(null);
 
@@ -115,7 +116,11 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             allFootprints: footprints,
             stackup,
             params,
-            layerId: selectedLayerId // Pass the specific layer!
+            layerId: selectedLayerId,
+            partIndex: partIndex
+        }, (progress) => {
+            // Update loading screen with worker progress
+            setProcessMessage(`Frontend: ${progress.message} (${Math.round(progress.percent * 100)}%)`);
         });
 
         if (!manifoldResult || !manifoldResult.meshData) {
@@ -155,7 +160,8 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             stackup: stackup,
             params: params,
             quality: 0.0,
-            target_layer_id: selectedLayerId // NEW FIELD: Rust needs to know which layer to build
+            target_layer_id: selectedLayerId,
+            part_index: partIndex
         };
 
         const gmshResult: any = await invoke("run_gmsh_meshing", { req: feaRequest });
@@ -262,6 +268,18 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                     </option>
                 ))}
             </select>
+
+            <label style={{ fontSize: "0.85em", color: "#888", marginTop: "15px", display: "block" }}>Split Part Index</label>
+            <div style={{ display: "flex", gap: "10px", alignItems: "center", marginTop: "5px" }}>
+                <input 
+                    type="number" 
+                    min="0" step="1"
+                    value={partIndex} 
+                    onChange={(e) => setPartIndex(parseInt(e.target.value))}
+                    style={{ width: "60px", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
+                />
+                <span style={{ fontSize: "0.8em", color: "#666" }}>0 = Largest (Main)</span>
+            </div>
         </div>
 
         {/* Step 1: Geometry Verification */}

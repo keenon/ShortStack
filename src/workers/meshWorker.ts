@@ -479,7 +479,8 @@ self.onmessage = async (e: MessageEvent) => {
         }
 
         else if (type === "computeAnalyzablePart") {
-            const result = computeAnalyzablePart(payload, manifoldModule);
+            // Pass the report function so we get progress updates in the UI
+            const result = computeAnalyzablePart(payload, manifoldModule, report);
             self.postMessage({ id, type: "success", payload: result });
         }
 

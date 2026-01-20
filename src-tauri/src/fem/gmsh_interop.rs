@@ -14,6 +14,7 @@ pub struct FeaRequest {
     pub params: Vec<serde_json::Value>,
     pub quality: f64,
     pub target_layer_id: Option<String>,
+    pub part_index: Option<usize>,
 }
 
 #[derive(Serialize, Debug)]
@@ -154,6 +155,7 @@ fn parse_msh(path: &PathBuf) -> Result<TetMesh, String> {
 
 #[tauri::command]
 pub async fn run_gmsh_meshing(app_handle: tauri::AppHandle, req: FeaRequest) -> Result<FeaResult, String> {
+    println!("[Rust] Received Meshing Request for Layer: {:?}", req.target_layer_id);
     use tauri::Manager;
 
     // 1. Setup Paths
@@ -178,6 +180,7 @@ pub async fn run_gmsh_meshing(app_handle: tauri::AppHandle, req: FeaRequest) -> 
     let sidecar_command = app_handle.shell().sidecar("gmsh").map_err(|e| e.to_string())?;
     
     // 4. Execute Sidecar
+    println!("[Rust] Executing Gmsh Sidecar...");
     // args: path_to_geo, "-" (non-interactive)
     let output = sidecar_command
         .args(&[geo_path.to_str().unwrap(), "-"])
