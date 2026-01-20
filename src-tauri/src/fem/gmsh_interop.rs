@@ -9,10 +9,11 @@ use crate::fem::mesh::TetMesh; // Assuming this exists from previous context
 // Data structures matching your Typescript interfaces
 #[derive(Deserialize, Debug)]
 pub struct FeaRequest {
-    pub footprint: serde_json::Value, // We will parse specific fields manually or mapping strictly
+    pub footprint: serde_json::Value,
     pub stackup: Vec<serde_json::Value>,
     pub params: Vec<serde_json::Value>,
     pub quality: f64,
+    pub target_layer_id: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -191,10 +192,8 @@ pub async fn run_gmsh_meshing(app_handle: tauri::AppHandle, req: FeaRequest) -> 
     // 5. Parse Output
     let mesh = parse_msh(&msh_path)?;
 
-    // 6. Calculate Stats (mock calculation for example)
-    // Real calculation would involve iterating tetrahedrons
-    let volume = 100.0; 
-    let surface_area = 50.0;
+    // 6. Calculate Stats via Mesh Math
+    let (volume, surface_area) = mesh.compute_metrics();
 
     Ok(FeaResult {
         mesh,

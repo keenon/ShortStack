@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use nalgebra::{Vector3, Matrix3, SVector};
 use super::tet10::Tet10;
 
@@ -11,6 +12,64 @@ pub struct TetMesh {
 impl TetMesh {
     pub fn new(vertices: Vec<[f64; 3]>, indices: Vec<[usize; 10]>) -> Self {
         Self { vertices, indices }
+    }
+
+    /// Computes total Volume and Surface Area (of boundary faces)
+    pub fn compute_metrics(&self) -> (f64, f64) {
+        let mut total_volume = 0.0;
+        let mut face_counts: HashMap<[usize; 3], usize> = HashMap::new();
+
+        for element_indices in &self.indices {
+            // 1. Calculate Volume
+            // We use the 4 corner nodes of the 10-node tet (indices 0,1,2,3) for linear approximation volume
+            // or we could use higher order integration, but linear is usually sufficient for general metrics.
+            let p0 = Vector3::from(self.vertices[element_indices[0]]);
+            let p1 = Vector3::from(self.vertices[element_indices[1]]);
+            let p2 = Vector3::from(self.vertices[element_indices[2]]);
+            let p3 = Vector3::from(self.vertices[element_indices[3]]);
+
+            let v1 = p1 - p0;
+            let v2 = p2 - p0;
+            let v3 = p3 - p0;
+
+            // Volume = 1/6 * |(p1-p0) . ((p2-p0) x (p3-p0))|
+            total_volume += (v1.dot(&v2.cross(&v3))).abs() / 6.0;
+
+            // 2. Tally Faces for Surface Area
+            // The 4 faces of a tet defined by corners: (0,2,1), (0,1,3), (1,2,3), (2,0,3)
+            // We sort indices to identify unique faces regardless of winding
+            let faces = [
+                [element_indices[0], element_indices[2], element_indices[1]],
+                [element_indices[0], element_indices[1], element_indices[3]],
+                [element_indices[1], element_indices[2], element_indices[3]],
+                [element_indices[2], element_indices[0], element_indices[3]],
+            ];
+
+            for f in faces {
+                let mut key = f;
+                key.sort_unstable(); // Sort to make key unique
+                *face_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        let mut total_surface_area = 0.0;
+
+        for (face_indices, count) in face_counts {
+            // A count of 1 means the face is on the boundary (shared by only 1 tet)
+            if count == 1 {
+                let p0 = Vector3::from(self.vertices[face_indices[0]]);
+                let p1 = Vector3::from(self.vertices[face_indices[1]]);
+                let p2 = Vector3::from(self.vertices[face_indices[2]]);
+
+                let v1 = p1 - p0;
+                let v2 = p2 - p0;
+                
+                // Area = 0.5 * |cross_product|
+                total_surface_area += 0.5 * v1.cross(&v2).norm();
+            }
+        }
+
+        (total_volume, total_surface_area)
     }
 
     /// Checks the quality of all elements in the mesh.

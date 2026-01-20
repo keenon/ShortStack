@@ -194,6 +194,13 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         // Call the sidecar via Rust
         const result: any = await invoke("run_gmsh_meshing", { req: feaRequest });
         
+        // Update metrics with backend result
+        setGmshMetrics({
+            volume: result.volume,
+            surfaceArea: result.surface_area,
+            computedAt: Date.now()
+        });
+
         // Result.mesh contains { vertices: [[x,y,z]...], indices: [[n1...n10]...] }
         // We need to flatten vertices for ThreeJS
         const flatVerts = result.mesh.vertices.flat();
