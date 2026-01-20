@@ -408,7 +408,7 @@ function App() {
       <div className="container welcome-screen">
     <div className="welcome-content"> {/* Added a wrapper div */}
       <h1>ShortStack <span className="version-tag">v{version}</span></h1>
-      <div className="row">
+      <div className="column">
         <button className="premium-btn" onClick={createProject}> New Project</button>
         <button className="premium-btn" onClick={loadProject}>Load Project</button>
       </div>

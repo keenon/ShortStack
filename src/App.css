@@ -28,15 +28,25 @@ body {
   width: 100%;
 }
 
+@font-face {
+  font-family: "Montserrat";
+  src: url("./assets/fonts/Montserrat-VariableFont_wght.ttf") format("truetype");
+  font-weight: 100 900; /* full range */
+  font-style: normal;
+  font-display: swap;
+}
+
 /* Update the existing .welcome-screen class */
 .welcome-screen {
-  position: relative; /* Required for the pseudo-element to anchor */
-  display: flex;      /* Ensure flex is active for centering */
+  position: relative;
+  display: flex;
+  flex-direction: row;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end; /* Changed from center to flex-end */
+  padding-right: 15%;         /* Adds space from the right edge */
   text-align: center;
-  overflow: hidden;   /* Prevents the background from bleeding out */
-  background-color: #1a1a1a; /* Fallback color */
+  overflow: hidden;
+  background-color: #1a1a1a;
 }
 
 /* Create the background layer */
@@ -47,19 +57,11 @@ body {
   left: 0;
   width: 100%;
   height: 100%;
-  
-  /* Path to your image */
-  background-image: url("./assets/welcome_background.png"); 
-  
-  /* Standard background scaling */
+  background-image: url("./assets/background.png"); 
   background-size: cover;
-  background-position: center;
+  background-position: left center; /* Changed from center to left center */
   background-repeat: no-repeat;
-  
-  /* ADJUST OPACITY HERE (0.0 to 1.0) */
-  opacity: 0.5; 
-  
-  /* Keep it behind the content */
+  opacity: 1; 
   z-index: 0;
 }
 
@@ -69,8 +71,8 @@ body {
   inset: 0;
   background: radial-gradient(
     circle, 
-    rgba(0,0,0,0.2) 0%,   /* Center is slightly clearer */
-    rgba(0,0,0,0.8) 100%  /* Edges fade to black */
+    rgba(0, 0, 0, 0) 0%,   /* Center is slightly clearer */
+    rgba(0, 0, 0, 0.411) 100%  /* Edges fade to black */
   );
   z-index: 1;
 }
@@ -91,23 +93,72 @@ body {
 .welcome-content {
   position: relative;
   z-index: 2;
-  padding: 40px 60px;
-  border-radius: 3rem;
-  /* Glassmorphism effect: blurs the busy center image behind the UI */
-  backdrop-filter: blur(12px) brightness(0.8);
-  border: 1px solid rgba(108, 108, 108, 0.3);
-  box-shadow: 0 25px 50px -12px rgba(211, 145, 3, 0.445);
+  padding: 30px 25px 80px 25px;
+  border-radius: 1.5rem;
+  backdrop-filter: blur(2px) brightness(0.95);
+  border: 1px solid rgba(255, 255, 255, 0.162); /* Lightened for better glass look */
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); /* Darker shadow for depth */
+  
+  /* If you want the text inside the box to align left: */
+  text-align: left; 
 }
 
 .welcome-screen h1 {
+  font-family: "Montserrat", 'Roboto', sans-serif;
   font-size: 3.5rem;
-  font-weight: 800;
+  font-weight: 200;
   margin-bottom: 2rem;
   letter-spacing: -1px;
-  background: linear-gradient(to bottom, #fff, #888);
+  background-clip: text;
   -webkit-background-clip: text;
-  /* -webkit-text-fill-color: transparent; */
-  filter: drop-shadow(0 2px 10px rgba(0,0,0,0.5));
+  text-align: center;
+}
+
+/* --- RESPONSIVE MOBILE OVERRIDES --- */
+@media (max-width: 700px) {
+  .welcome-screen {
+    /* Reset from right-aligned to centered */
+    justify-content: center;
+    padding-right: 0;
+    /* Add a little side padding so the box doesn't touch screen edges */
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+
+  .welcome-content {
+    /* Swap transparency for a solid dark gray to cover the busy background */
+    background-color: #1a1a1ae4; 
+    
+    /* Optional: increase opacity or remove blur since it's now solid */
+    backdrop-filter: none; 
+    
+    /* Ensure the box doesn't get too wide on small screens */
+    width: 80%;
+    max-width: 350px;
+    
+    /* Adjust padding for tighter screens */
+    padding: 30px 20px 50px 20px;
+    
+    /* Optional: make border slightly more visible on the dark background */
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  }
+
+  /* Shrink header text slightly so it doesn't wrap awkwardly */
+  .welcome-screen h1 {
+    font-size: 2.5rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .version-tag {
+    font-size: 1.4rem;
+  }
+
+  /* Make buttons slightly wider to be easier to tap on mobile/touch */
+  .premium-btn {
+    width: 80%;
+    max-width: 250px;
+  }
 }
 
 .version-tag {
@@ -121,25 +172,29 @@ body {
 
 .premium-btn {
   position: relative;
-  padding: 16px 32px;
-  background: rgba(67, 71, 209, 0.333);
-  border: 1px solid rgba(127, 133, 255, 0.217);
+  width: 250px;
+  margin:auto;
+  padding: 16px 20px;
   color: white;
-  font-size: large;
-  font-family:'Roboto', sans-serif;
-  font-weight: 500;
+  font-size: medium;
+  font-family:'Montserrat', 'Roboto', sans-serif;
+  font-weight: 300;
   border-radius: 10px;
   overflow: hidden;
   transition: all 0.3s cubic-bezier(0.23, 1, 0.32, 1);
   cursor: pointer;
+  background: rgba(255, 255, 255, 0.05); /* Darker, more transparent base */
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(5px);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
 }
 
 .premium-btn:hover {
-  background: rgba(49, 55, 98, 0.525);
-  box-shadow: 0 0 20px rgba(94, 94, 94, 0.5), 
-              inset 0 0 10px rgba(152, 152, 152, 0.2);
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: none; /* Remove the outer glow entirely */
+  border-color: #ffa600; /* Use your accent color from the version tag for the border */
   transform: translateY(-2px);
-  border-color: rgba(255, 255, 255, 0.053);
 }
 
 /* Subtle "shine" effect on hover */
@@ -150,9 +205,9 @@ body {
   left: -60%;
   width: 20%;
   height: 200%;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05); /* Lowered from 0.1 to 0.05 */
   transform: rotate(30deg);
-  transition: all 0.6s;
+  transition: all 1s; /* Slowed down slightly for a smoother feel */
 }
 
 .premium-btn:hover::after {
@@ -326,6 +381,13 @@ button.danger:hover {
   gap: 10px;
   justify-content: center;
   gap: 20px;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
 }
 
 /* Result Preview Text */

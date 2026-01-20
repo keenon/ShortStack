@@ -161,6 +161,7 @@ function LoadingOverlay({ message }: { message: string }) {
 
 export default function SimulationEditor() {
   const [tetMesh, setTetMesh] = useState<any | null>(null);
+  const [repairedMesh, setRepairedMesh] = useState<THREE.BufferGeometry | null>(null);
   const [previewGeo, setPreviewGeo] = useState<THREE.BufferGeometry | null>(null);
   const [isMeshing, setIsMeshing] = useState(false);
   const [shrink, setShrink] = useState(0.8);
@@ -209,6 +210,12 @@ export default function SimulationEditor() {
             if(y < min.y) min.y = y; if(y > max.y) max.y = y;
             if(z < min.z) min.z = z; if(z > max.z) max.z = z;
         }
+    } else if (repairedMesh) {
+        repairedMesh.computeBoundingBox();
+        if (repairedMesh.boundingBox) {
+            min.copy(repairedMesh.boundingBox.min);
+            max.copy(repairedMesh.boundingBox.max);
+        }
     } else if (previewGeo) {
         previewGeo.computeBoundingBox();
         if (previewGeo.boundingBox) {
@@ -241,11 +248,39 @@ export default function SimulationEditor() {
         const geometry = loader.parse(content.buffer);
         geometry.computeVertexNormals();
         setPreviewGeo(geometry);
+        setRepairedMesh(null);
         setTetMesh(null); 
       }
     } catch (err) {
       console.error(err);
       alert("Could not load file.");
+    }
+  };
+
+  const handleRepairPreview = async () => {
+    if (!previewGeo) return;
+    setIsMeshing(true);
+    try {
+        const positions = Array.from(previewGeo.attributes.position.array);
+        // Invoke Gmsh via Rust
+        const result: any = await invoke("cmd_repair_mesh", {
+            vertices: positions,
+            targetLen: enableRegularization ? maxEdgeLen : 0.0
+        });
+
+        // Result contains vertices [x,y,z, x,y,z...]
+        // Reconstruct BufferGeometry
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(result.vertices, 3));
+        geometry.computeVertexNormals();
+        
+        setRepairedMesh(geometry);
+        setTetMesh(null); // Clear volume mesh if we have a new surface
+    } catch (e) {
+        console.error(e);
+        alert("Gmsh Repair Failed: " + e);
+    } finally {
+        setIsMeshing(false);
     }
   };
 
@@ -343,6 +378,12 @@ export default function SimulationEditor() {
             </div>
         </div>
 
+        <div style={{ display: "flex", gap: "10px" }}>
+            <button onClick={handleRepairPreview} disabled={!previewGeo || isMeshing} style={{ flex: 1, padding: "10px", fontSize: "0.9em", background: "#444", border: "1px solid #666", color: "white", cursor: "pointer", borderRadius: "4px" }}>
+                👁 Preview Fixed
+            </button>
+        </div>
+
         <button className="primary" onClick={handleGenerate} disabled={!previewGeo || isMeshing} style={{ width: "100%", padding: "12px" }}>
           {isMeshing ? "Generating..." : "Generate Tetrahedra"}
         </button>
@@ -420,7 +461,25 @@ export default function SimulationEditor() {
             <OrbitControls ref={controlsRef} makeDefault autoRotate={autoRotate} autoRotateSpeed={0.5} onStart={handleUserInteraction} onEnd={handleUserInteraction} />
 
             <group position={modelPosition}>
-                {previewGeo && !tetMesh && <mesh geometry={previewGeo} castShadow receiveShadow><meshStandardMaterial color="#aaa" roughness={0.3} metalness={0.2} side={THREE.DoubleSide} shadowSide={THREE.BackSide} /></mesh>}
+                {/* Original Mesh (Gray) - Only show if no repair and no tet mesh */}
+                {previewGeo && !tetMesh && !repairedMesh && (
+                    <mesh geometry={previewGeo} castShadow receiveShadow>
+                        <meshStandardMaterial color="#aaa" roughness={0.3} metalness={0.2} side={THREE.DoubleSide} shadowSide={THREE.BackSide} />
+                    </mesh>
+                )}
+
+                {/* Repaired Mesh (Cyan with Wireframe) */}
+                {repairedMesh && !tetMesh && (
+                    <group>
+                        <mesh geometry={repairedMesh} castShadow receiveShadow>
+                            <meshStandardMaterial color="#00cccc" roughness={0.5} metalness={0.1} side={THREE.DoubleSide} polygonOffset polygonOffsetFactor={1} polygonOffsetUnits={1} />
+                        </mesh>
+                        <mesh geometry={repairedMesh}>
+                            <meshBasicMaterial color="#00ffff" wireframe />
+                        </mesh>
+                    </group>
+                )}
+
                 {tetMesh && (
                     <>
                         {viewMode === 'volume' ? 
