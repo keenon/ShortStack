@@ -1,0 +1,23 @@
+{
+  "default": null,
+  "permission": [
+    {
+      "identifier": "allow-gmsh",
+      "description": "Allow running the gmsh CLI as a sidecar",
+      "commands": {
+        "allow": [
+          "shell:execute"
+        ],
+        "deny": []
+      },
+      "scope": {
+        "allow": [
+          {
+            "sidecar": "gmsh"
+          }
+        ],
+        "deny": []
+      }
+    }
+  ]
+}

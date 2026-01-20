@@ -8,3 +8,4 @@ pub mod regularizer;
 
 #[cfg(test)]
 mod tests;
+pub mod gmsh_interop;

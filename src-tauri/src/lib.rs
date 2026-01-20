@@ -1180,7 +1180,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![export_layer_files, compute_smart_split, get_debug_eval, import_mesh, cmd_tetrahedralize, cmd_repair_mesh])
+        .invoke_handler(tauri::generate_handler![
+            crate::fem::gmsh_interop::run_gmsh_meshing, export_layer_files, compute_smart_split, get_debug_eval, import_mesh, cmd_tetrahedralize, cmd_repair_mesh])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -12,6 +12,7 @@
     "fs:allow-create",
     "dialog:default",
     "updater:default",
-    "process:allow-restart" 
+    "process:allow-restart",
+    "allow-gmsh"
   ]
 }

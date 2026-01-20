@@ -480,7 +480,12 @@ function App() {
 
         {activeTab === "simulation" && (
           <div className="tab-pane active">
-            <SimulationEditor />
+            <SimulationEditor
+              footprints={footprints}
+              fabPlans={fabPlans}
+              stackup={stackup}
+              params={params}
+            />
           </div>
         )}
       </main>
