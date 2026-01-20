@@ -73,6 +73,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   
   // Visual State
   const [viewMode, setViewMode] = useState<'boundary' | 'mesh'>('boundary');
+  const [visualSource, setVisualSource] = useState<'manifold' | 'gmsh'>('manifold');
   const [layerClip, setLayerClip] = useState<number>(1.0); // 0.0 to 1.0
   const [shrink, setShrink] = useState(0.9);
   const [bounds, setBounds] = useState<Bounds | null>(null);
@@ -165,8 +166,8 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         };
 
         // Call the sidecar via Rust
-        console.log("Invoking run_gmsh_meshing with:", feaRequest);
-        const gmshResult: any = await invoke("run_gmsh_meshing", { req: feaRequest })
+        console.log("Invoking run_gmsh_pipeline with:", feaRequest);
+        const gmshResult: any = await invoke("run_gmsh_pipeline", { req: feaRequest })
             .catch(err => {
                 console.error("Backend Command Failed:", err);
                 throw new Error("Backend invoke failed: " + (typeof err === 'string' ? err : JSON.stringify(err)));
@@ -178,8 +179,16 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             computedAt: Date.now()
         });
 
+        // Process Gmsh Mesh for Comparison
+        if (gmshResult.mesh && gmshResult.mesh.vertices) {
+            const flatVerts = gmshResult.mesh.vertices.flat();
+            const tetIndices = gmshResult.mesh.indices.map((t: number[]) => [t[0], t[1], t[2], t[3]]);
+            setTetMesh({ vertices: flatVerts, indices: tetIndices });
+        }
+
+        // Default to Manifold view initially
+        setVisualSource('manifold');
         setViewMode('boundary');
-        setTetMesh(null);
 
     } catch (e) {
         console.error(e);
@@ -204,7 +213,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         };
 
         // Call the sidecar via Rust
-        const result: any = await invoke("run_gmsh_meshing", { req: feaRequest });
+        const result: any = await invoke("run_gmsh_pipeline", { req: feaRequest });
         
         // Update metrics with backend result
         setGmshMetrics({
@@ -291,6 +300,22 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         {/* Step 1: Geometry Verification */}
         <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
             <h4 style={{ margin: "0 0 10px 0", color: "#ccc" }}>1. Geometry & Verification</h4>
+            
+            {/* Source Toggle */}
+            <div style={{ display: 'flex', marginBottom: '15px', background: '#111', padding: '2px', borderRadius: '4px' }}>
+                <button 
+                    onClick={() => setVisualSource('manifold')}
+                    style={{ flex: 1, padding: '6px', border: 'none', background: visualSource === 'manifold' ? '#646cff' : 'transparent', color: 'white', borderRadius: '3px', cursor: 'pointer', fontSize: '0.85em' }}
+                >
+                    Frontend (Manifold)
+                </button>
+                <button 
+                    onClick={() => setVisualSource('gmsh')}
+                    style={{ flex: 1, padding: '6px', border: 'none', background: visualSource === 'gmsh' ? '#d97706' : 'transparent', color: 'white', borderRadius: '3px', cursor: 'pointer', fontSize: '0.85em' }}
+                >
+                    Backend (Gmsh)
+                </button>
+            </div>
             <button className="secondary" onClick={handleVerifyGeometry} style={{ width: "100%", padding: "10px" }}>
                 Compute & Verify Geometry
             </button>
@@ -412,7 +437,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
 
             <group position={[0,0,0]}> {/* Center geometry if needed */}
                 {/* 1. Boundary View (Manifold Output) */}
-                {viewMode === 'boundary' && previewGeo && (
+                {visualSource === 'manifold' && previewGeo && (
                     <mesh geometry={previewGeo}>
                         <meshStandardMaterial 
                             color="#aaa" 
@@ -431,13 +456,13 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                 )}
 
                 {/* 2. Tetrahedral Mesh View (Gmsh Output) */}
-                {viewMode === 'mesh' && tetMesh && bounds && (
+                {(visualSource === 'gmsh' || viewMode === 'mesh') && tetMesh && bounds && (
                     <TetrahedralRenderer 
                         mesh={tetMesh} 
-                        shrinkFactor={shrink} 
-                        color="#ff6b6b" 
-                        minZ={bounds.min.z} // Assuming Z is up in geometry
-                        // Calculate clip height based on bounds
+                        // If checking verification (gmsh source), use solid view (shrink=1). If generating mesh, use slider.
+                        shrinkFactor={visualSource === 'gmsh' && viewMode === 'boundary' ? 1.0 : shrink} 
+                        color={visualSource === 'gmsh' ? "#d97706" : "#ff6b6b"}
+                        minZ={bounds.min.z}
                         clipZ={bounds.min.z + (bounds.max.z - bounds.min.z) * layerClip} 
                     />
                 )}

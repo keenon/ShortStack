@@ -1,5 +1,6 @@
 // src/components/FootprintLibrary.tsx
 import { useState, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Footprint, Parameter, StackupLayer, MeshAsset } from "../types";
 import FootprintEditor from "./FootprintEditor";
@@ -104,7 +105,20 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
     <div className="editor-content">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <h2 style={{ margin: 0 }}>Footprint Library</h2>
-        <button onClick={addFootprint}>+ New Footprint</button>
+        <div style={{ display: 'flex', gap: '10px' }}>
+            <button onClick={async () => {
+                try {
+                    console.log("Invoking simple_ping...");
+                    const res = await invoke("simple_ping", { val: "Test from UI" });
+                    console.log("Ping success:", res);
+                    alert("Backend Alive: " + res);
+                } catch(e) {
+                    console.error("Ping failed:", e);
+                    alert("Ping Failed: " + String(e));
+                }
+            }} style={{ backgroundColor: '#d97706' }}>⚠️ Test Backend</button>
+            <button onClick={addFootprint}>+ New Footprint</button>
+        </div>
       </div>
 
       <table className="unified-editor-table">

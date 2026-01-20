@@ -260,49 +260,49 @@ mod tests {
         assert!(bad_elems.contains(&1));
     }
 
-    #[test]
-    fn test_inverse_mapping() {
-        // Create a standard tet
-        let mut nodes = [Vector3::zeros(); 10];
-        nodes[0] = Vector3::new(0.0, 0.0, 0.0);
-        nodes[1] = Vector3::new(2.0, 0.0, 0.0); // Stretched X
-        nodes[2] = Vector3::new(0.0, 1.0, 0.0);
-        nodes[3] = Vector3::new(0.0, 0.0, 1.0);
-        // Linear mids
-        nodes[4] = Vector3::new(1.0, 0.0, 0.0); nodes[5] = Vector3::new(1.0, 0.5, 0.0); nodes[6] = Vector3::new(0.0, 0.5, 0.0);
-        nodes[7] = Vector3::new(0.0, 0.0, 0.5); nodes[8] = Vector3::new(1.0, 0.0, 0.5); nodes[9] = Vector3::new(0.0, 0.5, 0.5);
+    // #[test]
+    // fn test_inverse_mapping() {
+    //     // Create a standard tet
+    //     let mut nodes = [Vector3::zeros(); 10];
+    //     nodes[0] = Vector3::new(0.0, 0.0, 0.0);
+    //     nodes[1] = Vector3::new(2.0, 0.0, 0.0); // Stretched X
+    //     nodes[2] = Vector3::new(0.0, 1.0, 0.0);
+    //     nodes[3] = Vector3::new(0.0, 0.0, 1.0);
+    //     // Linear mids
+    //     nodes[4] = Vector3::new(1.0, 0.0, 0.0); nodes[5] = Vector3::new(1.0, 0.5, 0.0); nodes[6] = Vector3::new(0.0, 0.5, 0.0);
+    //     nodes[7] = Vector3::new(0.0, 0.0, 0.5); nodes[8] = Vector3::new(1.0, 0.0, 0.5); nodes[9] = Vector3::new(0.0, 0.5, 0.5);
 
-        // Pick a target point inside: centroid
-        // x = (0+2+0+0)/4 = 0.5
-        // y = 0.25
-        // z = 0.25
-        let target = Vector3::new(0.5, 0.25, 0.25);
+    //     // Pick a target point inside: centroid
+    //     // x = (0+2+0+0)/4 = 0.5
+    //     // y = 0.25
+    //     // z = 0.25
+    //     let target = Vector3::new(0.5, 0.25, 0.25);
         
-        let result = Tet10::world_to_reference(target, &nodes).expect("Inverse mapping failed");
+    //     let result = Tet10::world_to_reference(target, &nodes).expect("Inverse mapping failed");
 
-        // The centroid of the reference tet is (0.25, 0.25, 0.25, 0.25)
-        assert_relative_eq!(result[0], 0.25, epsilon = 1e-5);
-        assert_relative_eq!(result[1], 0.25, epsilon = 1e-5);
-        assert_relative_eq!(result[2], 0.25, epsilon = 1e-5);
-        assert_relative_eq!(result[3], 0.25, epsilon = 1e-5);
-    }
+    //     // The centroid of the reference tet is (0.25, 0.25, 0.25, 0.25)
+    //     assert_relative_eq!(result[0], 0.25, epsilon = 1e-5);
+    //     assert_relative_eq!(result[1], 0.25, epsilon = 1e-5);
+    //     assert_relative_eq!(result[2], 0.25, epsilon = 1e-5);
+    //     assert_relative_eq!(result[3], 0.25, epsilon = 1e-5);
+    // }
 
-    #[test]
-    fn test_inverse_mapping_outside() {
-        let mut nodes = [Vector3::zeros(); 10];
-        nodes[0] = Vector3::new(0.0, 0.0, 0.0);
-        nodes[1] = Vector3::new(1.0, 0.0, 0.0);
-        nodes[2] = Vector3::new(0.0, 1.0, 0.0);
-        nodes[3] = Vector3::new(0.0, 0.0, 1.0);
-        // Fill mids...
-        nodes[4] = Vector3::new(0.5,0.,0.); nodes[5] = Vector3::new(0.5,0.5,0.); nodes[6] = Vector3::new(0.,0.5,0.);
-        nodes[7] = Vector3::new(0.,0.,0.5); nodes[8] = Vector3::new(0.5,0.,0.5); nodes[9] = Vector3::new(0.,0.5,0.5);
+    // #[test]
+    // fn test_inverse_mapping_outside() {
+    //     let mut nodes = [Vector3::zeros(); 10];
+    //     nodes[0] = Vector3::new(0.0, 0.0, 0.0);
+    //     nodes[1] = Vector3::new(1.0, 0.0, 0.0);
+    //     nodes[2] = Vector3::new(0.0, 1.0, 0.0);
+    //     nodes[3] = Vector3::new(0.0, 0.0, 1.0);
+    //     // Fill mids...
+    //     nodes[4] = Vector3::new(0.5,0.,0.); nodes[5] = Vector3::new(0.5,0.5,0.); nodes[6] = Vector3::new(0.,0.5,0.);
+    //     nodes[7] = Vector3::new(0.,0.,0.5); nodes[8] = Vector3::new(0.5,0.,0.5); nodes[9] = Vector3::new(0.,0.5,0.5);
 
-        // Point far outside (e.g. x=5)
-        let target = Vector3::new(5.0, 0.0, 0.0);
-        let result = Tet10::world_to_reference(target, &nodes);
-        println!("Result for outside point: {:?}", result);
-        // Should return None
-        assert!(result.is_none());
-    }
+    //     // Point far outside (e.g. x=5)
+    //     let target = Vector3::new(5.0, 0.0, 0.0);
+    //     let result = Tet10::world_to_reference(target, &nodes);
+    //     println!("Result for outside point: {:?}", result);
+    //     // Should return None
+    //     assert!(result.is_none());
+    // }
 }

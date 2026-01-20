@@ -13,7 +13,6 @@
     "dialog:default",
     "updater:default",
     "process:allow-restart",
-    "allow-gmsh",
     "shell:allow-execute"
   ]
 }
