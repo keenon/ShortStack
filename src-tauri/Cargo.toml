@@ -7,6 +7,7 @@ edition = "2024"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+cc = "1.2.53"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -23,6 +24,11 @@ cmaes = "0.2"
 nalgebra = "0.34.1"
 rayon = "1.8"
 uuid = { version = "1", features = ["v4"] }
+faer = "0.23.2"
+approx = "0.5.1"
+meshopt = "0.6.2"
+bytemuck = "1.24"
+
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

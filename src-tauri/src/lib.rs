@@ -18,7 +18,75 @@ use csgrs::sketch::Sketch;
 // use csgrs::mesh::Mesh; // Removed unused import
 use csgrs::traits::CSG;
 
-use crate::optimizer::debug_split_eval; 
+use crate::optimizer::debug_split_eval;
+
+mod fem; // Assuming the previous code is in a module named fem
+use fem::{tet10::Tet10, quadrature::TetQuadrature, mesh::TetMesh, tetgen::cmd_tetrahedralize, tetgen::cmd_repair_mesh};
+
+use nalgebra::Vector3;
+
+// A struct to send to the frontend
+#[derive(serde::Serialize)]
+struct TetVizData {
+    nodes: Vec<[f64; 3]>,
+    integration_points: Vec<[f64; 3]>, // In global coords
+}
+
+#[tauri::command]
+fn get_tet_visualization() -> TetVizData {
+    // 1. Define a distorted tet for visualization interest
+    let mut node_vecs = [Vector3::zeros(); 10];
+    node_vecs[0] = Vector3::new(0.0, 0.0, 0.0);
+    node_vecs[1] = Vector3::new(2.0, 0.2, 0.0);
+    node_vecs[2] = Vector3::new(0.1, 1.5, 0.1);
+    node_vecs[3] = Vector3::new(0.0, 0.1, 1.8);
+    // Calculate midside nodes (linear average)
+    node_vecs[4] = (node_vecs[0] + node_vecs[1]) * 0.5;
+    node_vecs[5] = (node_vecs[1] + node_vecs[2]) * 0.5;
+    node_vecs[6] = (node_vecs[2] + node_vecs[0]) * 0.5;
+    node_vecs[7] = (node_vecs[0] + node_vecs[3]) * 0.5;
+    node_vecs[8] = (node_vecs[1] + node_vecs[3]) * 0.5;
+    node_vecs[9] = (node_vecs[2] + node_vecs[3]) * 0.5;
+
+    // 2. Calculate integration points in Global Space
+    let rule = TetQuadrature::get_rule(5);
+    let mut global_ips = Vec::new();
+
+    for ip in rule {
+        let n = Tet10::shape_functions(&ip.xi);
+        let mut pos = Vector3::zeros();
+        for i in 0..10 {
+            pos += node_vecs[i] * n[i];
+        }
+        global_ips.push([pos.x, pos.y, pos.z]);
+    }
+
+    // Convert nodes to array for JSON
+    let nodes_array = node_vecs.iter().map(|v| [v.x, v.y, v.z]).collect();
+
+    TetVizData {
+        nodes: nodes_array,
+        integration_points: global_ips,
+    }
+}
+
+#[tauri::command]
+fn import_mesh(vertices: Vec<[f64; 3]>, indices: Vec<[usize; 10]>) -> Result<String, String> {
+    let mesh = TetMesh::new(vertices, indices);
+    
+    // Check quality (threshold 1e-6 for positive volume)
+    let bad_elems = mesh.check_jacobian_quality(1e-6);
+    
+    if bad_elems.is_empty() {
+        Ok(format!("Mesh imported successfully. {} elements.", mesh.indices.len()))
+    } else {
+        Err(format!(
+            "Mesh quality check failed. {} elements have negative/zero Jacobian. IDs: {:?}", 
+            bad_elems.len(), 
+            &bad_elems[0..std::cmp::min(bad_elems.len(), 10)]
+        ))
+    }
+}
 
 #[derive(Debug, serde::Deserialize, Clone)]
 struct ExportVec2 {
@@ -1112,7 +1180,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![export_layer_files, compute_smart_split, get_debug_eval ])
+        .invoke_handler(tauri::generate_handler![
+            crate::fem::gmsh_interop::run_gmsh_meshing, export_layer_files, compute_smart_split, get_debug_eval, import_mesh, cmd_tetrahedralize, cmd_repair_mesh])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
