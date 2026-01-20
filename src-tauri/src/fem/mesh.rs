@@ -1,6 +1,6 @@
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use nalgebra::{Vector3};
 use super::tet10::Tet10;
 
@@ -110,5 +110,111 @@ impl TetMesh {
         }
 
         bad_elements
+    }
+
+    /// Filters the mesh to keep only the Nth largest connected component.
+    /// Returns true if successful, false if index out of bounds.
+    pub fn filter_components(&mut self, rank: usize) -> bool {
+        if self.indices.is_empty() { return false; }
+
+        // 1. Build Adjacency Graph (Tet -> Neighbors)
+        // Two tets are neighbors if they share a face (3 nodes)
+        let mut face_to_elems: HashMap<[usize; 3], Vec<usize>> = HashMap::new();
+        
+        for (idx, nodes) in self.indices.iter().enumerate() {
+            let faces = [
+                [nodes[0], nodes[1], nodes[2]],
+                [nodes[0], nodes[3], nodes[1]],
+                [nodes[1], nodes[3], nodes[2]],
+                [nodes[2], nodes[3], nodes[0]],
+            ];
+            for f in faces {
+                let mut key = f;
+                key.sort_unstable();
+                face_to_elems.entry(key).or_default().push(idx);
+            }
+        }
+
+        // Build Adjacency List
+        let mut adj: Vec<Vec<usize>> = vec![vec![]; self.indices.len()];
+        for elems in face_to_elems.values() {
+            if elems.len() == 2 {
+                adj[elems[0]].push(elems[1]);
+                adj[elems[1]].push(elems[0]);
+            }
+        }
+
+        // 2. Find Connected Components (BFS)
+        let mut visited = HashSet::new();
+        let mut components: Vec<Vec<usize>> = Vec::new();
+
+        for i in 0..self.indices.len() {
+            if !visited.contains(&i) {
+                let mut component = Vec::new();
+                let mut queue = VecDeque::new();
+                queue.push_back(i);
+                visited.insert(i);
+
+                while let Some(curr) = queue.pop_front() {
+                    component.push(curr);
+                    for &neighbor in &adj[curr] {
+                        if visited.insert(neighbor) {
+                            queue.push_back(neighbor);
+                        }
+                    }
+                }
+                components.push(component);
+            }
+        }
+
+        // 3. Calculate Volume for each component to sort them
+        let mut comp_stats: Vec<(usize, f64)> = components.iter().enumerate().map(|(i, indices)| {
+            let mut vol = 0.0;
+            for &idx in indices {
+                let el = &self.indices[idx];
+                 let p0 = Vector3::from(self.vertices[el[0]]);
+                 let p1 = Vector3::from(self.vertices[el[1]]);
+                 let p2 = Vector3::from(self.vertices[el[2]]);
+                 let p3 = Vector3::from(self.vertices[el[3]]);
+                 vol += ((p1 - p0).dot(&(p2 - p0).cross(&(p3 - p0)))).abs() / 6.0;
+            }
+            (i, vol)
+        }).collect();
+
+        // Sort Descending by Volume
+        comp_stats.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        if rank >= comp_stats.len() {
+            return false; 
+        }
+
+        // 4. Rebuild Mesh with only selected component
+        let selected_comp_idx = comp_stats[rank].0;
+        let selected_elem_indices = &components[selected_comp_idx];
+
+        let mut new_indices = Vec::new();
+        let mut new_vertices = Vec::new();
+        let mut old_to_new_vert = HashMap::new();
+
+        for &old_elem_idx in selected_elem_indices {
+            let old_nodes = self.indices[old_elem_idx];
+            let mut new_nodes = [0usize; 10];
+            
+            for (k, &old_v_idx) in old_nodes.iter().enumerate() {
+                if let Some(&mapped) = old_to_new_vert.get(&old_v_idx) {
+                    new_nodes[k] = mapped;
+                } else {
+                    let new_id = new_vertices.len();
+                    new_vertices.push(self.vertices[old_v_idx]);
+                    old_to_new_vert.insert(old_v_idx, new_id);
+                    new_nodes[k] = new_id;
+                }
+            }
+            new_indices.push(new_nodes);
+        }
+
+        self.vertices = new_vertices;
+        self.indices = new_indices;
+        true
     }
 }

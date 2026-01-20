@@ -297,7 +297,42 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
                     script.push_str(&format!("Disk({}) = {{{}, {}, 0, {}}};\n", s_tag, x, y, r));
                     created = true;
                 },
-                _ => {} // Lines/Polys need point parsing, skipping for MVP
+                "polygon" => {
+                    if let Some(pts) = shape.get("points").and_then(|p| p.as_array()) {
+                        if pts.len() >= 3 {
+                            let mut line_loop_tags = Vec::new();
+                            let start_p_tag = entity_counter;
+                            let mut p_tags = Vec::new();
+                            
+                            // Create Points
+                            for pt in pts {
+                                let px = resolve_param(pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
+                                let py = resolve_param(pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
+                                script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, x + px, y + py));
+                                p_tags.push(entity_counter);
+                                entity_counter += 1;
+                            }
+                            
+                            // Create Lines
+                            for i in 0..p_tags.len() {
+                                let p1 = p_tags[i];
+                                let p2 = p_tags[(i + 1) % p_tags.len()];
+                                script.push_str(&format!("Line({}) = {{{}, {}}};\n", entity_counter, p1, p2));
+                                line_loop_tags.push(entity_counter);
+                                entity_counter += 1;
+                            }
+                            
+                            let ll_tag = entity_counter;
+                            let lines_str = line_loop_tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ");
+                            script.push_str(&format!("Curve Loop({}) = {{{}}};\n", ll_tag, lines_str));
+                            entity_counter += 1;
+                            
+                            script.push_str(&format!("Plane Surface({}) = {{{}}};\n", s_tag, ll_tag));
+                            created = true;
+                        }
+                    }
+                },
+                _ => {} 
             }
 
             if created {
@@ -533,10 +568,15 @@ pub async fn run_gmsh_pipeline(app_handle: tauri::AppHandle, req: FeaRequest) ->
 
     // 5. Parse Output
     println!("[Rust] Parsing .msh file...");
-    let mesh = parse_msh(&msh_path)?;
+    let mut mesh = parse_msh(&msh_path)?;
     println!("[Rust] Mesh Parsed. Verts: {}, Elements: {}", mesh.vertices.len(), mesh.indices.len());
 
-    // 6. Calculate Stats
+    // 6. Filter Part (Splitting Logic)
+    let target_part = req.part_index.unwrap_or(0);
+    println!("[Rust] Filtering mesh for Part Index: {}", target_part);
+    mesh.filter_components(target_part);
+
+    // 7. Calculate Stats
     let (volume, surface_area) = mesh.compute_metrics();
 
     Ok(FeaResult {

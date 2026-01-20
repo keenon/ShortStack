@@ -14,7 +14,8 @@ import TetrahedralRenderer from "./TetrahedralRenderer";
 import SurfaceRenderer from "./SurfaceRenderer";
 import { FabricationPlan, Footprint, StackupLayer, Parameter } from "../types";
 import { callWorker } from "./Footprint3DView"; // Reuse the Manifold worker connection
-import { evaluateExpression } from "../utils/footprintUtils";
+import { evaluateExpression, generateDovetailPoints } from "../utils/footprintUtils";
+import { getLineOutlinePoints } from "../workers/meshUtils";
 
 // --- Types ---
 interface ComparisonMetrics {
@@ -156,12 +157,74 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
 
         // 2. Meshing Step (Backend Gmsh)
         setProcessMessage("Running Gmsh Backend...");
-        
+
+        // PRE-PROCESS: Handle Split Lines for Gmsh
+        // If splitting is enabled for this layer, we convert the split lines into physical "Cuts" (polygons)
+        // that the backend logic can treat as simple subtraction shapes.
+        let processedFootprint = JSON.parse(JSON.stringify(targetFootprint)); // Deep clone
+        const splitSettings = (activePlan as any).layerSplitSettings?.[selectedLayerId];
+
+        if (splitSettings?.enabled) {
+            const activeLineIds = splitSettings.lineIds || [];
+            const kerf = parseFloat(splitSettings.kerf || "0.5");
+            const allShapes = footprints.flatMap(f => f.shapes); // Needed for getLineOutlinePoints reference resolution? 
+            // Note: getLineOutlinePoints mostly needs the root footprint to resolve refs.
+            
+            // Remove original splitLines and replace with Cut Polygons
+            const newShapes: any[] = [];
+            
+            processedFootprint.shapes.forEach((s: any) => {
+                if (s.type === "splitLine") {
+                    // Only process if active (or if lineIds is undefined, meaning all are active)
+                    const isActive = !splitSettings.lineIds || splitSettings.lineIds.includes(s.id);
+                    
+                    if (isActive) {
+                        // 1. Generate the Dovetail/Straight path points
+                        const startX = evaluateExpression(s.x, params);
+                        const startY = evaluateExpression(s.y, params);
+                        const endX = startX + evaluateExpression(s.endX, params);
+                        const endY = startY + evaluateExpression(s.endY, params);
+                        const positions = (s.dovetailPositions || []).map((p: string) => evaluateExpression(p, params));
+                        const dWidth = evaluateExpression(s.dovetailWidth, params);
+                        const dHeight = evaluateExpression(s.dovetailHeight, params);
+                        
+                        const rawPts = generateDovetailPoints(startX, startY, endX, endY, positions, dWidth, dHeight, !!s.flip);
+                        
+                        // 2. Mock a FootprintLine to generate the outline (Kerf)
+                        const mockLine: any = {
+                            id: "temp_split_" + s.id,
+                            type: "line",
+                            points: rawPts.map(p => ({ x: p.x, y: p.y })),
+                            thickness: String(kerf)
+                        };
+
+                        // 3. Generate Outline
+                        // Note: We use targetFootprint as root. allFootprints might be needed if refs exist, but splitLines are usually local.
+                        const outlinePts = getLineOutlinePoints(mockLine, params, kerf, 16, targetFootprint, footprints);
+                        
+                        if (outlinePts.length > 2) {
+                            newShapes.push({
+                                type: "polygon",
+                                id: mockLine.id,
+                                points: outlinePts.map(p => ({ x: p.x, y: p.y })),
+                                assignedLayers: { [selectedLayerId]: { depth: "1000" } }, // Infinite cut depth
+                                x: "0", y: "0" // Points are already absolute relative to footprint origin
+                            });
+                        }
+                    }
+                    // Do NOT add the original splitLine back (backend ignores it anyway, but cleaner this way)
+                } else {
+                    newShapes.push(s);
+                }
+            });
+            processedFootprint.shapes = newShapes;
+        }
+
         const feaRequest = {
-            footprint: targetFootprint,
+            footprint: processedFootprint,
             stackup: stackup,
             params: params,
-            mesh_size: meshSize, // Pass user defined size
+            mesh_size: meshSize,
             target_layer_id: selectedLayerId,
             part_index: partIndex
         };
@@ -245,17 +308,34 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                 ))}
             </select>
 
-            <label style={{ fontSize: "0.85em", color: "#888", marginTop: "15px", display: "block" }}>Split Part Index</label>
-            <div style={{ display: "flex", gap: "10px", alignItems: "center", marginTop: "5px" }}>
-                <input 
-                    type="number" 
-                    min="0" step="1"
-                    value={partIndex} 
-                    onChange={(e) => setPartIndex(parseInt(e.target.value))}
-                    style={{ width: "60px", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
-                />
-                <span style={{ fontSize: "0.8em", color: "#666" }}>0 = Largest (Main)</span>
-            </div>
+            {/* Dynamic Part Selector based on Split Settings */}
+            {(() => {
+                const splitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
+                const isSplitEnabled = splitSettings?.enabled;
+                const availableSplitLines = isSplitEnabled 
+                    ? (splitSettings.lineIds || targetFootprint?.shapes.filter(s => s.type === "splitLine").map(s => s.id) || [])
+                    : [];
+                const partCount = isSplitEnabled ? availableSplitLines.length + 1 : 1;
+
+                if (!isSplitEnabled) return null;
+
+                return (
+                    <>
+                        <label style={{ fontSize: "0.85em", color: "#888", marginTop: "15px", display: "block" }}>Select Part (Split)</label>
+                        <select 
+                            value={partIndex} 
+                            onChange={(e) => setPartIndex(parseInt(e.target.value))}
+                            style={{ width: "100%", marginTop: "5px", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
+                        >
+                            {Array.from({ length: partCount }).map((_, i) => (
+                                <option key={i} value={i}>
+                                    Part {i + 1} {i === 0 ? "(Largest)" : ""}
+                                </option>
+                            ))}
+                        </select>
+                    </>
+                );
+            })()}
 
             <label style={{ fontSize: "0.85em", color: "#888", marginTop: "15px", display: "block" }}>Target Mesh Size (mm)</label>
             <div style={{ display: "flex", gap: "10px", alignItems: "center", marginTop: "5px" }}>
