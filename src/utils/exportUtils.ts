@@ -1,6 +1,6 @@
 // src/utils/exportUtils.ts
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintUnion, FootprintCircle, FootprintRect, FootprintLine, FootprintPolygon, FootprintSplitLine } from "../types";
-import { evaluateExpression, resolvePoint, getTransformAlongLine, offsetPolygonContour } from "./footprintUtils";
+import { evaluateExpression, resolvePoint, getTransformAlongLine, offsetPolygonContour, convertRectToPolyPoints } from "./footprintUtils";
 import { Footprint3DViewHandle } from "../components/Footprint3DView";
 import * as THREE from "three";
 
@@ -138,15 +138,79 @@ export async function collectExportShapesAsync(
              }
 
              if (shape.type === "circle") {
-                 exportObj.shape_type = "circle";
-                 exportObj.diameter = evaluateExpression((shape as FootprintCircle).diameter, params);
+                 if (layer.type === "Cut") {
+                     exportObj.shape_type = "line";
+                     exportObj.thickness = 0.05;
+                     const d = evaluateExpression((shape as FootprintCircle).diameter, params);
+                     const r = d / 2;
+                     const k = 0.55228475 * r;
+                     
+                     exportObj.points = [
+                         { x: gx + r, y: gy, handle_in: {x: 0, y: -k}, handle_out: {x: 0, y: k} },
+                         { x: gx, y: gy + r, handle_in: {x: k, y: 0}, handle_out: {x: -k, y: 0} },
+                         { x: gx - r, y: gy, handle_in: {x: 0, y: k}, handle_out: {x: 0, y: -k} },
+                         { x: gx, y: gy - r, handle_in: {x: -k, y: 0}, handle_out: {x: k, y: 0} },
+                         { x: gx + r, y: gy, handle_in: {x: 0, y: -k}, handle_out: {x: 0, y: k} }
+                     ];
+                 } else {
+                     exportObj.shape_type = "circle";
+                     exportObj.diameter = evaluateExpression((shape as FootprintCircle).diameter, params);
+                 }
                  result.push(exportObj);
              } else if (shape.type === "rect") {
-                 exportObj.shape_type = "rect";
-                 exportObj.width = evaluateExpression((shape as FootprintRect).width, params);
-                 exportObj.height = evaluateExpression((shape as FootprintRect).height, params);
-                 exportObj.angle = transform.angle + evaluateExpression((shape as FootprintRect).angle, params);
-                 exportObj.corner_radius = evaluateExpression((shape as FootprintRect).cornerRadius, params);
+                 if (layer.type === "Cut") {
+                     exportObj.shape_type = "line";
+                     exportObj.thickness = 0.05;
+                     
+                     // Mock a rect at 0,0 with 0 rotation to get relative geometry
+                     const mockRect = { ...shape, x: "0", y: "0", angle: "0" };
+                     // @ts-ignore
+                     const rawPolyPoints = convertRectToPolyPoints(mockRect, params);
+                     
+                     // Calculate global rotation for the shape
+                     const la = evaluateExpression((shape as any).angle, params);
+                     const totalAngleRad = (transform.angle + la) * Math.PI / 180;
+                     const c = Math.cos(totalAngleRad);
+                     const s = Math.sin(totalAngleRad);
+
+                     exportObj.points = rawPolyPoints.map((pt: any) => {
+                         const px = evaluateExpression(pt.x, params);
+                         const py = evaluateExpression(pt.y, params);
+                         // Rotate
+                         const rx = px * c - py * s;
+                         const ry = px * s + py * c;
+                         // Translate (gx, gy is the center)
+                         const fx = gx + rx;
+                         const fy = gy + ry;
+
+                         // Rotate handles
+                         const hIn = pt.handleIn ? {
+                             x: evaluateExpression(pt.handleIn.x, params), 
+                             y: evaluateExpression(pt.handleIn.y, params)
+                         } : undefined;
+                         
+                         const hOut = pt.handleOut ? {
+                             x: evaluateExpression(pt.handleOut.x, params), 
+                             y: evaluateExpression(pt.handleOut.y, params)
+                         } : undefined;
+
+                         const rhIn = hIn ? { x: hIn.x * c - hIn.y * s, y: hIn.x * s + hIn.y * c } : undefined;
+                         const rhOut = hOut ? { x: hOut.x * c - hOut.y * s, y: hOut.x * s + hOut.y * c } : undefined;
+
+                         return { x: fx, y: fy, handle_in: rhIn, handle_out: rhOut };
+                     });
+
+                     // Close the loop
+                     if (exportObj.points.length > 0) {
+                         exportObj.points.push({ ...exportObj.points[0] });
+                     }
+                 } else {
+                     exportObj.shape_type = "rect";
+                     exportObj.width = evaluateExpression((shape as FootprintRect).width, params);
+                     exportObj.height = evaluateExpression((shape as FootprintRect).height, params);
+                     exportObj.angle = transform.angle + evaluateExpression((shape as FootprintRect).angle, params);
+                     exportObj.corner_radius = evaluateExpression((shape as FootprintRect).cornerRadius, params);
+                 }
                  result.push(exportObj);
              } else if (shape.type === "line") {
                 exportObj.shape_type = "line";
@@ -187,13 +251,13 @@ export async function collectExportShapesAsync(
             } else if (shape.type === "polygon") {
                 const poly = shape as FootprintPolygon;
                 
-                // For polygon, if we have radii, we should probably output the base polygon 
-                // and let the expanding logic handle offsets, rather than slicing here (which is for 3D stacks).
-                // But `slicePolygonContours` was used for *depth maps*.
-                // For *profile cuts* (Waterline), we want the single contour at a depth.
-                // We'll output the raw polygon and handle slicing in `sliceExportShapes`.
-                
-                exportObj.shape_type = "polygon";
+                if (layer.type === "Cut") {
+                    exportObj.shape_type = "line";
+                    exportObj.thickness = 0.05;
+                } else {
+                    exportObj.shape_type = "polygon";
+                }
+
                 exportObj.points = poly.points.map(p => {
                     const resolved = resolvePoint(p, contextFootprint, allFootprints, params, currentLocal);
                     const shapeGlobalRad = (transform.angle + la) * (Math.PI / 180);
@@ -204,6 +268,16 @@ export async function collectExportShapesAsync(
                     const rotateVec = (v?: {x: number, y: number}) => v ? { x: v.x * sCos - v.y * sSin, y: v.x * sSin + v.y * sCos } : undefined;
                     return { x: gx + rx, y: gy + ry, handle_in: rotateVec(resolved.handleIn), handle_out: rotateVec(resolved.handleOut) };
                 });
+
+                if (exportObj.shape_type === "line" && exportObj.points.length > 0) {
+                    const first = exportObj.points[0];
+                    const last = exportObj.points[exportObj.points.length - 1];
+                    const dist = Math.sqrt((first.x - last.x)**2 + (first.y - last.y)**2);
+                    if (dist > 0.001) {
+                         exportObj.points.push({ ...first, handle_in: undefined, handle_out: undefined });
+                    }
+                }
+                
                 result.push(exportObj);
             } else if (shape.type === "splitLine") {
                 const sl = shape as FootprintSplitLine;
