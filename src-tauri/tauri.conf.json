@@ -32,6 +32,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": [
+      "binaries/gmsh"
+    ],
     "createUpdaterArtifacts": true
   },
     "plugins": {

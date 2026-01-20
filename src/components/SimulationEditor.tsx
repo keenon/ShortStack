@@ -1,150 +1,41 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { 
   OrbitControls, 
   Environment, 
   GizmoHelper, 
   GizmoViewport,
-  Text,
-  Billboard
+  Billboard,
+  Text
 } from "@react-three/drei";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
-import { readFile } from "@tauri-apps/plugin-fs";
 import * as THREE from "three";
-import { STLLoader } from "three-stdlib";
 import TetrahedralRenderer from "./TetrahedralRenderer";
 import SurfaceRenderer from "./SurfaceRenderer";
+import { FabricationPlan, Footprint, StackupLayer, Parameter } from "../types";
+import { callWorker } from "./Footprint3DView"; // Reuse the Manifold worker connection
+import { evaluateExpression } from "../utils/footprintUtils";
 
-// --- Ruler Component ---
+// --- Types ---
+interface ComparisonMetrics {
+    volume: number;
+    surfaceArea: number;
+    computedAt: number;
+}
+
 interface Bounds {
-    size: THREE.Vector3;
-    center: THREE.Vector3;
     min: THREE.Vector3;
+    max: THREE.Vector3;
+    center: THREE.Vector3;
+    size: THREE.Vector3;
 }
 
-const AXIS_COLORS = {
-    x: '#ff3653',
-    y: '#0adb50',
-    z: '#2c8fdf',
-    label: '#ffcc00'
-};
-
-function FloatingCornerWidget({ size, maxEdgeLen, fontSize }: { size: THREE.Vector3, maxEdgeLen: number, fontSize: number }) {
-    const groupRef = useRef<THREE.Group>(null);
-    const { camera } = useThree();
-
-    const [directions, setDirections] = useState({ x: 1, y: 1, z: 1 });
-
-    useFrame(() => {
-        if (!groupRef.current) return;
-
-        const hX = size.x / 2;
-        const hY = size.y / 2;
-        const hZ = size.z / 2;
-
-        const corners = [
-            new THREE.Vector3( hX,  hY,  hZ), new THREE.Vector3( hX,  hY, -hZ),
-            new THREE.Vector3( hX, -hY,  hZ), new THREE.Vector3( hX, -hY, -hZ),
-            new THREE.Vector3(-hX,  hY,  hZ), new THREE.Vector3(-hX,  hY, -hZ),
-            new THREE.Vector3(-hX, -hY,  hZ), new THREE.Vector3(-hX, -hY, -hZ),
-        ];
-
-        const cameraLocalPos = groupRef.current.parent!.worldToLocal(camera.position.clone());
-        let closestIdx = 0;
-        let minDist = Infinity;
-        
-        corners.forEach((c, i) => {
-            const dist = c.distanceTo(cameraLocalPos);
-            if (dist < minDist) {
-                minDist = dist;
-                closestIdx = i;
-            }
-        });
-
-        const targetCorner = corners[closestIdx];
-        const dirX = targetCorner.x > 0 ? -1 : 1;
-        const dirY = targetCorner.y > 0 ? -1 : 1;
-        const dirZ = targetCorner.z > 0 ? -1 : 1;
-        
-        const offset = new THREE.Vector3(0,0,0);
-        groupRef.current.position.lerp(targetCorner.clone().add(offset), 0.1);
-        
-        if (dirX !== directions.x || dirY !== directions.y || dirZ !== directions.z) {
-            setDirections({ x: dirX, y: dirY, z: dirZ });
-        }
-    });
-
-    const thickness = fontSize * 0.1;
-
-    return (
-        <group ref={groupRef}>
-            <mesh position={[(maxEdgeLen / 2) * directions.x, 0, 0]}>
-                <boxGeometry args={[maxEdgeLen, thickness, thickness]} />
-                <meshBasicMaterial color={AXIS_COLORS.x} />
-            </mesh>
-            <mesh position={[0, (maxEdgeLen / 2) * directions.y, 0]}>
-                <boxGeometry args={[thickness, maxEdgeLen, thickness]} />
-                <meshBasicMaterial color={AXIS_COLORS.y} />
-            </mesh>
-            <mesh position={[0, 0, (maxEdgeLen / 2) * directions.z]}>
-                <boxGeometry args={[thickness, thickness, maxEdgeLen]} />
-                <meshBasicMaterial color={AXIS_COLORS.z} />
-            </mesh>
-            <mesh>
-                <sphereGeometry args={[thickness * 1.5]} />
-                <meshBasicMaterial color="white" />
-            </mesh>
-            <Billboard position={[-directions.x * fontSize, directions.y * fontSize, -directions.z * fontSize]}>
-                <Text fontSize={fontSize * 0.8} color={AXIS_COLORS.label} outlineWidth={0.02} outlineColor="#000">
-                    a = {maxEdgeLen}mm
-                </Text>
-            </Billboard>
-        </group>
-    );
-}
-
-function RulerOverlay({ bounds, maxEdgeLen, visible }: { bounds: Bounds | null, maxEdgeLen: number, visible: boolean }) {
-    if (!visible || !bounds) return null;
-
-    const { size, center } = bounds;
-    const fontSize = Math.max(size.x, size.y, size.z) * 0.05;
-
-    return (
-        <group position={center} name="ruler-overlay">
-            <group>
-                <mesh>
-                    <boxGeometry args={[size.x, size.y, size.z]} />
-                    <meshBasicMaterial visible={false} />
-                    <lineSegments>
-                        <edgesGeometry args={[new THREE.BoxGeometry(size.x, size.y, size.z)]} />
-                        <lineBasicMaterial color="#ffffff" opacity={0.5} transparent />
-                    </lineSegments>
-                </mesh>
-            </group>
-
-            <Billboard position={[0, size.y / 2 - fontSize * 1.5, size.z / 2]}>
-                <Text fontSize={fontSize} color={AXIS_COLORS.x}>W: {size.x.toFixed(1)}</Text>
-            </Billboard>
-            <Billboard position={[-size.x / 2 - fontSize * 1.5, 0, size.z / 2]}>
-                <Text fontSize={fontSize} color={AXIS_COLORS.y}>H: {size.y.toFixed(1)}</Text>
-            </Billboard>
-            <Billboard position={[size.x / 2 + fontSize * 1.5, size.y / 2 - fontSize * 1.5, 0]}>
-                <Text fontSize={fontSize} color={AXIS_COLORS.z}>D: {size.z.toFixed(1)}</Text>
-            </Billboard>
-
-            {maxEdgeLen > 0 && (
-                <FloatingCornerWidget size={size} maxEdgeLen={maxEdgeLen} fontSize={fontSize} />
-            )}
-        </group>
-    );
-}
-
+// --- Helper UI Components ---
 function LoadingOverlay({ message }: { message: string }) {
     return (
         <div style={{
             position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
-            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+            backgroundColor: 'rgba(0, 0, 0, 0.8)',
             display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
             zIndex: 9999, backdropFilter: 'blur(5px)'
         }}>
@@ -159,346 +50,332 @@ function LoadingOverlay({ message }: { message: string }) {
     );
 }
 
-export default function SimulationEditor() {
-  const [tetMesh, setTetMesh] = useState<any | null>(null);
-  const [repairedMesh, setRepairedMesh] = useState<THREE.BufferGeometry | null>(null);
-  const [previewGeo, setPreviewGeo] = useState<THREE.BufferGeometry | null>(null);
-  const [isMeshing, setIsMeshing] = useState(false);
-  const [shrink, setShrink] = useState(0.8);
-  const [stats, setStats] = useState({ tets: 0, verts: 0 });
-  const [fileName, setFileName] = useState<string>("");
-  const [modelPosition, setModelPosition] = useState<[number, number, number]>([0, 0, 0]);
-  const [viewMode, setViewMode] = useState<'surface' | 'volume'>('surface');
-  
-  // --- Updated State ---
-  const [maxEdgeLen, setMaxEdgeLen] = useState<number>(3.0); // Default 3.0mm
-  const [enableRegularization, setEnableRegularization] = useState(true); // Default ON
-  const [showRuler, setShowRuler] = useState(false);
-  const [bounds, setBounds] = useState<Bounds | null>(null);
+// --- Main Component ---
 
-  const [autoRotate, setAutoRotate] = useState(true);
-  const idleTimer = useRef<number | null>(null);
+interface Props {
+    footprints: Footprint[];
+    fabPlans: FabricationPlan[];
+    stackup: StackupLayer[];
+    params: Parameter[];
+}
+
+export default function SimulationEditor({ footprints, fabPlans, stackup, params }: Props) {
+  // State
+  const [activePlanId, setActivePlanId] = useState<string>(fabPlans.length > 0 ? fabPlans[0].id : "");
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processMessage, setProcessMessage] = useState("");
+  
+  // Data State
+  const [manifoldMetrics, setManifoldMetrics] = useState<ComparisonMetrics | null>(null);
+  const [gmshMetrics, setGmshMetrics] = useState<ComparisonMetrics | null>(null);
+  const [previewGeo, setPreviewGeo] = useState<THREE.BufferGeometry | null>(null);
+  const [tetMesh, setTetMesh] = useState<{ vertices: number[], indices: number[][] } | null>(null);
+  
+  // Visual State
+  const [viewMode, setViewMode] = useState<'boundary' | 'mesh'>('boundary');
+  const [layerClip, setLayerClip] = useState<number>(1.0); // 0.0 to 1.0
+  const [shrink, setShrink] = useState(0.9);
+  const [bounds, setBounds] = useState<Bounds | null>(null);
+  
   const controlsRef = useRef<any>(null);
 
-  const handleUserInteraction = () => {
-    setAutoRotate(false);
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    idleTimer.current = window.setTimeout(() => {
-        setAutoRotate(true);
-    }, 3000);
-  };
+  const activePlan = fabPlans.find(p => p.id === activePlanId);
+  const targetFootprint = footprints.find(f => f.id === activePlan?.footprintId);
 
-  const handleHome = () => {
-    if (controlsRef.current) controlsRef.current.reset();
-  };
-
-  useEffect(() => {
-    if (!previewGeo && !tetMesh) {
-        setBounds(null);
-        return;
-    }
-
-    const min = new THREE.Vector3(Infinity, Infinity, Infinity);
-    const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-
-    if (tetMesh) {
-        for(let i=0; i<tetMesh.vertices.length; i+=3) {
-            const x = tetMesh.vertices[i];
-            const y = tetMesh.vertices[i+1];
-            const z = tetMesh.vertices[i+2];
-            if(x < min.x) min.x = x; if(x > max.x) max.x = x;
-            if(y < min.y) min.y = y; if(y > max.y) max.y = y;
-            if(z < min.z) min.z = z; if(z > max.z) max.z = z;
-        }
-    } else if (repairedMesh) {
-        repairedMesh.computeBoundingBox();
-        if (repairedMesh.boundingBox) {
-            min.copy(repairedMesh.boundingBox.min);
-            max.copy(repairedMesh.boundingBox.max);
-        }
-    } else if (previewGeo) {
-        previewGeo.computeBoundingBox();
-        if (previewGeo.boundingBox) {
-            min.copy(previewGeo.boundingBox.min);
-            max.copy(previewGeo.boundingBox.max);
-        }
-    }
-
-    if (min.x !== Infinity) {
-        const size = new THREE.Vector3().subVectors(max, min);
-        const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+  // --- 1. Compute Geometry & Compare (Stage 1) ---
+  const handleVerifyGeometry = async () => {
+    if (!activePlan || !targetFootprint) return;
+    setIsProcessing(true);
+    setProcessMessage("Computing Manifold Geometry...");
+    
+    try {
+        // A. FRONTEND (MANIFOLD) CALCULATION
+        // We reuse the worker logic to get a precise volume/area from the frontend geometry engine
+        // We calculate the FULL stackup merged
+        const totalThickness = stackup.reduce((acc, l) => acc + evaluateExpression(l.thicknessExpression, params), 0);
         
-        setBounds({ size, center, min });
-
-        const centerX = (min.x + max.x) / 2;
-        const centerZ = (min.z + max.z) / 2;
-        setModelPosition([-centerX, -min.y, -centerZ]);
-    }
-  }, [previewGeo, tetMesh]);
-
-  const handleOpenFile = async () => {
-    try {
-      const selected = await open({
-        multiple: false, filters: [{ name: "STL Mesh", extensions: ["stl"] }],
-      });
-      if (selected && typeof selected === "string") {
-        setFileName(selected);
-        const content = await readFile(selected);
-        const loader = new STLLoader();
-        const geometry = loader.parse(content.buffer);
-        geometry.computeVertexNormals();
-        setPreviewGeo(geometry);
-        setRepairedMesh(null);
-        setTetMesh(null); 
-      }
-    } catch (err) {
-      console.error(err);
-      alert("Could not load file.");
-    }
-  };
-
-  const handleRepairPreview = async () => {
-    if (!previewGeo) return;
-    setIsMeshing(true);
-    try {
-        const positions = Array.from(previewGeo.attributes.position.array);
-        // Invoke Gmsh via Rust
-        const result: any = await invoke("cmd_repair_mesh", {
-            vertices: positions,
-            targetLen: enableRegularization ? maxEdgeLen : 0.0
+        const manifoldResult = await callWorker("computeFullStackupMetrics", {
+            footprint: targetFootprint,
+            allFootprints: footprints,
+            stackup,
+            params,
+            fabPlan: activePlan
         });
 
-        // Result contains vertices [x,y,z, x,y,z...]
-        // Reconstruct BufferGeometry
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(result.vertices, 3));
-        geometry.computeVertexNormals();
+        setManifoldMetrics({
+            volume: manifoldResult.volume,
+            surfaceArea: manifoldResult.surfaceArea,
+            computedAt: Date.now()
+        });
+
+        // Generate Preview Mesh for display
+        if (manifoldResult.meshData) {
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(manifoldResult.meshData.vertices, 3));
+            if (manifoldResult.meshData.indices) {
+                geo.setIndex(manifoldResult.meshData.indices);
+            }
+            geo.computeVertexNormals();
+            geo.computeBoundingBox();
+            setPreviewGeo(geo);
+            
+            // Calculate Bounds
+            if (geo.boundingBox) {
+                const size = new THREE.Vector3();
+                const center = new THREE.Vector3();
+                geo.boundingBox.getSize(size);
+                geo.boundingBox.getCenter(center);
+                setBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
+            }
+        }
+
+        // B. BACKEND (GMSH) VERIFICATION
+        setProcessMessage("Verifying with Sidecar...");
         
-        setRepairedMesh(geometry);
-        setTetMesh(null); // Clear volume mesh if we have a new surface
+        // Prepare payload for Rust
+        const feaRequest = {
+            footprint: targetFootprint,
+            stackup: stackup, // Ensure serialization works on Rust side
+            params: params,
+            quality: 0.0 // 0.0 means "Don't mesh yet, just build geo and inspect"
+        };
+
+        const gmshResult: any = await invoke("run_gmsh_meshing", { req: feaRequest });
+        
+        setGmshMetrics({
+            volume: gmshResult.volume,
+            surfaceArea: gmshResult.surface_area,
+            computedAt: Date.now()
+        });
+
+        setViewMode('boundary');
+        setTetMesh(null);
+
     } catch (e) {
         console.error(e);
-        alert("Gmsh Repair Failed: " + e);
+        alert("Geometry Verification Failed: " + e);
     } finally {
-        setIsMeshing(false);
+        setIsProcessing(false);
     }
   };
 
-  const handleGenerate = async () => {
-    if (!previewGeo) return;
-    setIsMeshing(true);
-    setTimeout(async () => {
-        try {
-            const positions = Array.from(previewGeo.attributes.position.array);
-            
-            let flags = "pqz"; 
-            
-            // Only apply regularization and max volume if enabled
-            const effectiveEdgeLen = enableRegularization ? maxEdgeLen : 0;
+  // --- 2. Generate Tetrahedral Mesh (Stage 2) ---
+  const handleGenerateMesh = async () => {
+    if (!activePlan || !targetFootprint) return;
+    setIsProcessing(true);
+    setProcessMessage("Generating Tetrahedral Mesh (this may take a moment)...");
 
-            if (enableRegularization && maxEdgeLen > 0) {
-                const maxVol = (Math.pow(maxEdgeLen, 3) / 8.48).toFixed(5);
-                flags += `a${maxVol}`;
-            }
+    try {
+        const feaRequest = {
+            footprint: targetFootprint,
+            stackup: stackup,
+            params: params,
+            quality: 1.0 // High quality Request
+        };
 
-            const result: any = await invoke("cmd_tetrahedralize", {
-                vertices: positions, 
-                options: flags,
-                targetLen: effectiveEdgeLen > 0 ? effectiveEdgeLen : null
-            });
-            
-            setTetMesh(result);
-            const numTets = result.indices.length / 4;
-            setStats({ tets: numTets, verts: Math.floor(result.vertices.length / 3) });
+        // Call the sidecar via Rust
+        const result: any = await invoke("run_gmsh_meshing", { req: feaRequest });
+        
+        // Result.mesh contains { vertices: [[x,y,z]...], indices: [[n1...n10]...] }
+        // We need to flatten vertices for ThreeJS
+        const flatVerts = result.mesh.vertices.flat();
+        // Take only first 4 nodes of 10-node tets for visualization (corners)
+        const tetIndices = result.mesh.indices.map((t: number[]) => [t[0], t[1], t[2], t[3]]);
 
-            if (numTets > 50000) setViewMode('surface');
-            else setViewMode('volume');
+        setTetMesh({
+            vertices: flatVerts,
+            indices: tetIndices
+        });
+        
+        setViewMode('mesh');
 
-        } catch (e) {
-            console.error(e);
-            alert("Meshing failed: " + e);
-        } finally {
-            setIsMeshing(false);
-        }
-    }, 100);
+    } catch (e) {
+        console.error(e);
+        alert("Meshing Failed: " + e);
+    } finally {
+        setIsProcessing(false);
+    }
+  };
+
+  const metricDiff = (m1: number, m2: number) => {
+      const diff = Math.abs(m1 - m2);
+      const pct = (diff / ((m1+m2)/2)) * 100;
+      return pct.toFixed(2) + "%";
   };
 
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", position: "relative" }}>
-      {isMeshing && <LoadingOverlay message="Generating Tetrahedral Mesh..." />}
+      {isProcessing && <LoadingOverlay message={processMessage} />}
 
-      <div style={{ width: "320px", padding: "20px", background: "#222", borderRight: "1px solid #444", display: "flex", flexDirection: "column", gap: "20px", zIndex: 10 }}>
-        <header>
-            <h3 style={{ margin: "0 0 10px 0" }}>Simulation Setup</h3>
-            <p style={{ fontSize: "0.8em", color: "#888", margin: 0 }}>Test the FEA mesh generation pipeline.</p>
-        </header>
+      {/* --- SIDEBAR CONTROLS --- */}
+      <div style={{ width: "350px", background: "#222", borderRight: "1px solid #444", display: "flex", flexDirection: "column" }}>
         
-        <div style={{ padding: "15px", background: "#1a1a1a", borderRadius: "8px", border: "1px dashed #444" }}>
-          <label style={{display:"block", marginBottom:"10px", fontWeight:"bold", color:"#ccc"}}>Input Mesh</label>
-          <button onClick={handleOpenFile} style={{ width: "100%", marginBottom: "10px" }}>📂 Load STL File</button>
-          {fileName && <div style={{ fontSize: "0.85em", wordBreak: "break-all", color: "#646cff" }}>{fileName.split(/[/\\]/).pop()}</div>}
+        {/* Header / Selection */}
+        <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
+            <h3 style={{ margin: "0 0 15px 0" }}>FEA Pre-processor</h3>
+            <label style={{ fontSize: "0.85em", color: "#888" }}>Fabrication Plan</label>
+            <select 
+                value={activePlanId} 
+                onChange={(e) => setActivePlanId(e.target.value)}
+                style={{ width: "100%", marginTop: "5px", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
+            >
+                {fabPlans.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
         </div>
 
-        {/* --- Meshing Parameters (Updated) --- */}
-        <div style={{ padding: "12px", background: "#333", borderRadius: "6px", fontSize: "0.9em" }}>
-             <label style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", fontWeight: "bold", color: "#ccc", cursor: "pointer" }}>
-                <input 
-                    type="checkbox" 
-                    checked={enableRegularization} 
-                    onChange={e => setEnableRegularization(e.target.checked)} 
-                />
-                Regularize Mesh
-            </label>
-            
-            <div style={{ paddingLeft: "22px", opacity: enableRegularization ? 1 : 0.5 }}>
-                <label style={{ display: "block", fontSize: "0.8em", color: "#888", marginBottom: "4px" }}>
-                    Target Edge Length (mm)
-                </label>
-                <input 
-                    type="number" 
-                    min="0.1" 
-                    step="0.1" 
-                    value={maxEdgeLen} 
-                    disabled={!enableRegularization}
-                    onChange={e => setMaxEdgeLen(Math.max(0.1, parseFloat(e.target.value)))}
-                    style={{ 
-                        width: "100%", 
-                        padding: "6px", 
-                        background: "#222", 
-                        border: "1px solid #555", 
-                        color: "white",
-                        borderRadius: "4px" 
-                    }}
-                />
-            </div>
-            <div style={{ fontSize: "0.75em", color: "#666", marginTop:"8px", lineHeight: "1.4" }}>
-                {enableRegularization 
-                    ? "Enforces uniform element density and simplifies overly dense regions." 
-                    : "Uses raw curvature adaptation (default TetGen)."}
-            </div>
-        </div>
-
-        <div style={{ display: "flex", gap: "10px" }}>
-            <button onClick={handleRepairPreview} disabled={!previewGeo || isMeshing} style={{ flex: 1, padding: "10px", fontSize: "0.9em", background: "#444", border: "1px solid #666", color: "white", cursor: "pointer", borderRadius: "4px" }}>
-                👁 Preview Fixed
+        {/* Step 1: Geometry Verification */}
+        <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
+            <h4 style={{ margin: "0 0 10px 0", color: "#ccc" }}>1. Geometry & Verification</h4>
+            <button className="secondary" onClick={handleVerifyGeometry} style={{ width: "100%", padding: "10px" }}>
+                Compute & Verify Geometry
             </button>
-        </div>
 
-        <button className="primary" onClick={handleGenerate} disabled={!previewGeo || isMeshing} style={{ width: "100%", padding: "12px" }}>
-          {isMeshing ? "Generating..." : "Generate Tetrahedra"}
-        </button>
-
-        {tetMesh && (
-          <div style={{ padding: "15px", background: "#2a2a2a", borderRadius: "8px", border: "1px solid #444" }}>
-            <h4 style={{ marginTop: 0 }}>Mesh Statistics</h4>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", fontSize: "0.9em" }}>
-                <div style={{ color: "#888" }}>Nodes:</div><div style={{ textAlign: "right", fontWeight: "bold" }}>{stats.verts}</div>
-                <div style={{ color: "#888" }}>Tetrahedra:</div><div style={{ textAlign: "right", fontWeight: "bold" }}>{stats.tets}</div>
-            </div>
-            
-            <div style={{ marginTop: "15px", borderTop: "1px solid #444", paddingTop: "10px" }}>
-                <label style={{ display:"block", color:"#aaa", marginBottom:"5px" }}>Render Mode</label>
-                <div style={{ display:"flex", gap:"5px" }}>
-                    <button onClick={() => setViewMode('surface')} style={{ flex:1, background: viewMode === 'surface' ? '#646cff' : '#444', border:'none', color:'white', padding:'5px', cursor:'pointer' }}>Surface</button>
-                    <button onClick={() => setViewMode('volume')} style={{ flex:1, background: viewMode === 'volume' ? '#646cff' : '#444', border:'none', color:'white', padding:'5px', cursor:'pointer' }}>Volume</button>
-                </div>
-            </div>
-
-            {viewMode === 'volume' && (
-                <div style={{ marginTop: "15px" }}>
-                    <label style={{ fontSize: "0.8em", textTransform: "uppercase", fontWeight: "bold", color: "#666" }}>Explode View: {(shrink * 100).toFixed(0)}%</label>
-                    <input type="range" min="0.0" max="1.0" step="0.01" value={shrink} onChange={e => setShrink(parseFloat(e.target.value))} style={{ width: "100%", accentColor: "#646cff" }} />
+            {manifoldMetrics && gmshMetrics && (
+                <div style={{ marginTop: "15px", fontSize: "0.85em", background: "#1a1a1a", padding: "10px", borderRadius: "6px" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                            <tr style={{ color: "#888", textAlign: "left" }}>
+                                <th>Metric</th>
+                                <th>Diff</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style={{ padding: "4px 0" }}>Volume</td>
+                                <td style={{ color: parseFloat(metricDiff(manifoldMetrics.volume, gmshMetrics.volume)) < 1.0 ? "#51cf66" : "#ff6b6b" }}>
+                                    {metricDiff(manifoldMetrics.volume, gmshMetrics.volume)}
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style={{ padding: "4px 0" }}>Surface Area</td>
+                                <td style={{ color: parseFloat(metricDiff(manifoldMetrics.surfaceArea, gmshMetrics.surfaceArea)) < 5.0 ? "#51cf66" : "#ff6b6b" }}>
+                                    {metricDiff(manifoldMetrics.surfaceArea, gmshMetrics.surfaceArea)}
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div style={{ marginTop: "8px", fontSize: "0.8em", color: "#666", fontStyle: "italic" }}>
+                        Note: Discrepancies &lt;1% are expected due to triangulation differences.
+                    </div>
                 </div>
             )}
-            
-            {/* Removed Slider, removed display of angle. Render logic passes 0. */}
-          </div>
-        )}
-      </div>
-
-      <div style={{ flex: 1, background: "#111", position: "relative" }}>
-        
-        <div style={{ position: "absolute", top: "20px", right: "20px", zIndex: 5, display: "flex", gap: "10px" }}>
-            <button 
-                onClick={() => setShowRuler(!showRuler)}
-                style={{
-                    padding: "8px 12px", background: showRuler ? "#646cff" : "rgba(40,40,40,0.8)",
-                    border: "1px solid #555", borderRadius: "4px", color: "white",
-                    cursor: "pointer", display: "flex", alignItems: "center", gap: "5px",
-                    backdropFilter: "blur(4px)"
-                }}
-            >
-                <span>📏</span> Ruler
-            </button>
-
-            <button 
-                onClick={handleHome}
-                style={{
-                    padding: "8px 12px", background: "rgba(40,40,40,0.8)",
-                    border: "1px solid #555", borderRadius: "4px", color: "white",
-                    cursor: "pointer", display: "flex", alignItems: "center", gap: "5px",
-                    backdropFilter: "blur(4px)"
-                }}
-            >
-                <span>⌂</span> Home
-            </button>
         </div>
 
-        {!previewGeo && !tetMesh && <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", color: "#444" }}>Load an STL file to begin</div>}
+        {/* Step 2: Meshing */}
+        <div style={{ padding: "20px", flex: 1, display: "flex", flexDirection: "column" }}>
+            <h4 style={{ margin: "0 0 10px 0", color: "#ccc" }}>2. Discretization</h4>
+            <button 
+                className="primary" 
+                onClick={handleGenerateMesh} 
+                disabled={!manifoldMetrics} // Force verification first
+                style={{ width: "100%", padding: "12px", marginBottom: "20px" }}
+            >
+                Generate Tetrahedrons
+            </button>
+
+            {/* View Controls */}
+            {tetMesh && (
+                <div style={{ background: "#2a2a2a", padding: "15px", borderRadius: "8px", border: "1px solid #444" }}>
+                    <div style={{ marginBottom: "15px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "5px" }}>
+                            <label style={{ fontSize: "0.8em", color: "#ccc" }}>Z-Clip (Layer View)</label>
+                            <span style={{ fontSize: "0.8em", fontFamily: "monospace" }}>{Math.round(layerClip * 100)}%</span>
+                        </div>
+                        <input 
+                            type="range" min="0" max="1" step="0.01" 
+                            value={layerClip} 
+                            onChange={(e) => setLayerClip(parseFloat(e.target.value))} 
+                            style={{ width: "100%", accentColor: "#646cff" }}
+                        />
+                    </div>
+
+                    <div>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "5px" }}>
+                            <label style={{ fontSize: "0.8em", color: "#ccc" }}>Element Shrink</label>
+                            <span style={{ fontSize: "0.8em", fontFamily: "monospace" }}>{(shrink * 100).toFixed(0)}%</span>
+                        </div>
+                        <input 
+                            type="range" min="0" max="1" step="0.01" 
+                            value={shrink} 
+                            onChange={(e) => setShrink(parseFloat(e.target.value))} 
+                            style={{ width: "100%", accentColor: "#646cff" }}
+                        />
+                    </div>
+                    
+                    <div style={{ marginTop: "15px", fontSize: "0.8em", color: "#888" }}>
+                        Elements: <b>{tetMesh.indices.length}</b><br/>
+                        Nodes: <b>{tetMesh.vertices.length / 3}</b>
+                    </div>
+                </div>
+            )}
+        </div>
+      </div>
+
+      {/* --- 3D VIEWPORT --- */}
+      <div style={{ flex: 1, background: "#111", position: "relative" }}>
         
+        {/* Toggle Mode Button (Floating) */}
+        {tetMesh && (
+            <div style={{ position: "absolute", top: 20, right: 20, zIndex: 10, background: "#333", borderRadius: "4px", padding: "4px" }}>
+                <button 
+                    onClick={() => setViewMode('boundary')}
+                    style={{ background: viewMode === 'boundary' ? '#555' : 'transparent', border: 'none', color: 'white', padding: '6px 12px', cursor: 'pointer' }}
+                >
+                    Boundary
+                </button>
+                <button 
+                    onClick={() => setViewMode('mesh')}
+                    style={{ background: viewMode === 'mesh' ? '#646cff' : 'transparent', border: 'none', color: 'white', padding: '6px 12px', cursor: 'pointer' }}
+                >
+                    Internal Mesh
+                </button>
+            </div>
+        )}
+
         <Canvas shadows camera={{ position: [50, 50, 50], fov: 45 }}>
             <color attach="background" args={['#1a1a1a']} />
             <Environment preset="city" />
-            <directionalLight position={[50, 80, 50]} intensity={1.5} castShadow shadow-mapSize={[4096, 4096]} shadow-bias={-0.001} shadow-normalBias={0.1}>
-                <orthographicCamera attach="shadow-camera" args={[-500, 500, 500, -500]} far={400} />
-            </directionalLight>
-            <hemisphereLight intensity={0.4} groundColor="#333" />
+            
+            <directionalLight position={[50, 80, 50]} intensity={1.5} castShadow />
+            <ambientLight intensity={0.4} />
             
             <GizmoHelper alignment="bottom-right" margin={[80, 80]}>
                 <GizmoViewport axisColors={['#ff3653', '#0adb50', '#2c8fdf']} labelColor="black" />
             </GizmoHelper>
             
-            <OrbitControls ref={controlsRef} makeDefault autoRotate={autoRotate} autoRotateSpeed={0.5} onStart={handleUserInteraction} onEnd={handleUserInteraction} />
+            <OrbitControls ref={controlsRef} makeDefault />
 
-            <group position={modelPosition}>
-                {/* Original Mesh (Gray) - Only show if no repair and no tet mesh */}
-                {previewGeo && !tetMesh && !repairedMesh && (
-                    <mesh geometry={previewGeo} castShadow receiveShadow>
-                        <meshStandardMaterial color="#aaa" roughness={0.3} metalness={0.2} side={THREE.DoubleSide} shadowSide={THREE.BackSide} />
+            <group position={[0,0,0]}> {/* Center geometry if needed */}
+                {/* 1. Boundary View (Manifold Output) */}
+                {viewMode === 'boundary' && previewGeo && (
+                    <mesh geometry={previewGeo}>
+                        <meshStandardMaterial 
+                            color="#aaa" 
+                            roughness={0.4} 
+                            metalness={0.2} 
+                            transparent 
+                            opacity={0.9}
+                            polygonOffset
+                            polygonOffsetFactor={1}
+                        />
+                        <lineSegments>
+                            <edgesGeometry args={[previewGeo]} />
+                            <lineBasicMaterial color="#444" />
+                        </lineSegments>
                     </mesh>
                 )}
 
-                {/* Repaired Mesh (Cyan with Wireframe) */}
-                {repairedMesh && !tetMesh && (
-                    <group>
-                        <mesh geometry={repairedMesh} castShadow receiveShadow>
-                            <meshStandardMaterial color="#00cccc" roughness={0.5} metalness={0.1} side={THREE.DoubleSide} polygonOffset polygonOffsetFactor={1} polygonOffsetUnits={1} />
-                        </mesh>
-                        <mesh geometry={repairedMesh}>
-                            <meshBasicMaterial color="#00ffff" wireframe />
-                        </mesh>
-                    </group>
+                {/* 2. Tetrahedral Mesh View (Gmsh Output) */}
+                {viewMode === 'mesh' && tetMesh && bounds && (
+                    <TetrahedralRenderer 
+                        mesh={tetMesh} 
+                        shrinkFactor={shrink} 
+                        color="#ff6b6b" 
+                        minZ={bounds.min.z} // Assuming Z is up in geometry
+                        // Calculate clip height based on bounds
+                        clipZ={bounds.min.z + (bounds.max.z - bounds.min.z) * layerClip} 
+                    />
                 )}
-
-                {tetMesh && (
-                    <>
-                        {viewMode === 'volume' ? 
-                            <TetrahedralRenderer mesh={tetMesh} shrinkFactor={shrink} color="#ff6b6b" /> : 
-                            <SurfaceRenderer 
-                                mesh={tetMesh} 
-                                color="#ff6b6b" 
-                                threshold={0} // Force full wireframe
-                            />
-                        }
-                    </>
-                )}
-                
-                <RulerOverlay 
-                    bounds={bounds} 
-                    // Only show 'a' on the ruler if Regularization is ON
-                    maxEdgeLen={enableRegularization ? maxEdgeLen : 0} 
-                    visible={showRuler} 
-                />
             </group>
         </Canvas>
       </div>
