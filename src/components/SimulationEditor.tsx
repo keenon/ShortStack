@@ -76,31 +76,51 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   const [layerClip, setLayerClip] = useState<number>(1.0); // 0.0 to 1.0
   const [shrink, setShrink] = useState(0.9);
   const [bounds, setBounds] = useState<Bounds | null>(null);
+
+  const [selectedLayerId, setSelectedLayerId] = useState<string>("");
   
   const controlsRef = useRef<any>(null);
 
   const activePlan = fabPlans.find(p => p.id === activePlanId);
   const targetFootprint = footprints.find(f => f.id === activePlan?.footprintId);
 
-  // --- 1. Compute Geometry & Compare (Stage 1) ---
+  // Filter for valid 3D printable layers
+  const printableLayers = useMemo(() => {
+      if (!activePlan) return [];
+      return stackup.filter(l => {
+          const method = activePlan.layerMethods[l.id];
+          // Default to Cut/CNC unless explicitly 3D printed?
+          // Adjust logic based on your FabricationPlan defaults
+          return method === "3D printed";
+      });
+  }, [stackup, activePlan]);
+
+  // Auto-select first printable layer
+  useEffect(() => {
+      if (printableLayers.length > 0 && !selectedLayerId) {
+          setSelectedLayerId(printableLayers[0].id);
+      }
+  }, [printableLayers]);
+
+  // --- 1. Compute Geometry (Target Specific Layer) ---
   const handleVerifyGeometry = async () => {
-    if (!activePlan || !targetFootprint) return;
+    if (!activePlan || !targetFootprint || !selectedLayerId) return;
     setIsProcessing(true);
-    setProcessMessage("Computing Manifold Geometry...");
+    setProcessMessage("Computing Part Geometry...");
     
     try {
-        // A. FRONTEND (MANIFOLD) CALCULATION
-        // We reuse the worker logic to get a precise volume/area from the frontend geometry engine
-        // We calculate the FULL stackup merged
-        const totalThickness = stackup.reduce((acc, l) => acc + evaluateExpression(l.thicknessExpression, params), 0);
-        
-        const manifoldResult = await callWorker("computeFullStackupMetrics", {
+        // A. FRONTEND (MANIFOLD)
+        const manifoldResult = await callWorker("computeAnalyzablePart", {
             footprint: targetFootprint,
             allFootprints: footprints,
             stackup,
             params,
-            fabPlan: activePlan
+            layerId: selectedLayerId // Pass the specific layer!
         });
+
+        if (!manifoldResult || !manifoldResult.meshData) {
+            throw new Error("Failed to generate geometry for this layer.");
+        }
 
         setManifoldMetrics({
             volume: manifoldResult.volume,
@@ -108,36 +128,34 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             computedAt: Date.now()
         });
 
-        // Generate Preview Mesh for display
-        if (manifoldResult.meshData) {
-            const geo = new THREE.BufferGeometry();
-            geo.setAttribute('position', new THREE.Float32BufferAttribute(manifoldResult.meshData.vertices, 3));
-            if (manifoldResult.meshData.indices) {
-                geo.setIndex(manifoldResult.meshData.indices);
-            }
-            geo.computeVertexNormals();
-            geo.computeBoundingBox();
-            setPreviewGeo(geo);
-            
-            // Calculate Bounds
-            if (geo.boundingBox) {
-                const size = new THREE.Vector3();
-                const center = new THREE.Vector3();
-                geo.boundingBox.getSize(size);
-                geo.boundingBox.getCenter(center);
-                setBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
-            }
+        // Update Preview Mesh
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(manifoldResult.meshData.vertices, 3));
+        if (manifoldResult.meshData.indices) {
+            geo.setIndex(Array.from(manifoldResult.meshData.indices));
+        }
+        geo.computeVertexNormals();
+        geo.computeBoundingBox();
+        setPreviewGeo(geo);
+        
+        if (geo.boundingBox) {
+            const size = new THREE.Vector3();
+            const center = new THREE.Vector3();
+            geo.boundingBox.getSize(size);
+            geo.boundingBox.getCenter(center);
+            setBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
         }
 
         // B. BACKEND (GMSH) VERIFICATION
-        setProcessMessage("Verifying with Sidecar...");
+        setProcessMessage("Verifying with Backend...");
         
-        // Prepare payload for Rust
+        // Construct FEA Request targeting the specific layer
         const feaRequest = {
             footprint: targetFootprint,
-            stackup: stackup, // Ensure serialization works on Rust side
+            stackup: stackup,
             params: params,
-            quality: 0.0 // 0.0 means "Don't mesh yet, just build geo and inspect"
+            quality: 0.0,
+            target_layer_id: selectedLayerId // NEW FIELD: Rust needs to know which layer to build
         };
 
         const gmshResult: any = await invoke("run_gmsh_meshing", { req: feaRequest });
@@ -220,6 +238,22 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                 style={{ width: "100%", marginTop: "5px", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
             >
                 {fabPlans.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+
+            {/* NEW: Layer/Part Selector */}
+            <label style={{ fontSize: "0.85em", color: "#888", marginTop: "15px", display: "block" }}>Target Part (Layer)</label>
+            <select 
+                value={selectedLayerId} 
+                onChange={(e) => setSelectedLayerId(e.target.value)}
+                style={{ width: "100%", marginTop: "5px", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
+                disabled={printableLayers.length === 0}
+            >
+                {printableLayers.length === 0 && <option>No 3D Printed Layers</option>}
+                {printableLayers.map(l => (
+                    <option key={l.id} value={l.id}>
+                        {l.name}
+                    </option>
+                ))}
             </select>
         </div>
 

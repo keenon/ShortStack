@@ -21,7 +21,7 @@ self.document = {
 // @ts-ignore
 import initOCCT from "occt-import-js";
 import Module from "manifold-3d";
-import { computeLayer, computeUnionOutline } from "./layerOperations";
+import { computeAnalyzablePart, computeLayer, computeUnionOutline } from "./layerOperations";
 import { loadMesh, convertFile } from "./fileOperations";
 import { computeToolpath } from "./toolpathOperations";
 
@@ -476,6 +476,11 @@ self.onmessage = async (e: MessageEvent) => {
             
             // Cleanup
             garbage.forEach(g => { try { g.delete(); } catch(e) {} });
+        }
+
+        else if (type === "computeAnalyzablePart") {
+            const result = computeAnalyzablePart(payload, manifoldModule);
+            self.postMessage({ id, type: "success", payload: result });
         }
 
     } catch (err: any) {

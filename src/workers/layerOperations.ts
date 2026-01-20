@@ -1,8 +1,281 @@
 import * as THREE from "three";
-import { FootprintBoardOutline, FootprintRect, FootprintLine, FootprintPolygon, FootprintSplitLine, Point } from "../types";
-import { evaluateExpression, getPolyOutlinePoints, generateDovetailPoints } from "../utils/footprintUtils";
+import { FootprintBoardOutline, FootprintRect, FootprintLine, FootprintPolygon, FootprintSplitLine, Point, Footprint, Parameter, StackupLayer, FootprintReference, FootprintUnion } from "../types";
+import { evaluateExpression, getPolyOutlinePoints, generateDovetailPoints, resolvePoint } from "../utils/footprintUtils";
 import { createBoardShape, createLineShape, flattenShapes, shapeToManifold, FlatShape, getLineOutlinePoints, evaluate } from "./meshUtils";
 import { generateProceduralTool } from "./proceduralTool";
+
+// Helper to convert Three.Shape to Manifold Polygons
+function shapeToPolygons(shape: THREE.Shape, resolution: number): number[][][] {
+    const res = resolution || 32;
+    const polys: number[][][] = [];
+    
+    // Outer contour
+    const pts = shape.getPoints(res).map(p => [p.x, p.y]);
+    // Close loop if needed (Manifold expects implied closed loops, but robust against dupe start/end)
+    if (pts.length > 0 && (Math.abs(pts[0][0] - pts[pts.length-1][0]) > 1e-5 || Math.abs(pts[0][1] - pts[pts.length-1][1]) > 1e-5)) {
+        // Points are distinct, keep them
+    } else {
+        pts.pop(); // Remove duplicate end point
+    }
+    polys.push(pts);
+
+    // Holes
+    if (shape.holes && shape.holes.length > 0) {
+        shape.holes.forEach(h => {
+            const hPts = h.getPoints(res).map(p => [p.x, p.y]);
+            if (hPts.length > 0) {
+                if (Math.abs(hPts[0][0] - hPts[hPts.length-1][0]) < 1e-5 && Math.abs(hPts[0][1] - hPts[hPts.length-1][1]) < 1e-5) {
+                    hPts.pop();
+                }
+                polys.push(hPts); // Manifold handles winding automatically usually, or we ensure CCW/CW
+            }
+        });
+    }
+    
+    return polys;
+}
+
+// Recursive function to collect shapes for a specific layer
+function collectShapesForLayer(
+    fp: Footprint, 
+    allFootprints: Footprint[], 
+    params: Parameter[], 
+    layerId: string, 
+    transform = { x: 0, y: 0, angle: 0 }
+): { positives: THREE.Shape[], negatives: THREE.Shape[] } {
+    let positives: THREE.Shape[] = [];
+    let negatives: THREE.Shape[] = [];
+
+    // Helper to evaluate basic geometry
+    // Note: We duplicate some logic from meshUtils/footprintUtils to keep this worker standalone
+    // Ideally, import `createLineShape`, `createBoardShape` from meshUtils if available in worker context.
+    // For this snippet, I will assume we can generate THREE.Shapes.
+
+    fp.shapes.forEach(s => {
+        // --- TRANSFORMS ---
+        const lx = (s.type === "line") ? 0 : evaluateExpression((s as any).x, params);
+        const ly = (s.type === "line") ? 0 : evaluateExpression((s as any).y, params);
+        const la = (s.type === "rect" || s.type === "footprint" || s.type === "union") ? evaluateExpression((s as any).angle, params) : 0;
+
+        const rad = (transform.angle * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        
+        const gx = transform.x + (lx * cos - ly * sin);
+        const gy = transform.y + (lx * sin + ly * cos);
+        const ga = transform.angle + la;
+
+        // --- RECURSION ---
+        if (s.type === "footprint") {
+            const ref = s as FootprintReference;
+            const target = allFootprints.find(f => f.id === ref.footprintId);
+            if (target) {
+                const res = collectShapesForLayer(target, allFootprints, params, layerId, { x: gx, y: gy, angle: ga });
+                positives.push(...res.positives);
+                negatives.push(...res.negatives);
+            }
+            return;
+        }
+
+        if (s.type === "union") {
+            const u = s as FootprintUnion;
+            // Unions act as pass-through containers unless they have specific layer assignments overriding children
+            // For simplicity, we recurse into them.
+            const res = collectShapesForLayer({ ...fp, shapes: u.shapes }, allFootprints, params, layerId, { x: gx, y: gy, angle: ga });
+            positives.push(...res.positives);
+            negatives.push(...res.negatives);
+            return;
+        }
+
+        // --- LAYER CHECK ---
+        // 1. Board Outline: If this is a board and this shape is THE outline for this layer
+        if (s.type === "boardOutline" && fp.isBoard && fp.boardOutlineAssignments?.[layerId] === s.id) {
+            // Generate Shape
+            const shape = new THREE.Shape();
+            // ... (Simple Box fallback if complex logic missing, or implement getBoardShape logic)
+            // Assuming points logic from utils:
+            const points = (s as any).points || [];
+            if(points.length > 2) {
+                // Apply transform to points
+                const tPoints = points.map((p: any) => {
+                    const resolved = resolvePoint(p, fp, allFootprints, params);
+                    // Rotate and Translate
+                    const rx = resolved.x * cos - resolved.y * sin;
+                    const ry = resolved.x * sin + resolved.y * cos;
+                    return { x: gx + rx, y: gy + ry };
+                });
+                shape.moveTo(tPoints[0].x, tPoints[0].y);
+                for(let i=1; i<tPoints.length; i++) shape.lineTo(tPoints[i].x, tPoints[i].y);
+                shape.closePath();
+                positives.push(shape);
+            }
+            return;
+        }
+
+        // 2. Standard Shapes
+        // Check assignment
+        const assigned = s.assignedLayers?.[layerId];
+        if (!assigned && s.type !== "splitLine") return;
+
+        // If split line, it is a negative on ALL layers (usually)
+        const isNegative = s.type === "splitLine" || (s.type !== "boardOutline" && assigned); 
+        
+        // Generate THREE.Shape based on type (Circle, Rect, etc.)
+        const shape = new THREE.Shape();
+        
+        if (s.type === "rect") {
+            const w = evaluateExpression((s as any).width, params);
+            const h = evaluateExpression((s as any).height, params);
+            // Draw rect centered at 0,0, rotate, translate
+            // We can use shape.absellipse for rounded rects or simple moveTo/lineTo
+            // Simplified:
+            const corners = [
+                {x:-w/2, y:-h/2}, {x:w/2, y:-h/2}, {x:w/2, y:h/2}, {x:-w/2, y:h/2}
+            ];
+            const rrad = -(ga * Math.PI / 180); // Visual flip
+            const rcos = Math.cos(rrad); const rsin = Math.sin(rrad);
+            
+            const tCorners = corners.map(p => ({
+                x: gx + (p.x * rcos - p.y * rsin),
+                y: gy + (p.x * rsin + p.y * rcos) // Note: Y flip logic might differ based on coordinate system consistency
+            }));
+            
+            shape.moveTo(tCorners[0].x, tCorners[0].y);
+            tCorners.slice(1).forEach(p => shape.lineTo(p.x, p.y));
+            shape.closePath();
+        } 
+        else if (s.type === "circle") {
+            const r = evaluateExpression((s as any).diameter, params) / 2;
+            shape.absarc(gx, gy, r, 0, Math.PI * 2, false);
+        }
+        else if (s.type === "splitLine") {
+            // Split lines are thin rectangles
+            // ... implementation of split line geometry ...
+            const sx = evaluateExpression((s as any).x, params);
+            const sy = evaluateExpression((s as any).y, params);
+            const ex = evaluateExpression((s as any).endX, params);
+            const ey = evaluateExpression((s as any).endY, params);
+            
+            // Transform to global
+            const p1x = gx; // already transformed lx/ly
+            const p1y = gy;
+            // Vector rotation
+            const p2x = gx + (ex * cos - ey * sin);
+            const p2y = gy + (ex * sin + ey * cos);
+            
+            // Create a thin rectangle along this vector
+            const thick = 0.5; // Default kerf
+            const dx = p2x - p1x;
+            const dy = p2y - p1y;
+            const len = Math.sqrt(dx*dx + dy*dy);
+            const nx = -dy/len * thick/2;
+            const ny = dx/len * thick/2;
+            
+            shape.moveTo(p1x + nx, p1y + ny);
+            shape.lineTo(p2x + nx, p2y + ny);
+            shape.lineTo(p2x - nx, p2y - ny);
+            shape.lineTo(p1x - nx, p1y - ny);
+            shape.closePath();
+            
+            negatives.push(shape);
+            return;
+        }
+
+        // Add to appropriate list
+        // Note: For "Cut" layers, shapes are typically holes (negatives) in the board outline.
+        // For "3D Print" layers, shapes might be additives (positives) OR holes.
+        // Convention: 
+        // - Board Outline is Positive.
+        // - Assigned Shapes on a Board are Negatives (Holes).
+        // - Shapes without a Board Outline context are Positives (Additives).
+        
+        if (fp.isBoard) {
+            negatives.push(shape); // Cut out of the board
+        } else {
+            positives.push(shape); // Additive shape
+        }
+    });
+
+    return { positives, negatives };
+}
+
+export function computeAnalyzablePart(payload: any, manifoldModule: any) {
+    const { footprint, allFootprints, stackup, params, layerId } = payload;
+    const layer = stackup.find((l: StackupLayer) => l.id === layerId);
+    
+    if (!layer || !manifoldModule) return null;
+
+    const thickness = evaluateExpression(layer.thicknessExpression, params);
+    
+    // 1. Collect Shapes
+    const { positives, negatives } = collectShapesForLayer(footprint, allFootprints, params, layerId);
+
+    // 2. Build Manifolds
+    const toManifold = (s: THREE.Shape) => {
+        const polys = shapeToPolygons(s, 32);
+        return manifoldModule.extrude(polys, thickness, 0, 0, [1,1]);
+    };
+
+    let result = null;
+
+    // A. Start with Positives (Union)
+    if (positives.length > 0) {
+        result = toManifold(positives[0]);
+        for(let i=1; i<positives.length; i++) {
+            const next = toManifold(positives[i]);
+            result = manifoldModule.union(result, next);
+        }
+    }
+
+    // B. Subtract Negatives
+    if (negatives.length > 0) {
+        let negUnion = toManifold(negatives[0]);
+        for(let i=1; i<negatives.length; i++) {
+            const next = toManifold(negatives[i]);
+            negUnion = manifoldModule.union(negUnion, next);
+        }
+        
+        if (result) {
+            result = manifoldModule.difference(result, negUnion);
+        }
+    }
+
+    if (!result) return { volume: 0, surfaceArea: 0, meshData: null };
+
+    // 3. Decompose (if split lines caused separation)
+    // Manifold 'decompose' splits disjoint meshes
+    const components = result.decompose();
+    
+    // For now, we return the metrics of the *combined* result, 
+    // or we could return an array of components if the UI supports selecting sub-parts.
+    // The prompt implies selecting "The one we want to analyze".
+    // Let's assume we return the largest component by volume for analysis if split.
+    
+    let bestComp = components[0];
+    let maxVol = -1;
+    
+    // Find largest volume component
+    for (let i=0; i<components.length; i++) {
+        const vol = components[i].getProperties().volume;
+        if (vol > maxVol) {
+            maxVol = vol;
+            bestComp = components[i];
+        }
+    }
+    
+    const finalManifold = bestComp; // Or 'result' if we want all
+    const props = finalManifold.getProperties();
+    const mesh = finalManifold.getMesh();
+
+    return {
+        volume: props.volume,
+        surfaceArea: props.surfaceArea,
+        meshData: {
+            vertices: Array.from(mesh.vertProperties),
+            indices: Array.from(mesh.triVerts)
+        }
+    };
+}
 
 export function computeLayer(id: string, payload: any, manifoldModule: any, report: (msg: string, pct: number) => void) {
     if (!manifoldModule) throw new Error("Manifold not initialized");
