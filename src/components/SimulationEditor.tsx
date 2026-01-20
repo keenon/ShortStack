@@ -72,14 +72,18 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   const [tetMesh, setTetMesh] = useState<{ vertices: number[], indices: number[][] } | null>(null);
   
   // Visual State
-  const [viewMode, setViewMode] = useState<'boundary' | 'mesh'>('boundary');
+  const [viewMode, setViewMode] = useState<'boundary' | 'mesh'>('mesh');
   const [visualSource, setVisualSource] = useState<'manifold' | 'gmsh'>('manifold');
   const [layerClip, setLayerClip] = useState<number>(1.0); // 0.0 to 1.0
   const [shrink, setShrink] = useState(0.9);
-  const [bounds, setBounds] = useState<Bounds | null>(null);
+  // Separate bounds for alignment
+  const [manifoldBounds, setManifoldBounds] = useState<Bounds | null>(null);
+  const [gmshBounds, setGmshBounds] = useState<Bounds | null>(null);
 
   const [selectedLayerId, setSelectedLayerId] = useState<string>("");
   const [partIndex, setPartIndex] = useState<number>(0); // For split parts
+  const [validateEnabled, setValidateEnabled] = useState(true);
+  const [meshSize, setMeshSize] = useState<number>(5.0);
   
   const controlsRef = useRef<any>(null);
 
@@ -104,140 +108,98 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
       }
   }, [printableLayers]);
 
-  // --- 1. Compute Geometry (Target Specific Layer) ---
-  const handleVerifyGeometry = async () => {
-    if (!activePlan || !targetFootprint || !selectedLayerId) return;
+  // --- Unified Simulation Runner ---
+  const runSimulation = async () => {
+    if (!activePlan || !targetFootprint) return;
     setIsProcessing(true);
-    setProcessMessage("Computing Part Geometry...");
-    
+    setProcessMessage(validateEnabled ? "Validating & Meshing..." : "Generating Mesh...");
+
     try {
-        // A. FRONTEND (MANIFOLD)
-        const manifoldResult = await callWorker("computeAnalyzablePart", {
-            footprint: targetFootprint,
-            allFootprints: footprints,
-            stackup,
-            params,
-            layerId: selectedLayerId,
-            partIndex: partIndex
-        }, (progress) => {
-            // Update loading screen with worker progress
-            setProcessMessage(`Frontend: ${progress.message} (${Math.round(progress.percent * 100)}%)`);
-        });
+        // 1. Validation Step (Frontend Manifold)
+        if (validateEnabled) {
+            if (!selectedLayerId) throw new Error("Please select a target layer.");
+            
+            const manifoldResult = await callWorker("computeAnalyzablePart", {
+                footprint: targetFootprint,
+                allFootprints: footprints,
+                stackup,
+                params,
+                layerId: selectedLayerId,
+                partIndex: partIndex
+            }, (progress) => {
+                setProcessMessage(`Frontend: ${progress.message} (${Math.round(progress.percent * 100)}%)`);
+            });
 
-        if (!manifoldResult || !manifoldResult.meshData) {
-            throw new Error("Failed to generate geometry for this layer.");
+            if (manifoldResult && manifoldResult.meshData) {
+                setManifoldMetrics({
+                    volume: manifoldResult.volume,
+                    surfaceArea: manifoldResult.surfaceArea,
+                    computedAt: Date.now()
+                });
+
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.Float32BufferAttribute(manifoldResult.meshData.vertices, 3));
+                if (manifoldResult.meshData.indices) geo.setIndex(Array.from(manifoldResult.meshData.indices));
+                geo.computeVertexNormals();
+                geo.computeBoundingBox();
+                setPreviewGeo(geo);
+                
+                if (geo.boundingBox) {
+                    const size = new THREE.Vector3();
+                    const center = new THREE.Vector3();
+                    geo.boundingBox.getSize(size);
+                    geo.boundingBox.getCenter(center);
+                    setManifoldBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
+                }
+            }
         }
 
-        setManifoldMetrics({
-            volume: manifoldResult.volume,
-            surfaceArea: manifoldResult.surfaceArea,
-            computedAt: Date.now()
-        });
-
-        // Update Preview Mesh
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute('position', new THREE.Float32BufferAttribute(manifoldResult.meshData.vertices, 3));
-        if (manifoldResult.meshData.indices) {
-            geo.setIndex(Array.from(manifoldResult.meshData.indices));
-        }
-        geo.computeVertexNormals();
-        geo.computeBoundingBox();
-        setPreviewGeo(geo);
+        // 2. Meshing Step (Backend Gmsh)
+        setProcessMessage("Running Gmsh Backend...");
         
-        if (geo.boundingBox) {
-            const size = new THREE.Vector3();
-            const center = new THREE.Vector3();
-            geo.boundingBox.getSize(size);
-            geo.boundingBox.getCenter(center);
-            setBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
-        }
-
-        // B. BACKEND (GMSH) VERIFICATION
-        setProcessMessage("Verifying with Backend...");
-        
-        // Construct FEA Request targeting the specific layer
         const feaRequest = {
             footprint: targetFootprint,
             stackup: stackup,
             params: params,
-            quality: 0.0,
+            mesh_size: meshSize, // Pass user defined size
             target_layer_id: selectedLayerId,
             part_index: partIndex
         };
 
-        // Call the sidecar via Rust
-        console.log("Invoking run_gmsh_pipeline with:", feaRequest);
-        const gmshResult: any = await invoke("run_gmsh_pipeline", { req: feaRequest })
-            .catch(err => {
-                console.error("Backend Command Failed:", err);
-                throw new Error("Backend invoke failed: " + (typeof err === 'string' ? err : JSON.stringify(err)));
-            });
+        const result: any = await invoke("run_gmsh_pipeline", { req: feaRequest })
+            .catch(err => { throw new Error("Backend invoke failed: " + JSON.stringify(err)); });
         
-        setGmshMetrics({
-            volume: gmshResult.volume,
-            surfaceArea: gmshResult.surface_area,
-            computedAt: Date.now()
-        });
-
-        // Process Gmsh Mesh for Comparison
-        if (gmshResult.mesh && gmshResult.mesh.vertices) {
-            const flatVerts = gmshResult.mesh.vertices.flat();
-            const tetIndices = gmshResult.mesh.indices.map((t: number[]) => [t[0], t[1], t[2], t[3]]);
-            setTetMesh({ vertices: flatVerts, indices: tetIndices });
-        }
-
-        // Default to Manifold view initially
-        setVisualSource('manifold');
-        setViewMode('boundary');
-
-    } catch (e) {
-        console.error(e);
-        alert("Geometry Verification Failed: " + e);
-    } finally {
-        setIsProcessing(false);
-    }
-  };
-
-  // --- 2. Generate Tetrahedral Mesh (Stage 2) ---
-  const handleGenerateMesh = async () => {
-    if (!activePlan || !targetFootprint) return;
-    setIsProcessing(true);
-    setProcessMessage("Generating Tetrahedral Mesh (this may take a moment)...");
-
-    try {
-        const feaRequest = {
-            footprint: targetFootprint,
-            stackup: stackup,
-            params: params,
-            quality: 1.0 // High quality Request
-        };
-
-        // Call the sidecar via Rust
-        const result: any = await invoke("run_gmsh_pipeline", { req: feaRequest });
-        
-        // Update metrics with backend result
         setGmshMetrics({
             volume: result.volume,
             surfaceArea: result.surface_area,
             computedAt: Date.now()
         });
 
-        // Result.mesh contains { vertices: [[x,y,z]...], indices: [[n1...n10]...] }
-        // We need to flatten vertices for ThreeJS
-        const flatVerts = result.mesh.vertices.flat();
-        // Take only first 4 nodes of 10-node tets for visualization (corners)
-        const tetIndices = result.mesh.indices.map((t: number[]) => [t[0], t[1], t[2], t[3]]);
+        if (result.mesh && result.mesh.vertices) {
+            const flatVerts = result.mesh.vertices.flat();
+            const tetIndices = result.mesh.indices.map((t: number[]) => [t[0], t[1], t[2], t[3]]);
+            setTetMesh({ vertices: flatVerts, indices: tetIndices });
 
-        setTetMesh({
-            vertices: flatVerts,
-            indices: tetIndices
-        });
-        
+            // Calculate Gmsh bounds (Local Z-up)
+            let min = new THREE.Vector3(Infinity, Infinity, Infinity);
+            let max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+            for(let i=0; i<flatVerts.length; i+=3) {
+                const x = flatVerts[i], y = flatVerts[i+1], z = flatVerts[i+2];
+                if (x < min.x) min.x = x; if (y < min.y) min.y = y; if (z < min.z) min.z = z;
+                if (x > max.x) max.x = x; if (y > max.y) max.y = y; if (z > max.z) max.z = z;
+            }
+            const size = new THREE.Vector3().subVectors(max, min);
+            const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
+            setGmshBounds({ min, max, center, size });
+        }
+
+        // Auto-switch view
+        setVisualSource('gmsh');
         setViewMode('mesh');
 
     } catch (e) {
         console.error(e);
-        alert("Meshing Failed: " + e);
+        alert("Simulation Failed: " + e);
     } finally {
         setIsProcessing(false);
     }
@@ -254,8 +216,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
       {isProcessing && <LoadingOverlay message={processMessage} />}
 
       {/* --- SIDEBAR CONTROLS --- */}
-      <div style={{ width: "350px", background: "#222", borderRight: "1px solid #444", display: "flex", flexDirection: "column" }}>
-        
+      <div style={{ width: "350px", background: "#222", borderRight: "1px solid #444", display: "flex", flexDirection: "column", overflowY: "auto" }}>        
         {/* Header / Selection */}
         <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
             <h3 style={{ margin: "0 0 15px 0" }}>FEA Pre-processor</h3>
@@ -295,32 +256,45 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                 />
                 <span style={{ fontSize: "0.8em", color: "#666" }}>0 = Largest (Main)</span>
             </div>
+
+            <label style={{ fontSize: "0.85em", color: "#888", marginTop: "15px", display: "block" }}>Target Mesh Size (mm)</label>
+            <div style={{ display: "flex", gap: "10px", alignItems: "center", marginTop: "5px" }}>
+                <input 
+                    type="number" 
+                    min="0.1" step="0.5"
+                    value={meshSize} 
+                    onChange={(e) => setMeshSize(parseFloat(e.target.value))}
+                    style={{ width: "100%", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
+                />
+            </div>
         </div>
 
-        {/* Step 1: Geometry Verification */}
+        {/* Action Section */}
         <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
-            <h4 style={{ margin: "0 0 10px 0", color: "#ccc" }}>1. Geometry & Verification</h4>
+            <h4 style={{ margin: "0 0 15px 0", color: "#ccc" }}>Actions</h4>
             
-            {/* Source Toggle */}
-            <div style={{ display: 'flex', marginBottom: '15px', background: '#111', padding: '2px', borderRadius: '4px' }}>
-                <button 
-                    onClick={() => setVisualSource('manifold')}
-                    style={{ flex: 1, padding: '6px', border: 'none', background: visualSource === 'manifold' ? '#646cff' : 'transparent', color: 'white', borderRadius: '3px', cursor: 'pointer', fontSize: '0.85em' }}
-                >
-                    Frontend (Manifold)
-                </button>
-                <button 
-                    onClick={() => setVisualSource('gmsh')}
-                    style={{ flex: 1, padding: '6px', border: 'none', background: visualSource === 'gmsh' ? '#d97706' : 'transparent', color: 'white', borderRadius: '3px', cursor: 'pointer', fontSize: '0.85em' }}
-                >
-                    Backend (Gmsh)
-                </button>
+            <div style={{ marginBottom: "15px" }}>
+                <label className="checkbox-label" style={{ display: "flex", alignItems: "center", gap: "8px", color: "#ccc", cursor: "pointer" }}>
+                    <input 
+                        type="checkbox" 
+                        checked={validateEnabled} 
+                        onChange={(e) => setValidateEnabled(e.target.checked)} 
+                    />
+                    Validate against Manifold
+                </label>
             </div>
-            <button className="secondary" onClick={handleVerifyGeometry} style={{ width: "100%", padding: "10px" }}>
-                Compute & Verify Geometry
+
+            <button 
+                className="primary" 
+                onClick={runSimulation} 
+                disabled={isProcessing || !selectedLayerId}
+                style={{ width: "100%", padding: "12px", background: "#2d4b38", border: "1px solid #487e5b", color: "white", cursor: "pointer", borderRadius: "4px" }}
+            >
+                {isProcessing ? "Processing..." : "Run Simulation"}
             </button>
 
-            {manifoldMetrics && gmshMetrics && (
+            {/* Validation Stats */}
+            {validateEnabled && manifoldMetrics && gmshMetrics && (
                 <div style={{ marginTop: "15px", fontSize: "0.85em", background: "#1a1a1a", padding: "10px", borderRadius: "6px" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
                         <thead>
@@ -344,26 +318,30 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                             </tr>
                         </tbody>
                     </table>
-                    <div style={{ marginTop: "8px", fontSize: "0.8em", color: "#666", fontStyle: "italic" }}>
-                        Note: Discrepancies &lt;1% are expected due to triangulation differences.
-                    </div>
                 </div>
             )}
         </div>
 
-        {/* Step 2: Meshing */}
-        <div style={{ padding: "20px", flex: 1, display: "flex", flexDirection: "column" }}>
-            <h4 style={{ margin: "0 0 10px 0", color: "#ccc" }}>2. Discretization</h4>
-            <button 
-                className="primary" 
-                onClick={handleGenerateMesh} 
-                disabled={!manifoldMetrics} // Force verification first
-                style={{ width: "100%", padding: "12px", marginBottom: "20px" }}
-            >
-                Generate Tetrahedrons
-            </button>
+        {/* View Controls */}
+        <div style={{ padding: "20px", flex: 1 }}>
+            <h4 style={{ margin: "0 0 10px 0", color: "#ccc" }}>Visualization</h4>
+            
+            {/* Source Toggle */}
+            <div style={{ display: 'flex', marginBottom: '15px', background: '#111', padding: '2px', borderRadius: '4px' }}>
+                <button 
+                    onClick={() => setVisualSource('manifold')}
+                    style={{ flex: 1, padding: '6px', border: 'none', background: visualSource === 'manifold' ? '#646cff' : 'transparent', color: 'white', borderRadius: '3px', cursor: 'pointer', fontSize: '0.85em' }}
+                >
+                    Frontend (Manifold)
+                </button>
+                <button 
+                    onClick={() => setVisualSource('gmsh')}
+                    style={{ flex: 1, padding: '6px', border: 'none', background: visualSource === 'gmsh' ? '#d97706' : 'transparent', color: 'white', borderRadius: '3px', cursor: 'pointer', fontSize: '0.85em' }}
+                >
+                    Backend (Gmsh)
+                </button>
+            </div>
 
-            {/* View Controls */}
             {tetMesh && (
                 <div style={{ background: "#2a2a2a", padding: "15px", borderRadius: "8px", border: "1px solid #444" }}>
                     <div style={{ marginBottom: "15px" }}>
@@ -435,36 +413,42 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             
             <OrbitControls ref={controlsRef} makeDefault />
 
-            <group position={[0,0,0]}> {/* Center geometry if needed */}
-                {/* 1. Boundary View (Manifold Output) */}
-                {visualSource === 'manifold' && previewGeo && (
-                    <mesh geometry={previewGeo}>
-                        <meshStandardMaterial 
-                            color="#aaa" 
-                            roughness={0.4} 
-                            metalness={0.2} 
-                            transparent 
-                            opacity={0.9}
-                            polygonOffset
-                            polygonOffsetFactor={1}
-                        />
-                        <lineSegments>
-                            <edgesGeometry args={[previewGeo]} />
-                            <lineBasicMaterial color="#444" />
-                        </lineSegments>
-                    </mesh>
+            <group position={[0,0,0]}>
+                {/* 1. Boundary View (Manifold Output) - Centered */}
+                {visualSource === 'manifold' && previewGeo && manifoldBounds && (
+                    <group position={[-manifoldBounds.center.x, -manifoldBounds.center.y, -manifoldBounds.center.z]}>
+                        <mesh geometry={previewGeo}>
+                            <meshStandardMaterial 
+                                color="#aaa" 
+                                roughness={0.4} 
+                                metalness={0.2} 
+                                transparent 
+                                opacity={0.9}
+                                polygonOffset
+                                polygonOffsetFactor={1}
+                            />
+                            <lineSegments>
+                                <edgesGeometry args={[previewGeo]} />
+                                <lineBasicMaterial color="#444" />
+                            </lineSegments>
+                        </mesh>
+                    </group>
                 )}
 
-                {/* 2. Tetrahedral Mesh View (Gmsh Output) */}
-                {(visualSource === 'gmsh' || viewMode === 'mesh') && tetMesh && bounds && (
-                    <TetrahedralRenderer 
-                        mesh={tetMesh} 
-                        // If checking verification (gmsh source), use solid view (shrink=1). If generating mesh, use slider.
-                        shrinkFactor={visualSource === 'gmsh' && viewMode === 'boundary' ? 1.0 : shrink} 
-                        color={visualSource === 'gmsh' ? "#d97706" : "#ff6b6b"}
-                        minZ={bounds.min.z}
-                        clipZ={bounds.min.z + (bounds.max.z - bounds.min.z) * layerClip} 
-                    />
+                {/* 2. Tetrahedral Mesh View (Gmsh Output) - Rotated & Centered */}
+                {visualSource === 'gmsh' && tetMesh && gmshBounds && (
+                    <group rotation={[-Math.PI / 2, 0, 0]}>
+                        <group position={[-gmshBounds.center.x, -gmshBounds.center.y, -gmshBounds.center.z]}>
+                            <TetrahedralRenderer 
+                                mesh={tetMesh} 
+                                // Solid view if 'boundary' mode is active (hides internal structure), else exploded view
+                                shrinkFactor={viewMode === 'boundary' ? 1.0 : shrink} 
+                                color="#d97706"
+                                minZ={gmshBounds.min.z}
+                                clipZ={gmshBounds.min.z + (gmshBounds.max.z - gmshBounds.min.z) * layerClip} 
+                            />
+                        </group>
+                    </group>
                 )}
             </group>
         </Canvas>

@@ -14,7 +14,7 @@ pub struct FeaRequest {
     pub footprint: serde_json::Value,
     pub stackup: Vec<serde_json::Value>,
     pub params: Vec<serde_json::Value>,
-    pub quality: f64,
+    pub mesh_size: f64,
     pub target_layer_id: Option<String>,
     pub part_index: Option<usize>,
 }
@@ -68,9 +68,13 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
     script.push_str("SetFactory(\"OpenCASCADE\");\n");
     script.push_str("Mesh.Algorithm3D = 10; // HXT\n");
     
-    let mesh_size = if req.quality > 0.0 { 10.0 / req.quality } else { 5.0 };
-    script.push_str(&format!("Mesh.CharacteristicLengthMin = {};\n", mesh_size * 0.2));
-    script.push_str(&format!("Mesh.CharacteristicLengthMax = {};\n", mesh_size));
+    // Use user-defined mesh size directly
+    let target_size = if req.mesh_size > 0.0 { req.mesh_size } else { 5.0 };
+    
+    // Min size allows adaptation around small curves (set to 10% of target)
+    // Max size constrains the bulk of the volume
+    script.push_str(&format!("Mesh.CharacteristicLengthMin = {};\n", target_size * 0.1));
+    script.push_str(&format!("Mesh.CharacteristicLengthMax = {};\n", target_size));
 
     // 1. Identify Target Layer Thickness
     let target_layer_id = req.target_layer_id.as_deref().unwrap_or("");
@@ -240,9 +244,10 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
         entity_counter += 1;
     }
     // B. Process Shapes
+    // Iterate REVERSE (Bottom -> Top) so higher shapes (lower index) overwrite lower shapes
     let shapes = req.footprint.get("shapes").and_then(|v| v.as_array());
     if let Some(shape_list) = shapes {
-        for (i, shape) in shape_list.iter().enumerate() {
+        for (i, shape) in shape_list.iter().enumerate().rev() {
             let shape_type = shape.get("type").and_then(|s| s.as_str()).unwrap_or("");
             // Skip outline (already handled) and wireGuides
             if shape_type == "boardOutline" || shape_type == "wireGuide" { continue; }
