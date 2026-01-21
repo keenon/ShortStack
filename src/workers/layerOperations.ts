@@ -415,7 +415,9 @@ export function computeAnalyzablePart(payload: any, manifoldModule: any, report:
             thickness,
             bounds: { minX: -1000, maxX: 1000, minY: -1000, maxY: 1000 },
             resolution: 32,
-            enableSplit: true // Ensure split logic runs so we can verify split parts
+            // Respect payload split settings, fallback to false
+            enableSplit: payload.enableSplit ?? false,
+            splitLineIds: payload.splitLineIds
         };
 
         // If report is not passed (legacy call), mock it

@@ -120,13 +120,18 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         if (validateEnabled) {
             if (!selectedLayerId) throw new Error("Please select a target layer.");
             
+            // Resolve split settings for the worker
+            const activeSplitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
+            
             const manifoldResult = await callWorker("computeAnalyzablePart", {
                 footprint: targetFootprint,
                 allFootprints: footprints,
                 stackup,
                 params,
                 layerId: selectedLayerId,
-                partIndex: partIndex
+                partIndex: partIndex,
+                enableSplit: activeSplitSettings?.enabled || false,
+                splitLineIds: activeSplitSettings?.lineIds
             }, (progress) => {
                 setProcessMessage(`Frontend: ${progress.message} (${Math.round(progress.percent * 100)}%)`);
             });

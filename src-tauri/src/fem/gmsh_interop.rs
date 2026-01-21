@@ -298,37 +298,66 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
                     created = true;
                 },
                 "polygon" => {
-                    if let Some(pts) = shape.get("points").and_then(|p| p.as_array()) {
-                        if pts.len() >= 3 {
-                            let mut line_loop_tags = Vec::new();
-                            let start_p_tag = entity_counter;
-                            let mut p_tags = Vec::new();
+                    if let Some(pts_json) = shape.get("points").and_then(|p| p.as_array()) {
+                        // 1. Parse all points first
+                        let mut raw_points: Vec<(f64, f64)> = Vec::new();
+                        for pt in pts_json {
+                            let px = resolve_param(pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
+                            let py = resolve_param(pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
+                            raw_points.push((x + px, y + py));
+                        }
+
+                        // 2. Dedup Loop (Prevent zero-length lines)
+                        // If end == start, remove end. If adjacent dups, remove.
+                        if raw_points.len() >= 3 {
+                            let mut clean_points = Vec::new();
+                            clean_points.push(raw_points[0]);
                             
-                            // Create Points
-                            for pt in pts {
-                                let px = resolve_param(pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
-                                let py = resolve_param(pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
-                                script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, x + px, y + py));
-                                p_tags.push(entity_counter);
-                                entity_counter += 1;
+                            for i in 1..raw_points.len() {
+                                let last = clean_points.last().unwrap();
+                                let curr = raw_points[i];
+                                let dist = ((curr.0 - last.0).powi(2) + (curr.1 - last.1).powi(2)).sqrt();
+                                if dist > 1e-5 {
+                                    clean_points.push(curr);
+                                }
                             }
                             
-                            // Create Lines
-                            for i in 0..p_tags.len() {
-                                let p1 = p_tags[i];
-                                let p2 = p_tags[(i + 1) % p_tags.len()];
-                                script.push_str(&format!("Line({}) = {{{}, {}}};\n", entity_counter, p1, p2));
-                                line_loop_tags.push(entity_counter);
-                                entity_counter += 1;
+                            // Check closure (if last == first)
+                            let first = clean_points[0];
+                            let last = clean_points.last().unwrap();
+                            let dist_close = ((first.0 - last.0).powi(2) + (first.1 - last.1).powi(2)).sqrt();
+                            if dist_close < 1e-5 && clean_points.len() > 1 {
+                                clean_points.pop();
                             }
-                            
-                            let ll_tag = entity_counter;
-                            let lines_str = line_loop_tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ");
-                            script.push_str(&format!("Curve Loop({}) = {{{}}};\n", ll_tag, lines_str));
-                            entity_counter += 1;
-                            
-                            script.push_str(&format!("Plane Surface({}) = {{{}}};\n", s_tag, ll_tag));
-                            created = true;
+
+                            if clean_points.len() >= 3 {
+                                let mut line_loop_tags = Vec::new();
+                                let mut p_tags = Vec::new();
+                                
+                                // Create Gmsh Points
+                                for (cx, cy) in clean_points {
+                                    script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, cx, cy));
+                                    p_tags.push(entity_counter);
+                                    entity_counter += 1;
+                                }
+                                
+                                // Create Lines
+                                for i in 0..p_tags.len() {
+                                    let p1 = p_tags[i];
+                                    let p2 = p_tags[(i + 1) % p_tags.len()];
+                                    script.push_str(&format!("Line({}) = {{{}, {}}};\n", entity_counter, p1, p2));
+                                    line_loop_tags.push(entity_counter);
+                                    entity_counter += 1;
+                                }
+                                
+                                let ll_tag = entity_counter;
+                                let lines_str = line_loop_tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ");
+                                script.push_str(&format!("Curve Loop({}) = {{{}}};\n", ll_tag, lines_str));
+                                entity_counter += 1;
+                                
+                                script.push_str(&format!("Plane Surface({}) = {{{}}};\n", s_tag, ll_tag));
+                                created = true;
+                            }
                         }
                     }
                 },
@@ -563,7 +592,13 @@ pub async fn run_gmsh_pipeline(app_handle: tauri::AppHandle, req: FeaRequest) ->
     if !output.status.success() {
         let err_log = String::from_utf8_lossy(&output.stderr);
         let out_log = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("Gmsh exited with error.\nSTDERR: {}\nSTDOUT: {}", err_log, out_log));
+        
+        // Print full log to Terminal for debugging
+        println!("[Rust] Gmsh ERROR LOG:\n{}", err_log);
+        
+        // Return truncated log to UI
+        let short_log = err_log.lines().take(10).collect::<Vec<_>>().join("\n");
+        return Err(format!("Gmsh Backend Failed:\n{}\n\n(See terminal for full stack trace)", short_log));
     }
 
     // 5. Parse Output
