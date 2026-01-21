@@ -35,6 +35,9 @@ function App() {
   const [activeTab, setActiveTab] = useState<Tab>("stackup");
   const [fabPlans, setFabPlans] = useState<any[]>([]);
 
+  // Jump target state for cross-editor navigation
+  const [jumpTargetPlanId, setJumpTargetPlanId] = useState<string | null>(null);
+
   // --- UPDATER STATE ---
   const [update, setUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<"idle" | "available" | "downloading" | "installing" | "ready">("idle");
@@ -418,6 +421,11 @@ function App() {
     );
   }
 
+  const handleJumpToPlan = (planId: string) => {
+      setJumpTargetPlanId(planId);
+      setActiveTab("fabrication"); // Switch to the Fabrication tab (adjust "fabrication" to match your tab ID)
+  };
+
   return (
     <div className="container editor-screen">
       <header className="editor-header">
@@ -474,6 +482,8 @@ function App() {
               stackup={stackup}
               params={params}
               meshAssets={meshAssets}
+              requestedPlanId={jumpTargetPlanId}
+              onRequestHandled={() => setJumpTargetPlanId(null)} 
             />
           </div>
         )}
@@ -485,6 +495,7 @@ function App() {
               fabPlans={fabPlans}
               stackup={stackup}
               params={params}
+              onJumpToPlan={handleJumpToPlan}
             />
           </div>
         )}

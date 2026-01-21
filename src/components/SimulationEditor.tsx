@@ -32,20 +32,30 @@ interface Bounds {
 }
 
 // --- Helper UI Components ---
-function LoadingOverlay({ message }: { message: string }) {
+function LoadingOverlay({ message, percent }: { message: string, percent: number }) {
     return (
         <div style={{
             position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
-            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+            backgroundColor: 'rgba(0, 0, 0, 0.85)',
             display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
             zIndex: 9999, backdropFilter: 'blur(5px)'
         }}>
             <div className="spinner" style={{
                 width: '50px', height: '50px', border: '5px solid #444',
                 borderTop: '5px solid #646cff', borderRadius: '50%',
-                animation: 'spin 1s linear infinite'
+                animation: 'spin 1s linear infinite', marginBottom: '20px'
             }} />
-            <h3 style={{ marginTop: '20px', color: 'white' }}>{message}</h3>
+            
+            <div style={{ width: '300px', height: '10px', background: '#333', borderRadius: '5px', overflow: 'hidden' }}>
+                <div style={{ 
+                    width: `${Math.max(0, Math.min(100, percent))}%`, 
+                    height: '100%', 
+                    background: '#646cff', 
+                    transition: 'width 0.2s ease-out' 
+                }} />
+            </div>
+            
+            <h3 style={{ marginTop: '15px', color: 'white', fontFamily: 'monospace', fontSize: '1.1em' }}>{message}</h3>
             <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
         </div>
     );
@@ -58,13 +68,15 @@ interface Props {
     fabPlans: FabricationPlan[];
     stackup: StackupLayer[];
     params: Parameter[];
+    onJumpToPlan?: (planId: string) => void;
 }
 
-export default function SimulationEditor({ footprints, fabPlans, stackup, params }: Props) {
+export default function SimulationEditor({ footprints, fabPlans, stackup, params, onJumpToPlan }: Props) {
   // State
   const [activePlanId, setActivePlanId] = useState<string>(fabPlans.length > 0 ? fabPlans[0].id : "");
   const [isProcessing, setIsProcessing] = useState(false);
   const [processMessage, setProcessMessage] = useState("");
+  const [processPercent, setProcessPercent] = useState(0);
   
   // Data State
   const [manifoldMetrics, setManifoldMetrics] = useState<ComparisonMetrics | null>(null);
@@ -91,6 +103,73 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   const activePlan = fabPlans.find(p => p.id === activePlanId);
   const targetFootprint = footprints.find(f => f.id === activePlan?.footprintId);
 
+  // --- Smart State Reset ---
+  // Reset Gmsh results when parameters change to prevent stale comparisons
+  // Reset Gmsh results and switch view to Manifold when parameters change
+  useEffect(() => {
+      setGmshMetrics(null);
+      setTetMesh(null);
+      setGmshBounds(null);
+      setVisualSource('manifold'); // <--- Prevent stuck blank screen
+  }, [activePlanId, selectedLayerId, partIndex, (activePlan as any)?.layerSplitSettings]);
+
+  // Reset Part Index when Plan or Layer changes
+  useEffect(() => {
+      setPartIndex(0);
+  }, [activePlanId, selectedLayerId]);
+
+  // --- Auto-Preview Effect ---
+  useEffect(() => {
+    if (!activePlan || !targetFootprint || !selectedLayerId) return;
+
+    let isMounted = true;
+    const activeSplitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
+    
+    // We run the Manifold generation quietly to update the preview
+    callWorker("computeAnalyzablePart", {
+        footprint: targetFootprint,
+        allFootprints: footprints,
+        stackup,
+        params,
+        layerId: selectedLayerId,
+        partIndex: partIndex,
+        enableSplit: activeSplitSettings?.enabled || false,
+        splitLineIds: activeSplitSettings?.lineIds
+    }, () => {}).then(result => {
+        if (!isMounted || !result || !result.meshData) return;
+        
+        setManifoldMetrics({
+            volume: result.volume,
+            surfaceArea: result.surfaceArea,
+            computedAt: Date.now()
+        });
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(result.meshData.vertices, 3));
+        if (result.meshData.indices) geo.setIndex(Array.from(result.meshData.indices));
+        geo.computeVertexNormals();
+        geo.computeBoundingBox();
+        
+        setPreviewGeo(geo);
+        
+        if (geo.boundingBox) {
+            const size = new THREE.Vector3();
+            const center = new THREE.Vector3();
+            geo.boundingBox.getSize(size);
+            geo.boundingBox.getCenter(center);
+            setManifoldBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
+        }
+        
+        // Ensure we are viewing the Manifold result if Gmsh hasn't run yet
+        if (visualSource !== 'gmsh') {
+             setVisualSource('manifold');
+        }
+    }).catch(e => console.error("Auto-preview failed", e));
+
+    return () => { isMounted = false; };
+  }, [activePlanId, selectedLayerId, partIndex, validateEnabled, (activePlan as any)?.layerSplitSettings]); // Re-run on setting changes
+
+
   // Filter for valid 3D printable layers
   const printableLayers = useMemo(() => {
       if (!activePlan) return [];
@@ -116,6 +195,8 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
     setProcessMessage(validateEnabled ? "Validating & Meshing..." : "Generating Mesh...");
 
     try {
+        setProcessPercent(0);
+        
         // 1. Validation Step (Frontend Manifold)
         if (validateEnabled) {
             if (!selectedLayerId) throw new Error("Please select a target layer.");
@@ -133,7 +214,8 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                 enableSplit: activeSplitSettings?.enabled || false,
                 splitLineIds: activeSplitSettings?.lineIds
             }, (progress) => {
-                setProcessMessage(`Frontend: ${progress.message} (${Math.round(progress.percent * 100)}%)`);
+                setProcessMessage(`Validating: ${progress.message}`);
+                setProcessPercent(progress.percent * 100);
             });
 
             if (manifoldResult && manifoldResult.meshData) {
@@ -281,7 +363,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
 
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", position: "relative" }}>
-      {isProcessing && <LoadingOverlay message={processMessage} />}
+      {isProcessing && <LoadingOverlay message={processMessage} percent={processPercent} />}
 
       {/* --- SIDEBAR CONTROLS --- */}
       <div style={{ width: "350px", background: "#222", borderRight: "1px solid #444", display: "flex", flexDirection: "column", overflowY: "auto" }}>        
@@ -289,13 +371,22 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
             <h3 style={{ margin: "0 0 15px 0" }}>FEA Pre-processor</h3>
             <label style={{ fontSize: "0.85em", color: "#888" }}>Fabrication Plan</label>
-            <select 
-                value={activePlanId} 
-                onChange={(e) => setActivePlanId(e.target.value)}
-                style={{ width: "100%", marginTop: "5px", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
-            >
-                {fabPlans.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '5px' }}>
+                <select 
+                    value={activePlanId} 
+                    onChange={(e) => setActivePlanId(e.target.value)}
+                    style={{ flexGrow: 1, padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
+                >
+                    {fabPlans.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <button 
+                    onClick={() => onJumpToPlan && activePlanId && onJumpToPlan(activePlanId)}
+                    title="Jump to Fabrication Editor"
+                    style={{ padding: '4px 10px', cursor: 'pointer', background: "#2d4b38", border: "1px solid #487e5b", color: "white", borderRadius: '3px' }}
+                >
+                    Jump to Plan
+                </button>
+            </div>
 
             {/* NEW: Layer/Part Selector */}
             <label style={{ fontSize: "0.85em", color: "#888", marginTop: "15px", display: "block" }}>Target Part (Layer)</label>
@@ -346,7 +437,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             <div style={{ display: "flex", gap: "10px", alignItems: "center", marginTop: "5px" }}>
                 <input 
                     type="number" 
-                    min="0.1" step="0.5"
+                    min="0.1" step="0.1"
                     value={meshSize} 
                     onChange={(e) => setMeshSize(parseFloat(e.target.value))}
                     style={{ width: "100%", padding: "8px", background: "#333", border: "1px solid #555", color: "white" }}
@@ -499,42 +590,52 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             <OrbitControls ref={controlsRef} makeDefault />
 
             <group position={[0,0,0]}>
-                {/* 1. Boundary View (Manifold Output) - Centered */}
-                {visualSource === 'manifold' && previewGeo && manifoldBounds && (
-                    <group position={[-manifoldBounds.center.x, -manifoldBounds.center.y, -manifoldBounds.center.z]}>
-                        <mesh geometry={previewGeo}>
-                            <meshStandardMaterial 
-                                color="#aaa" 
-                                roughness={0.4} 
-                                metalness={0.2} 
-                                transparent 
-                                opacity={0.9}
-                                polygonOffset
-                                polygonOffsetFactor={1}
-                            />
-                            <lineSegments>
-                                <edgesGeometry args={[previewGeo]} />
-                                <lineBasicMaterial color="#444" />
-                            </lineSegments>
-                        </mesh>
-                    </group>
-                )}
+                {/* Unified Scene Alignment based on Manifold Bounds (Reference) */}
+                {(() => {
+                    // Use Manifold center as the scene center if available, otherwise fallback to Gmsh or 0
+                    const center = manifoldBounds?.center || gmshBounds?.center || new THREE.Vector3(0,0,0);
+                    
+                    return (
+                        <group position={[-center.x, -center.y, -center.z]}>
+                            {/* 1. Boundary View (Manifold Output) */}
+                            {visualSource === 'manifold' && previewGeo && (
+                                <mesh geometry={previewGeo}>
+                                    <meshStandardMaterial 
+                                        color="#aaa" 
+                                        roughness={0.4} 
+                                        metalness={0.2} 
+                                        transparent 
+                                        opacity={0.9}
+                                        polygonOffset
+                                        polygonOffsetFactor={1}
+                                    />
+                                    <lineSegments>
+                                        <edgesGeometry args={[previewGeo]} />
+                                        <lineBasicMaterial color="#444" />
+                                    </lineSegments>
+                                </mesh>
+                            )}
 
-                {/* 2. Tetrahedral Mesh View (Gmsh Output) - Rotated & Centered */}
-                {visualSource === 'gmsh' && tetMesh && gmshBounds && (
-                    <group rotation={[-Math.PI / 2, 0, 0]}>
-                        <group position={[-gmshBounds.center.x, -gmshBounds.center.y, -gmshBounds.center.z]}>
-                            <TetrahedralRenderer 
-                                mesh={tetMesh} 
-                                // Solid view if 'boundary' mode is active (hides internal structure), else exploded view
-                                shrinkFactor={viewMode === 'boundary' ? 1.0 : shrink} 
-                                color="#d97706"
-                                minZ={gmshBounds.min.z}
-                                clipZ={gmshBounds.min.z + (gmshBounds.max.z - gmshBounds.min.z) * layerClip} 
-                            />
+                            {/* 2. Tetrahedral Mesh View (Gmsh Output) */}
+                            {visualSource === 'gmsh' && tetMesh && gmshBounds && (
+                                // Gmsh is Z-up (0..T), Manifold is Y-up (-T/2..T/2).
+                                // 1. Center Gmsh mesh at (0,0,0) by subtracting its center.
+                                // 2. Rotate -90 X to align Z-up to Y-up.
+                                <group rotation={[-Math.PI / 2, 0, 0]}>
+                                    <group position={[-gmshBounds.center.x, -gmshBounds.center.y, -gmshBounds.center.z]}>
+                                        <TetrahedralRenderer 
+                                            mesh={tetMesh} 
+                                            shrinkFactor={viewMode === 'boundary' ? 1.0 : shrink} 
+                                            color="#d97706"
+                                            minZ={gmshBounds.min.z}
+                                            clipZ={gmshBounds.min.z + (gmshBounds.max.z - gmshBounds.min.z) * layerClip} 
+                                        />
+                                    </group>
+                                </group>
+                            )}
                         </group>
-                    </group>
-                )}
+                    );
+                })()}
             </group>
         </Canvas>
       </div>

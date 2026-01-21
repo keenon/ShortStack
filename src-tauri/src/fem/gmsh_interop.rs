@@ -159,29 +159,32 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
                             let h_in_opt = next_pt.get("handleIn").filter(|v| !v.is_null());
 
                             if h_out_opt.is_some() || h_in_opt.is_some() {
-                                // Bezier Curve
-                                // Control Points need to be created as Gmsh Points
+                                // Bezier Curve - Force Cubic (4 Points) for Stability
+                                // P0 = Curr
+                                // P1 = Curr + HandleOut (or P0 if missing)
+                                // P2 = Next + HandleIn (or P3 if missing)
+                                // P3 = Next
+                                
                                 let mut bezier_ctrl_tags = Vec::new();
-                                bezier_ctrl_tags.push(p_curr_tag);
+                                bezier_ctrl_tags.push(p_curr_tag); // P0
 
-                                // CP1 = Curr + HandleOut
+                                // --- P1 ---
                                 if let Some(h_out) = h_out_opt {
                                     let hx = resolve_param(h_out.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                                     let hy = resolve_param(h_out.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
                                     
-                                    // Get Curr Abs pos (we don't store it readily above, re-calc)
                                     let cpx = resolve_param(curr_pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                                     let cpy = resolve_param(curr_pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
                                     
-                                    let cp1_x = origin_x + cpx + hx;
-                                    let cp1_y = origin_y + cpy + hy;
-                                    
-                                    script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, cp1_x, cp1_y));
+                                    script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, origin_x + cpx + hx, origin_y + cpy + hy));
                                     bezier_ctrl_tags.push(entity_counter);
                                     entity_counter += 1;
+                                } else {
+                                    // Missing HandleOut -> P1 = P0
+                                    bezier_ctrl_tags.push(p_curr_tag);
                                 }
 
-                                // CP2 = Next + HandleIn
+                                // --- P2 ---
                                 if let Some(h_in) = h_in_opt {
                                     let hx = resolve_param(h_in.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                                     let hy = resolve_param(h_in.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
@@ -189,17 +192,17 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
                                     let npx = resolve_param(next_pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                                     let npy = resolve_param(next_pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
                                     
-                                    let cp2_x = origin_x + npx + hx;
-                                    let cp2_y = origin_y + npy + hy;
-                                    
-                                    script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, cp2_x, cp2_y));
+                                    script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, origin_x + npx + hx, origin_y + npy + hy));
                                     bezier_ctrl_tags.push(entity_counter);
                                     entity_counter += 1;
+                                } else {
+                                    // Missing HandleIn -> P2 = P3
+                                    bezier_ctrl_tags.push(p_next_tag);
                                 }
 
-                                bezier_ctrl_tags.push(p_next_tag);
+                                bezier_ctrl_tags.push(p_next_tag); // P3
                                 
-                                // Create Bezier
+                                // Create Cubic Bezier
                                 let ctrl_str = bezier_ctrl_tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ");
                                 script.push_str(&format!("Bezier({}) = {{{}}};\n", entity_counter, ctrl_str));
                                 line_tags.push(entity_counter);
@@ -244,10 +247,30 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
         entity_counter += 1;
     }
     // B. Process Shapes
-    // Iterate REVERSE (Bottom -> Top) so higher shapes (lower index) overwrite lower shapes
+    // Logic: Separate Splitters from Normal shapes.
+    // Normal shapes run in REVERSE order (Bottom -> Top priority).
+    // Splitters run LAST (Always Top priority) to ensure they cut through everything.
     let shapes = req.footprint.get("shapes").and_then(|v| v.as_array());
-    if let Some(shape_list) = shapes {
-        for (i, shape) in shape_list.iter().enumerate().rev() {
+    if let Some(source_list) = shapes {
+        let mut final_execution_list = Vec::new();
+        let mut splitters = Vec::new();
+        
+        for shape in source_list {
+            let id = shape.get("id").and_then(|s| s.as_str()).unwrap_or("");
+            if id.starts_with("temp_split_") {
+                splitters.push(shape);
+            } else {
+                final_execution_list.push(shape);
+            }
+        }
+        
+        // 1. Standard Shapes (Reversed)
+        final_execution_list.reverse();
+        
+        // 2. Splitters (Appended to end)
+        final_execution_list.extend(splitters);
+
+        for (i, shape) in final_execution_list.iter().enumerate() {
             let shape_type = shape.get("type").and_then(|s| s.as_str()).unwrap_or("");
             // Skip outline (already handled) and wireGuides
             if shape_type == "boardOutline" || shape_type == "wireGuide" { continue; }

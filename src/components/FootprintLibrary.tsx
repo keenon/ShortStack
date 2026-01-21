@@ -22,7 +22,7 @@ export default function FootprintLibrary({ footprints, setFootprints, params, st
   const dragItemIndex = useRef<number | null>(null);
 
   const addFootprint = () => {
-    const newFp: Footprint = { id: crypto.randomUUID(), name: "New Footprint", shapes: [] };
+    const newFp: Footprint = { id: crypto.randomUUID(), name: `Footprint ${footprints.length + 1}`, shapes: [] };
     setFootprints([...footprints, newFp]);
     setEditStack([newFp.id]);
   };

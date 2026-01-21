@@ -40,10 +40,26 @@ interface Props {
   stackup: StackupLayer[];
   params: Parameter[];
   meshAssets: MeshAsset[];
+  // Props for jumping from other editors
+  requestedPlanId?: string | null;
+  onRequestHandled?: () => void;
 }
 
-export default function FabricationEditor({ fabPlans, setFabPlans, footprints, stackup, params, meshAssets }: Props) {
-  const [activePlanId, setActivePlanId] = useState<string | null>(null);
+export default function FabricationEditor({ fabPlans, setFabPlans, footprints, stackup, params, meshAssets, requestedPlanId, onRequestHandled }: Props) {  
+const [activePlanId, setActivePlanId] = useState<string | null>(null);
+
+  // Handle external jump requests
+  useEffect(() => {
+    if (requestedPlanId && requestedPlanId !== activePlanId) {
+        const target = fabPlans.find(p => p.id === requestedPlanId);
+        if (target) {
+            setActivePlanId(target.id);
+            // Notify parent that we processed the request so it can clear the state
+            if (onRequestHandled) onRequestHandled();
+        }
+    }
+  }, [requestedPlanId, fabPlans, activePlanId, onRequestHandled]);
+  
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState("");
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -176,7 +192,7 @@ export default function FabricationEditor({ fabPlans, setFabPlans, footprints, s
   const addPlan = () => {
     const newPlan: FabricationPlan = { 
         id: crypto.randomUUID(), 
-        name: "New Fabrication Plan", 
+        name: `Fabrication Plan ${fabPlans.length + 1}`, 
         footprintId: footprints.length > 0 ? footprints[0].id : "", 
         layerMethods: {},
         waterlineSettings: {},
