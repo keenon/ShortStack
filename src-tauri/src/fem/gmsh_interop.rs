@@ -72,22 +72,22 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
     let mut script = String::new();
     
     // Header
-    script.push_str("SetFactory(\"OpenCASCADE\");\\n");
+    script.push_str("SetFactory(\"OpenCASCADE\");\n");
     
     // Performance Optimization: Use all available threads
-    script.push_str("General.NumThreads = 0; // 0 = Auto-detect all cores\\n");
-    script.push_str("Mesh.MaxNumThreads1D = 0;\\n");
-    script.push_str("Mesh.MaxNumThreads2D = 0;\\n");
-    script.push_str("Mesh.MaxNumThreads3D = 0;\\n");
+    script.push_str("General.NumThreads = 0; // 0 = Auto-detect all cores\n");
+    script.push_str("Mesh.MaxNumThreads1D = 0;\n");
+    script.push_str("Mesh.MaxNumThreads2D = 0;\n");
+    script.push_str("Mesh.MaxNumThreads3D = 0;\n");
     
     // Geometry Healing: Fix "BRep contains more volumes" errors
     // This removes microscopic artifacts that cause HXT to fail and fallback to single-threaded Delaunay
-    script.push_str("Geometry.OccFixDegenerated = 1;\\n");
-    script.push_str("Geometry.OccFixSmallEdges = 1;\\n");
-    script.push_str("Geometry.OccFixSmallFaces = 1;\\n");
-    script.push_str("Geometry.Tolerance = 1e-6;\\n"); 
+    // script.push_str("Geometry.OccFixDegenerated = 1;\n");
+    // script.push_str("Geometry.OccFixSmallEdges = 1;\n");
+    // script.push_str("Geometry.OccFixSmallFaces = 1;\n");
+    // script.push_str("Geometry.Tolerance = 1e-6;\n"); 
     
-    script.push_str("Mesh.Algorithm3D = 10; // HXT (Parallel Tetrahedral)\\n");
+    script.push_str("Mesh.Algorithm3D = 10; // HXT (Parallel Tetrahedral)\n");
     
     // Use user-defined mesh size directly
     let target_size = if req.mesh_size > 0.0 { req.mesh_size } else { 5.0 };
@@ -118,18 +118,35 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
         layer_thickness = 1.0;
     }
 
-    // --- GEOMETRY CONSTRUCTION ---
-    // Strategy: "Painter's Algorithm" with CSG
-    // 1. Create Base Volume from Board Outline (0 to Thickness)
-    // 2. For each shape (in order):
-    //    a. CUT: Subtract the shape's profile infinitely (clears previous info).
-    //    b. ADD: Union the shape's profile from 0 to (Thickness - Depth).
+    // --- GEOMETRY CONSTRUCTION (Optimized) ---
+    // Strategy: "Painter's Algorithm" with CSG using Gmsh Auto-Indexing (newp, newl, etc.)
+    // We map Layer IDs to short codes (L0, L1...) to keep .geo variable names concise.
     
-    let mut current_vol = 1; // We will track the main volume tag
-    let mut entity_counter = 100; // Counter for temp objects
+    // 1. Build Layer Short-Name Map
+    let mut layer_name_map = HashMap::new();
+    for (i, l) in req.stackup.iter().enumerate() {
+        if let Some(id) = l.get("id").and_then(|s| s.as_str()) {
+            layer_name_map.insert(id.to_string(), format!("L{}", i));
+        }
+    }
+    
+    // Helper to sanitize shape names for variables
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect()
+    };
+
+    let layer_var = if target_layer_id.is_empty() { 
+        "L_Main".to_string() 
+    } else { 
+        layer_name_map.get(target_layer_id).cloned().unwrap_or_else(|| "L_Target".to_string())
+    };
+
+    script.push_str(&format!("// --- Context: {} ---\n", layer_var));
 
     // A. Base Board Outline
-    script.push_str("// --- Base Board Outline ---\n");
+    script.push_str("// [Operation] Generating Base Board Stock\n");
     
     let mut outline_created = false;
     let shapes = req.footprint.get("shapes").and_then(|v| v.as_array());
@@ -137,31 +154,25 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
     if let Some(list) = shapes {
         for shape in list {
             if shape.get("type").and_then(|s| s.as_str()) == Some("boardOutline") {
-                // Resolve Origin
                 let origin_x = resolve_param(shape.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                 let origin_y = resolve_param(shape.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
 
                 if let Some(points) = shape.get("points").and_then(|p| p.as_array()) {
                     if points.len() >= 3 {
-                        let mut point_tags = Vec::new();
-                        let start_pt_tag = entity_counter;
+                        script.push_str("// Creating Outline Points\n");
+                        let mut point_vars = Vec::new();
                         
-                        // 1. Create Points
-                        for pt in points {
+                        for (i, pt) in points.iter().enumerate() {
                             let px = resolve_param(pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                             let py = resolve_param(pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
                             
-                            // Absolute Position = Shape Origin + Point Local
-                            let abs_x = origin_x + px;
-                            let abs_y = origin_y + py;
-                            
-                            script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, abs_x, abs_y));
-                            point_tags.push(entity_counter);
-                            entity_counter += 1;
+                            let p_var = format!("p_{}_out_{}", layer_var, i);
+                            script.push_str(&format!("{} = newp; Point({}) = {{{}, {}, 0, 1.0}};\n", p_var, p_var, origin_x + px, origin_y + py));
+                            point_vars.push(p_var);
                         }
 
-                        // 2. Create Lines / Beziers
-                        let mut line_tags = Vec::new();
+                        script.push_str("// Creating Outline Curves\n");
+                        let mut line_vars = Vec::new();
                         let num = points.len();
                         
                         for i in 0..num {
@@ -171,89 +182,66 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
                             let curr_pt = &points[curr_idx];
                             let next_pt = &points[next_idx];
                             
-                            let p_curr_tag = point_tags[curr_idx];
-                            let p_next_tag = point_tags[next_idx];
+                            let p_curr = &point_vars[curr_idx];
+                            let p_next = &point_vars[next_idx];
 
-                            // Check for Handles
-                            // handleOut on current, handleIn on next
                             let h_out_opt = curr_pt.get("handleOut").filter(|v| !v.is_null());
                             let h_in_opt = next_pt.get("handleIn").filter(|v| !v.is_null());
 
-                            if h_out_opt.is_some() || h_in_opt.is_some() {
-                                // Bezier Curve - Force Cubic (4 Points) for Stability
-                                // P0 = Curr
-                                // P1 = Curr + HandleOut (or P0 if missing)
-                                // P2 = Next + HandleIn (or P3 if missing)
-                                // P3 = Next
-                                
-                                let mut bezier_ctrl_tags = Vec::new();
-                                bezier_ctrl_tags.push(p_curr_tag); // P0
+                            let line_var = format!("l_{}_out_{}", layer_var, i);
 
-                                // --- P1 ---
+                            if h_out_opt.is_some() || h_in_opt.is_some() {
+                                let mut bezier_ctrl = Vec::new();
+                                bezier_ctrl.push(p_curr.clone());
+
                                 if let Some(h_out) = h_out_opt {
                                     let hx = resolve_param(h_out.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                                     let hy = resolve_param(h_out.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
-                                    
                                     let cpx = resolve_param(curr_pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                                     let cpy = resolve_param(curr_pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
                                     
-                                    script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, origin_x + cpx + hx, origin_y + cpy + hy));
-                                    bezier_ctrl_tags.push(entity_counter);
-                                    entity_counter += 1;
+                                    let cp_var = format!("cp_{}_{}_a", layer_var, i);
+                                    script.push_str(&format!("{} = newp; Point({}) = {{{}, {}, 0, 1.0}};\n", cp_var, cp_var, origin_x + cpx + hx, origin_y + cpy + hy));
+                                    bezier_ctrl.push(cp_var);
                                 } else {
-                                    // Missing HandleOut -> P1 = P0
-                                    bezier_ctrl_tags.push(p_curr_tag);
+                                    bezier_ctrl.push(p_curr.clone());
                                 }
 
-                                // --- P2 ---
                                 if let Some(h_in) = h_in_opt {
                                     let hx = resolve_param(h_in.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                                     let hy = resolve_param(h_in.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
-                                    
                                     let npx = resolve_param(next_pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
                                     let npy = resolve_param(next_pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
                                     
-                                    script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, origin_x + npx + hx, origin_y + npy + hy));
-                                    bezier_ctrl_tags.push(entity_counter);
-                                    entity_counter += 1;
+                                    let cp_var = format!("cp_{}_{}_b", layer_var, i);
+                                    script.push_str(&format!("{} = newp; Point({}) = {{{}, {}, 0, 1.0}};\n", cp_var, cp_var, origin_x + npx + hx, origin_y + npy + hy));
+                                    bezier_ctrl.push(cp_var);
                                 } else {
-                                    // Missing HandleIn -> P2 = P3
-                                    bezier_ctrl_tags.push(p_next_tag);
+                                    bezier_ctrl.push(p_next.clone());
                                 }
 
-                                bezier_ctrl_tags.push(p_next_tag); // P3
+                                bezier_ctrl.push(p_next.clone());
                                 
-                                // Create Cubic BSpline (More robust in OpenCASCADE than Bezier)
-                                let ctrl_str = bezier_ctrl_tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ");
-                                script.push_str(&format!("BSpline({}) = {{{}}};\n", entity_counter, ctrl_str));
-                                line_tags.push(entity_counter);
-                                entity_counter += 1;
-
+                                script.push_str(&format!("{} = newl; BSpline({}) = {{{}}};\n", line_var, line_var, bezier_ctrl.join(", ")));
                             } else {
-                                // Straight Line
-                                script.push_str(&format!("Line({}) = {{{}, {}}};\n", entity_counter, p_curr_tag, p_next_tag));
-                                line_tags.push(entity_counter);
-                                entity_counter += 1;
+                                script.push_str(&format!("{} = newl; Line({}) = {{{}, {}}};\n", line_var, line_var, p_curr, p_next));
                             }
+                            line_vars.push(line_var);
                         }
 
-                        // 3. Curve Loop and Surface
-                        let loop_tag = entity_counter;
-                        let line_str = line_tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ");
-                        script.push_str(&format!("Curve Loop({}) = {{{}}};\n", loop_tag, line_str));
-                        entity_counter += 1;
-
-                        let surf_tag = entity_counter;
-                        script.push_str(&format!("Plane Surface({}) = {{{}}};\n", surf_tag, loop_tag));
-                        // No increment needed yet, surf_tag is used below
+                        let ll_var = format!("ll_{}_out", layer_var);
+                        let s_var = format!("s_{}_out", layer_var);
                         
-                        // 4. Extrude
-                        script.push_str(&format!("base_out[] = Extrude {{0, 0, {}}} {{ Surface{{{}}}; }};\n", layer_thickness, surf_tag));
-                        script.push_str("v_main = base_out[1];\n");
+                        script.push_str(&format!("{} = newll; Curve Loop({}) = {{{}}};\n", ll_var, ll_var, line_vars.join(", ")));
+                        script.push_str(&format!("{} = news; Plane Surface({}) = {{{}}};\n", s_var, s_var, ll_var));
                         
-                        entity_counter += 10; // Bump safety
+                        script.push_str("// Extruding Base Stock\n");
+                        script.push_str(&format!("out_{}[] = Extrude {{0, 0, {}}} {{ Surface{{{}}}; }};\n", layer_var, layer_thickness, s_var));
+                        // Track volume list to support multi-body results
+                        script.push_str(&format!("v_main_list[] = out_{}[1];\n", layer_var));
+                        
                         outline_created = true;
-                        break; // Stop after first outline found
+                        break;
                     }
                 }
             }
@@ -261,16 +249,13 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
     }
 
     if !outline_created {
-        // Fallback Base (100x100 rect)
-        script.push_str(&format!("Rectangle({}) = {{-50, -50, 0, 100, 100, 0}};\n", entity_counter));
-        script.push_str(&format!("base_out[] = Extrude {{0, 0, {}}} {{ Surface{{{}}}; }};\n", layer_thickness, entity_counter));
-        script.push_str("v_main = base_out[1];\n");
-        entity_counter += 1;
+        script.push_str("// [Fallback] No outline found, creating 100x100 stock\n");
+        script.push_str("s_fallback = news; Rectangle(s_fallback) = {-50, -50, 0, 100, 100, 0};\n");
+        script.push_str(&format!("out_fallback[] = Extrude {{0, 0, {}}} {{ Surface{{s_fallback}}; }};\n", layer_thickness));
+        script.push_str("v_main_list[] = out_fallback[1];\n");
     }
+
     // B. Process Shapes
-    // Logic: Separate Splitters from Normal shapes.
-    // Normal shapes run in REVERSE order (Bottom -> Top priority).
-    // Splitters run LAST (Always Top priority) to ensure they cut through everything.
     let shapes = req.footprint.get("shapes").and_then(|v| v.as_array());
     if let Some(source_list) = shapes {
         let mut final_execution_list = Vec::new();
@@ -285,26 +270,19 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
             }
         }
         
-        // 1. Standard Shapes (Reversed)
         final_execution_list.reverse();
-        
-        // 2. Splitters (Appended to end)
         final_execution_list.extend(splitters);
 
         for (i, shape) in final_execution_list.iter().enumerate() {
             let shape_type = shape.get("type").and_then(|s| s.as_str()).unwrap_or("");
-            // Skip outline (already handled) and wireGuides
             if shape_type == "boardOutline" || shape_type == "wireGuide" { continue; }
 
-            // Get Cut Depth
-            // Logic: Shape -> assignedLayers -> [target_layer_id] -> depth (or object with depth)
             let assigned = shape.get("assignedLayers");
             let mut depth_expr = serde_json::Value::Null;
             
             if let Some(map) = assigned {
                 if let Some(target_layer_id) = req.target_layer_id.as_deref() {
                     if let Some(val) = map.get(target_layer_id) {
-                        // Value can be string "5" or object {depth: "5", ...}
                         if val.is_object() {
                             depth_expr = val.get("depth").cloned().unwrap_or(serde_json::Value::Null);
                         } else {
@@ -314,36 +292,38 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
                 }
             }
 
-            // If not assigned to this layer, skip
             if depth_expr.is_null() { continue; }
 
             let depth = resolve_param(&depth_expr, &req.params);
             
-            // Define Shape Profile Surface
             let x = resolve_param(shape.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
             let y = resolve_param(shape.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
-            let s_tag = entity_counter;
-            entity_counter += 1;
+            
+            // Short unique identifier for shape vars
+            let shape_raw_name = shape.get("name").and_then(|s| s.as_str()).unwrap_or("shp");
+            let shape_var = format!("s_{}_{}_{}", layer_var, i, sanitize(shape_raw_name));
             
             let mut created = false;
+
+            script.push_str(&format!("\n// [Operation] Processing Shape: {} ({})\n", shape_raw_name, shape_type));
 
             match shape_type {
                 "rect" => {
                     let w = resolve_param(shape.get("width").unwrap_or(&serde_json::Value::Null), &req.params);
                     let h = resolve_param(shape.get("height").unwrap_or(&serde_json::Value::Null), &req.params);
                     let r = resolve_param(shape.get("cornerRadius").unwrap_or(&serde_json::Value::Null), &req.params);
-                    script.push_str(&format!("Rectangle({}) = {{{}, {}, 0, {}, {}, {}}};\n", s_tag, x - w/2.0, y - h/2.0, w, h, r));
+                    
+                    script.push_str(&format!("{} = news; Rectangle({}) = {{{}, {}, 0, {}, {}, {}}};\n", shape_var, shape_var, x - w/2.0, y - h/2.0, w, h, r));
                     created = true;
                 },
                 "circle" => {
                     let d = resolve_param(shape.get("diameter").unwrap_or(&serde_json::Value::Null), &req.params);
                     let r = d / 2.0;
-                    script.push_str(&format!("Disk({}) = {{{}, {}, 0, {}}};\n", s_tag, x, y, r));
+                    script.push_str(&format!("{} = news; Disk({}) = {{{}, {}, 0, {}}};\n", shape_var, shape_var, x, y, r));
                     created = true;
                 },
                 "polygon" => {
                     if let Some(pts_json) = shape.get("points").and_then(|p| p.as_array()) {
-                        // 1. Parse all points first
                         let mut raw_points: Vec<(f64, f64)> = Vec::new();
                         for pt in pts_json {
                             let px = resolve_param(pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
@@ -351,55 +331,44 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
                             raw_points.push((x + px, y + py));
                         }
 
-                        // 2. Dedup Loop (Prevent zero-length lines)
-                        // If end == start, remove end. If adjacent dups, remove.
+                        // Sanitize points (dedup)
                         if raw_points.len() >= 3 {
-                            let mut clean_points = Vec::new();
-                            clean_points.push(raw_points[0]);
-                            
-                            for i in 1..raw_points.len() {
-                                let last = clean_points.last().unwrap();
-                                let curr = raw_points[i];
-                                let dist = ((curr.0 - last.0).powi(2) + (curr.1 - last.1).powi(2)).sqrt();
-                                if dist > 1e-5 {
-                                    clean_points.push(curr);
-                                }
+                            let mut clean = Vec::new();
+                            clean.push(raw_points[0]);
+                            for k in 1..raw_points.len() {
+                                let last = clean.last().unwrap();
+                                let curr = raw_points[k];
+                                let d = ((curr.0 - last.0).powi(2) + (curr.1 - last.1).powi(2)).sqrt();
+                                if d > 1e-5 { clean.push(curr); }
                             }
-                            
-                            // Check closure (if last == first)
-                            let first = clean_points[0];
-                            let last = clean_points.last().unwrap();
-                            let dist_close = ((first.0 - last.0).powi(2) + (first.1 - last.1).powi(2)).sqrt();
-                            if dist_close < 1e-5 && clean_points.len() > 1 {
-                                clean_points.pop();
+                            // Close loop check
+                            let first = clean[0];
+                            let last = clean.last().unwrap();
+                            if ((first.0 - last.0).powi(2) + (first.1 - last.1).powi(2)).sqrt() < 1e-5 && clean.len() > 1 {
+                                clean.pop();
                             }
 
-                            if clean_points.len() >= 3 {
-                                let mut line_loop_tags = Vec::new();
+                            if clean.len() >= 3 {
+                                script.push_str("// Polygon Points\n");
                                 let mut p_tags = Vec::new();
-                                
-                                // Create Gmsh Points
-                                for (cx, cy) in clean_points {
-                                    script.push_str(&format!("Point({}) = {{{}, {}, 0, 1.0}};\n", entity_counter, cx, cy));
-                                    p_tags.push(entity_counter);
-                                    entity_counter += 1;
+                                for (k, (cx, cy)) in clean.iter().enumerate() {
+                                    let p_var = format!("{}_p{}", shape_var, k);
+                                    script.push_str(&format!("{} = newp; Point({}) = {{{}, {}, 0, 1.0}};\n", p_var, p_var, cx, cy));
+                                    p_tags.push(p_var);
                                 }
                                 
-                                // Create Lines
-                                for i in 0..p_tags.len() {
-                                    let p1 = p_tags[i];
-                                    let p2 = p_tags[(i + 1) % p_tags.len()];
-                                    script.push_str(&format!("Line({}) = {{{}, {}}};\n", entity_counter, p1, p2));
-                                    line_loop_tags.push(entity_counter);
-                                    entity_counter += 1;
+                                let mut l_tags = Vec::new();
+                                for k in 0..p_tags.len() {
+                                    let p1 = &p_tags[k];
+                                    let p2 = &p_tags[(k + 1) % p_tags.len()];
+                                    let l_var = format!("{}_l{}", shape_var, k);
+                                    script.push_str(&format!("{} = newl; Line({}) = {{{}, {}}};\n", l_var, l_var, p1, p2));
+                                    l_tags.push(l_var);
                                 }
                                 
-                                let ll_tag = entity_counter;
-                                let lines_str = line_loop_tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ");
-                                script.push_str(&format!("Curve Loop({}) = {{{}}};\n", ll_tag, lines_str));
-                                entity_counter += 1;
-                                
-                                script.push_str(&format!("Plane Surface({}) = {{{}}};\n", s_tag, ll_tag));
+                                let ll_var = format!("{}_ll", shape_var);
+                                script.push_str(&format!("{} = newll; Curve Loop({}) = {{{}}};\n", ll_var, ll_var, l_tags.join(", ")));
+                                script.push_str(&format!("{} = news; Plane Surface({}) = {{{}}};\n", shape_var, shape_var, ll_var));
                                 created = true;
                             }
                         }
@@ -409,54 +378,98 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
             }
 
             if created {
-                // 1. CUT: Subtract infinite column
-                // Move surface down significantly to ensure thorough cut
-                // Extrude up to Thickness + large margin to ensure we clear any previous "islands"
-                // Using 1000.0 as safety margin
                 let cut_depth = layer_thickness + 1000.0;
                 let cut_start_z = -500.0;
+                let v_cut_var = format!("v_cut_{}", i);
+                let list_cut_var = format!("out_cut_{}", i);
                 
-                script.push_str(&format!("v_cut_list[] = Extrude {{0, 0, {}}} {{ Surface{{{}}}; }};\n", cut_depth, s_tag));
-                script.push_str("v_cut = v_cut_list[1];\n");
-                script.push_str(&format!("Translate {{0, 0, {}}} {{ Volume{{v_cut}}; }}\n", cut_start_z)); // Shift down
+                script.push_str("// Creating Cut Volume (Subtraction)\n");
+                script.push_str(&format!("{}[] = Extrude {{0, 0, {}}} {{ Surface{{{}}}; }};\n", list_cut_var, cut_depth, shape_var));
+                script.push_str(&format!("{} = {}[1];\n", v_cut_var, list_cut_var));
+                script.push_str(&format!("Translate {{0, 0, {}}} {{ Volume{{{}}}; }}\n", cut_start_z, v_cut_var));
                 
-                // Boolean Difference
-                script.push_str("res_cut[] = BooleanDifference{ Volume{v_main}; Delete; }{ Volume{v_cut}; Delete; };\n");
-                script.push_str("v_main = res_cut[0];\n");
+                script.push_str(&format!("res_cut_{}[] = BooleanDifference{{ Volume{{ v_main_list[] }}; Delete; }}{{ Volume{{{}}}; Delete; }};\n", i, v_cut_var));
+                script.push_str(&format!("v_main_list[] = res_cut_{}[];\n", i));
 
-                // 2. ADD: Add back material if depth < thickness
+                // 2. ADD (Keep)
                 let remaining_height = layer_thickness - depth;
                 if remaining_height > 1e-4 {
-                    // We need the surface again. Since Extrude might consume/modify, recreate or copy?
-                    // OpenCASCADE Factory Extrude usually keeps base unless deleted? 
-                    // Actually we deleted v_cut which depended on s_tag.
-                    // Safest: Re-create surface.
-                    let s_keep_tag = entity_counter; 
-                    entity_counter += 1;
-                    
-                    // Re-emit geometry command
+                    script.push_str("// Creating Keep Volume (Add back partial depth)\n");
+                    // Re-create surface 
+                    let shape_keep_var = format!("{}_keep", shape_var);
                     match shape_type {
                         "rect" => {
                             let w = resolve_param(shape.get("width").unwrap_or(&serde_json::Value::Null), &req.params);
                             let h = resolve_param(shape.get("height").unwrap_or(&serde_json::Value::Null), &req.params);
                             let r = resolve_param(shape.get("cornerRadius").unwrap_or(&serde_json::Value::Null), &req.params);
-                            script.push_str(&format!("Rectangle({}) = {{{}, {}, 0, {}, {}, {}}};\n", s_keep_tag, x - w/2.0, y - h/2.0, w, h, r));
+                            script.push_str(&format!("{} = news; Rectangle({}) = {{{}, {}, 0, {}, {}, {}}};\n", shape_keep_var, shape_keep_var, x - w/2.0, y - h/2.0, w, h, r));
                         },
                         "circle" => {
                             let d = resolve_param(shape.get("diameter").unwrap_or(&serde_json::Value::Null), &req.params);
                             let r = d / 2.0;
-                            script.push_str(&format!("Disk({}) = {{{}, {}, 0, {}}};\n", s_keep_tag, x, y, r));
+                            script.push_str(&format!("{} = news; Disk({}) = {{{}, {}, 0, {}}};\n", shape_keep_var, shape_keep_var, x, y, r));
+                        },
+                        "polygon" => {
+                            if let Some(pts_json) = shape.get("points").and_then(|p| p.as_array()) {
+                                let mut raw_points: Vec<(f64, f64)> = Vec::new();
+                                for pt in pts_json {
+                                    let px = resolve_param(pt.get("x").unwrap_or(&serde_json::Value::Null), &req.params);
+                                    let py = resolve_param(pt.get("y").unwrap_or(&serde_json::Value::Null), &req.params);
+                                    raw_points.push((x + px, y + py));
+                                }
+
+                                // Sanitize points (dedup)
+                                if raw_points.len() >= 3 {
+                                    let mut clean = Vec::new();
+                                    clean.push(raw_points[0]);
+                                    for k in 1..raw_points.len() {
+                                        let last = clean.last().unwrap();
+                                        let curr = raw_points[k];
+                                        let d = ((curr.0 - last.0).powi(2) + (curr.1 - last.1).powi(2)).sqrt();
+                                        if d > 1e-5 { clean.push(curr); }
+                                    }
+                                    let first = clean[0];
+                                    let last = clean.last().unwrap();
+                                    if ((first.0 - last.0).powi(2) + (first.1 - last.1).powi(2)).sqrt() < 1e-5 && clean.len() > 1 {
+                                        clean.pop();
+                                    }
+
+                                    if clean.len() >= 3 {
+                                        script.push_str(&format!("// Polygon Keep Surface for {}\n", shape_keep_var));
+                                        let mut p_tags = Vec::new();
+                                        for (k, (cx, cy)) in clean.iter().enumerate() {
+                                            let p_var = format!("{}_p{}", shape_keep_var, k);
+                                            script.push_str(&format!("{} = newp; Point({}) = {{{}, {}, 0, 1.0}};\n", p_var, p_var, cx, cy));
+                                            p_tags.push(p_var);
+                                        }
+                                        
+                                        let mut l_tags = Vec::new();
+                                        for k in 0..p_tags.len() {
+                                            let p1 = &p_tags[k];
+                                            let p2 = &p_tags[(k + 1) % p_tags.len()];
+                                            let l_var = format!("{}_l{}", shape_keep_var, k);
+                                            script.push_str(&format!("{} = newl; Line({}) = {{{}, {}}};\n", l_var, l_var, p1, p2));
+                                            l_tags.push(l_var);
+                                        }
+                                        
+                                        let ll_var = format!("{}_ll", shape_keep_var);
+                                        script.push_str(&format!("{} = newll; Curve Loop({}) = {{{}}};\n", ll_var, ll_var, l_tags.join(", ")));
+                                        script.push_str(&format!("{} = news; Plane Surface({}) = {{{}}};\n", shape_keep_var, shape_keep_var, ll_var));
+                                    }
+                                }
+                            }
                         },
                         _ => {}
                     }
 
-                    // Extrude Keeper Column
-                    script.push_str(&format!("v_keep_list[] = Extrude {{0, 0, {}}} {{ Surface{{{}}}; }};\n", remaining_height, s_keep_tag));
-                    script.push_str("v_keep = v_keep_list[1];\n");
+                    let v_keep_var = format!("v_keep_{}", i);
+                    let list_keep_var = format!("out_keep_{}", i);
+
+                    script.push_str(&format!("{}[] = Extrude {{0, 0, {}}} {{ Surface{{{}}}; }};\n", list_keep_var, remaining_height, shape_keep_var));
+                    script.push_str(&format!("{} = {}[1];\n", v_keep_var, list_keep_var));
                     
-                    // Boolean Union
-                    script.push_str("res_union[] = BooleanUnion{ Volume{v_main}; Delete; }{ Volume{v_keep}; Delete; };\n");
-                    script.push_str("v_main = res_union[0];\n");
+                    script.push_str(&format!("res_union_{}[] = BooleanUnion{{ Volume{{ v_main_list[] }}; Delete; }}{{ Volume{{{}}}; Delete; }};\n", i, v_keep_var));
+                    script.push_str(&format!("v_main_list[] = res_union_{}[];\n", i));
                 }
             }
         }

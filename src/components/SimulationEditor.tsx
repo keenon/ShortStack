@@ -229,6 +229,10 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   useEffect(() => {
     if (!activePlan || !targetFootprint || !selectedLayerId) return;
 
+    // GUARD: If we are restoring a heavy task (Meshing/Validating), do NOT switch to Preview mode.
+    // We check globalSimState directly to avoid race conditions on mount.
+    if (globalSimState.mode === 'meshing' || globalSimState.mode === 'validating') return;
+
     let isMounted = true;
     const activeSplitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
     
@@ -463,6 +467,15 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
       return pct.toFixed(2) + "%";
   };
 
+  const handleAbort = async () => {
+      if (simMode === 'meshing') {
+          try { await invoke("abort_gmsh"); } catch (e) { console.error("Abort failed", e); }
+      }
+      // Force UI reset immediately
+      setSimMode('idle');
+      setProcessMessage("Aborted by user.");
+  };
+
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", position: "relative" }}>
       {/* UI Overlays */}
@@ -472,7 +485,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
               message={processMessage} 
               percent={processPercent} 
               logs={simLogs}
-              onAbort={simMode === 'meshing' ? () => invoke("abort_gmsh") : undefined} 
+              onAbort={handleAbort} 
           />
       )}
 
