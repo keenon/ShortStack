@@ -7,6 +7,13 @@ use tauri_plugin_shell::ShellExt;
 use crate::fem::mesh::TetMesh;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::io::{BufRead, BufReader};
+use tauri::{Emitter, Manager};
+use tauri_plugin_shell::process::{CommandEvent, CommandChild};
+
+// Global handle to allow aborting the running Gmsh process
+static GMSH_CHILD: Mutex<Option<CommandChild>> = Mutex::new(None);
 
 // Data structures matching Typescript
 #[derive(Deserialize, Debug)]
@@ -65,8 +72,22 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
     let mut script = String::new();
     
     // Header
-    script.push_str("SetFactory(\"OpenCASCADE\");\n");
-    script.push_str("Mesh.Algorithm3D = 10; // HXT\n");
+    script.push_str("SetFactory(\"OpenCASCADE\");\\n");
+    
+    // Performance Optimization: Use all available threads
+    script.push_str("General.NumThreads = 0; // 0 = Auto-detect all cores\\n");
+    script.push_str("Mesh.MaxNumThreads1D = 0;\\n");
+    script.push_str("Mesh.MaxNumThreads2D = 0;\\n");
+    script.push_str("Mesh.MaxNumThreads3D = 0;\\n");
+    
+    // Geometry Healing: Fix "BRep contains more volumes" errors
+    // This removes microscopic artifacts that cause HXT to fail and fallback to single-threaded Delaunay
+    script.push_str("Geometry.OccFixDegenerated = 1;\\n");
+    script.push_str("Geometry.OccFixSmallEdges = 1;\\n");
+    script.push_str("Geometry.OccFixSmallFaces = 1;\\n");
+    script.push_str("Geometry.Tolerance = 1e-6;\\n"); 
+    
+    script.push_str("Mesh.Algorithm3D = 10; // HXT (Parallel Tetrahedral)\\n");
     
     // Use user-defined mesh size directly
     let target_size = if req.mesh_size > 0.0 { req.mesh_size } else { 5.0 };
@@ -202,9 +223,9 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
 
                                 bezier_ctrl_tags.push(p_next_tag); // P3
                                 
-                                // Create Cubic Bezier
+                                // Create Cubic BSpline (More robust in OpenCASCADE than Bezier)
                                 let ctrl_str = bezier_ctrl_tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ");
-                                script.push_str(&format!("Bezier({}) = {{{}}};\n", entity_counter, ctrl_str));
+                                script.push_str(&format!("BSpline({}) = {{{}}};\n", entity_counter, ctrl_str));
                                 line_tags.push(entity_counter);
                                 entity_counter += 1;
 
@@ -448,123 +469,159 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
     script
 }
 
-/// Parses a Gmsh .msh file (Format 4.1 ASCII) into our TetMesh struct
+/// Parses a Gmsh .msh file (Format 4.1 ASCII) using Streaming IO to reduce memory usage
 fn parse_msh(path: &PathBuf) -> Result<TetMesh, String> {
-    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let lines: Vec<&str> = content.lines().collect();
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
     
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     
-    let mut reading_nodes = false;
-    let mut reading_elements = false;
+    // State machine
+    let mut section = "NONE";
     
-    // Gmsh 4.1 Parsing state
-    let mut _num_entity_blocks = 0;
-    let mut _num_nodes = 0;
-    let mut _min_node_tag = 0;
-    let mut _max_node_tag = 0;
+    // Node Block State
+    let mut nodes_in_block_remaining = 0;
+    let mut node_tags_buffer = Vec::new();
+    let mut reading_node_coords = false;
+    
+    // Element Block State
+    let mut elems_in_block_remaining = 0;
+    let mut current_elem_type = 0;
     
     let mut node_map = HashMap::new(); // Tag -> Index
     
-    let mut iter = lines.iter();
-    while let Some(line) = iter.next() {
-        if line.starts_with("$Nodes") {
-            reading_nodes = true;
-            // 4.1 Header: numEntityBlocks numNodes minNodeTag maxNodeTag
-            let header = iter.next().unwrap_or(&""); 
-            let parts: Vec<&str> = header.split_whitespace().collect();
-            if parts.len() >= 4 {
-                _num_entity_blocks = parts[0].parse().unwrap_or(0);
-                _num_nodes = parts[1].parse().unwrap_or(0);
-                _min_node_tag = parts[2].parse().unwrap_or(0);
-                _max_node_tag = parts[3].parse().unwrap_or(0);
-            }
-            continue;
-        }
-        if line.starts_with("$EndNodes") { reading_nodes = false; continue; }
+    let mut lines = reader.lines();
+    
+    while let Some(line_res) = lines.next() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        let trim = line.trim();
         
-        if line.starts_with("$Elements") {
-            reading_elements = true;
-            iter.next(); // Skip header
+        if trim.is_empty() { continue; }
+        
+        // Section Headers
+        if trim.starts_with("$") {
+            if trim == "$Nodes" { section = "NODES_HEADER"; continue; }
+            if trim == "$EndNodes" { section = "NONE"; continue; }
+            if trim == "$Elements" { section = "ELEMS_HEADER"; continue; }
+            if trim == "$EndElements" { section = "NONE"; continue; }
+            // Skip other sections
+            if !trim.starts_with("$End") { section = "SKIP"; }
             continue;
         }
-        if line.starts_with("$EndElements") { reading_elements = false; continue; }
-
-        if reading_nodes {
-            // 4.1 Node Blocks: 
-            // Line 1: entityDim entityTag parametric numNodesInBlock
-            // Next N lines: nodeTag
-            // Next N lines: x y z
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() == 4 {
-                let num_nodes_in_block = parts[3].parse::<usize>().unwrap_or(0);
-                
-                // Read Tags
-                let mut tags = Vec::new();
-                for _ in 0..num_nodes_in_block {
-                    if let Some(tag_line) = iter.next() {
-                        tags.push(tag_line.trim().parse::<usize>().unwrap_or(0));
-                    }
-                }
-                
-                // Read Coords
-                for t in tags {
-                    if let Some(coord_line) = iter.next() {
-                        let coords: Vec<f64> = coord_line.split_whitespace()
-                            .map(|s| s.parse::<f64>().unwrap_or(0.0))
-                            .collect();
-                        if coords.len() >= 3 {
-                            node_map.insert(t, vertices.len());
-                            vertices.push([coords[0], coords[1], coords[2]]);
-                        }
-                    }
-                }
-            }
+        
+        if section == "SKIP" { continue; }
+        
+        if section == "NODES_HEADER" {
+            // Header: numEntityBlocks numNodes minNodeTag maxNodeTag
+            section = "NODES_BLOCK_HEADER"; 
+            continue;
         }
-
-        if reading_elements {
-            // 4.1 Element Blocks
-            // Line 1: entityDim entityTag elementType numElementsInBlock
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                let elem_type = parts[2].parse::<usize>().unwrap_or(0);
-                let num_elems = parts[3].parse::<usize>().unwrap_or(0);
-                
-                // Type 4 (4-node tet) or 11 (10-node tet)
-                if elem_type == 4 || elem_type == 11 {
-                    for _ in 0..num_elems {
-                        if let Some(elem_line) = iter.next() {
-                            let e_parts: Vec<usize> = elem_line.split_whitespace()
-                                .map(|s| s.parse().unwrap_or(0))
-                                .collect();
-                            
-                            // e_parts: [elemTag, node1, node2, ...]
-                            if e_parts.len() > 1 {
-                                let node_tags = &e_parts[1..];
-                                // We take first 4 for visualization, or 10 for physics
-                                // Visualizer expects 4 currently, but we can store 10 and truncate later
-                                if node_tags.len() >= 4 {
-                                    let mut idx = [0usize; 10]; // Pad with 0
-                                    for (k, tag) in node_tags.iter().enumerate() {
-                                        if k < 10 {
-                                            idx[k] = *node_map.get(tag).unwrap_or(&0);
-                                        }
-                                    }
-                                    indices.push(idx);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Skip lines for other element types
-                    for _ in 0..num_elems { iter.next(); }
+        
+        if section == "NODES_BLOCK_HEADER" {
+            // Block Header: entityDim entityTag parametric numNodesInBlock
+            let parts: Vec<&str> = trim.split_whitespace().collect();
+            if parts.len() == 4 {
+                nodes_in_block_remaining = parts[3].parse::<usize>().unwrap_or(0);
+                if nodes_in_block_remaining > 0 {
+                    section = "NODES_TAGS";
+                    node_tags_buffer.clear();
+                    reading_node_coords = false;
                 }
             }
+            continue;
+        }
+        
+        if section == "NODES_TAGS" {
+            let tag = trim.parse::<usize>().unwrap_or(0);
+            node_tags_buffer.push(tag);
+            
+            if node_tags_buffer.len() == nodes_in_block_remaining {
+                section = "NODES_COORDS";
+                reading_node_coords = true;
+            }
+            continue;
+        }
+        
+        if section == "NODES_COORDS" {
+            let coords: Vec<f64> = trim.split_whitespace()
+                .map(|s| s.parse::<f64>().unwrap_or(0.0))
+                .collect();
+            
+            if coords.len() >= 3 {
+                // Map the tag from the buffer (FIFO)
+                let tag_idx = node_tags_buffer.len() - nodes_in_block_remaining;
+                let tag = node_tags_buffer[tag_idx];
+                
+                node_map.insert(tag, vertices.len());
+                vertices.push([coords[0], coords[1], coords[2]]);
+                
+                nodes_in_block_remaining -= 1;
+                if nodes_in_block_remaining == 0 {
+                    section = "NODES_BLOCK_HEADER"; // Expect next block
+                }
+            }
+            continue;
+        }
+        
+        if section == "ELEMS_HEADER" {
+            section = "ELEMS_BLOCK_HEADER";
+            continue;
+        }
+        
+        if section == "ELEMS_BLOCK_HEADER" {
+             // Block Header: entityDim entityTag elementType numElementsInBlock
+             let parts: Vec<&str> = trim.split_whitespace().collect();
+             if parts.len() >= 4 {
+                 current_elem_type = parts[2].parse::<usize>().unwrap_or(0);
+                 elems_in_block_remaining = parts[3].parse::<usize>().unwrap_or(0);
+                 
+                 // If not a Tet (4 or 11), we just skip the lines
+                 section = "ELEMS_DATA";
+             }
+             continue;
+        }
+        
+        if section == "ELEMS_DATA" {
+            if current_elem_type == 4 || current_elem_type == 11 {
+                // Parse Tet
+                let e_parts: Vec<usize> = trim.split_whitespace()
+                    .map(|s| s.parse().unwrap_or(0))
+                    .collect();
+                
+                if e_parts.len() > 1 {
+                    let node_tags = &e_parts[1..];
+                    if node_tags.len() >= 4 {
+                         let mut idx = [0usize; 10];
+                         for (k, tag) in node_tags.iter().enumerate() {
+                             if k < 10 {
+                                 idx[k] = *node_map.get(tag).unwrap_or(&0);
+                             }
+                         }
+                         indices.push(idx);
+                    }
+                }
+            }
+            
+            elems_in_block_remaining -= 1;
+            if elems_in_block_remaining == 0 {
+                section = "ELEMS_BLOCK_HEADER";
+            }
+            continue;
         }
     }
 
     Ok(TetMesh { vertices, indices })
+}
+
+#[tauri::command]
+pub async fn abort_gmsh() -> Result<(), String> {
+    let mut guard = GMSH_CHILD.lock().map_err(|e| e.to_string())?;
+    if let Some(child) = guard.take() {
+        println!("[Rust] Aborting Gmsh process...");
+        child.kill().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -604,24 +661,82 @@ pub async fn run_gmsh_pipeline(app_handle: tauri::AppHandle, req: FeaRequest) ->
     // 3. Resolve Sidecar
     let sidecar_command = app_handle.shell().sidecar("gmsh").map_err(|e| format!("Sidecar error: {}", e))?;
     
-    // 4. Execute Sidecar
-    println!("[Rust] Executing 'gmsh' sidecar...");
-    let output = sidecar_command
+    // 4. Execute Sidecar (Streaming)
+    println!("[Rust] Spawning 'gmsh' sidecar...");
+    let (mut rx, child) = sidecar_command
         .args(&[geo_path.to_str().unwrap(), "-"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run gmsh process: {}", e.to_string()))?;
+        .spawn()
+        .map_err(|e| format!("Failed to spawn gmsh: {}", e))?;
 
-    if !output.status.success() {
-        let err_log = String::from_utf8_lossy(&output.stderr);
-        let out_log = String::from_utf8_lossy(&output.stdout);
-        
-        // Print full log to Terminal for debugging
-        println!("[Rust] Gmsh ERROR LOG:\n{}", err_log);
-        
-        // Return truncated log to UI
-        let short_log = err_log.lines().take(10).collect::<Vec<_>>().join("\n");
-        return Err(format!("Gmsh Backend Failed:\n{}\n\n(See terminal for full stack trace)", short_log));
+    // Store child for aborting
+    {
+        let mut guard = GMSH_CHILD.lock().map_err(|e| e.to_string())?;
+        *guard = Some(child);
+    }
+
+    let mut full_log = String::new();
+    let mut error_log = String::new();
+    
+    // Listen for events
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(line_bytes) => {
+                let line = String::from_utf8_lossy(&line_bytes);
+                print!("{}", line); // Pipe to terminal
+                full_log.push_str(&line);
+                
+                // Emit raw log line for frontend details view
+                let _ = app_handle.emit("gmsh_log", line.to_string());
+                
+                // Parse Progress: "Info : [ 20%]" 
+                if line.contains("[") && line.contains("%]") {
+                    if let Some(start) = line.find('[') {
+                        if let Some(end) = line.find("%]") {
+                            if end > start {
+                                let pct_str = &line[start+1..end].trim();
+                                if let Ok(pct) = pct_str.parse::<f64>() {
+                                    let _ = app_handle.emit("gmsh_progress", serde_json::json!({
+                                        "message": format!("Meshing... {}%", pct),
+                                        "percent": pct
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                } else if line.contains("Meshing 1D") {
+                     let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Meshing Curves...", "percent": 5.0 }));
+                } else if line.contains("Meshing 2D") {
+                     let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Meshing Surfaces...", "percent": 20.0 }));
+                } else if line.contains("Meshing 3D") {
+                     let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Meshing Volume...", "percent": 50.0 }));
+                } else if line.contains("Writing") {
+                     let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Writing Mesh...", "percent": 95.0 }));
+                }
+            }
+            CommandEvent::Stderr(line_bytes) => {
+                let line = String::from_utf8_lossy(&line_bytes);
+                eprint!("{}", line); // Pipe to terminal
+                full_log.push_str(&line);
+                error_log.push_str(&line);
+                
+                // Emit raw log line
+                let _ = app_handle.emit("gmsh_log", line.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    // Clear child handle
+    {
+        let mut guard = GMSH_CHILD.lock().map_err(|e| e.to_string())?;
+        *guard = None;
+    }
+    
+    // Check if output file exists to determine success (since exit code might be lost in streaming or simple close)
+    if !msh_path.exists() {
+         println!("[Rust] Gmsh ERROR LOG:\n{}", error_log);
+         let short_log = error_log.lines().take(15).collect::<Vec<_>>().join("\n");
+         return Err(format!("Gmsh failed to generate mesh.\nLast logs:\n{}", short_log));
     }
 
     // 5. Parse Output
@@ -630,6 +745,10 @@ pub async fn run_gmsh_pipeline(app_handle: tauri::AppHandle, req: FeaRequest) ->
     println!("[Rust] Mesh Parsed. Verts: {}, Elements: {}", mesh.vertices.len(), mesh.indices.len());
 
     // 6. Filter Part (Splitting Logic)
+    // CLEANUP: Remove temporary files to save space
+    // let _ = fs::remove_file(&geo_path);
+    // let _ = fs::remove_file(&msh_path);
+
     let target_part = req.part_index.unwrap_or(0);
     println!("[Rust] Filtering mesh for Part Index: {}", target_part);
     mesh.filter_components(target_part);
@@ -641,6 +760,6 @@ pub async fn run_gmsh_pipeline(app_handle: tauri::AppHandle, req: FeaRequest) ->
         mesh,
         volume,
         surface_area,
-        logs: String::from_utf8_lossy(&output.stdout).to_string(),
+        logs: full_log,
     })
 }

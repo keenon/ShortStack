@@ -1,19 +1,18 @@
+// src/components/SimulationEditor.tsx
 import { useState, useRef, useEffect, useMemo } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Canvas } from "@react-three/fiber";
 import { 
   OrbitControls, 
   Environment, 
   GizmoHelper, 
-  GizmoViewport,
-  Billboard,
-  Text
+  GizmoViewport 
 } from "@react-three/drei";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import * as THREE from "three";
 import TetrahedralRenderer from "./TetrahedralRenderer";
-import SurfaceRenderer from "./SurfaceRenderer";
 import { FabricationPlan, Footprint, StackupLayer, Parameter } from "../types";
-import { callWorker } from "./Footprint3DView"; // Reuse the Manifold worker connection
+import { callWorker } from "./Footprint3DView";
 import { evaluateExpression, generateDovetailPoints } from "../utils/footprintUtils";
 import { getLineOutlinePoints } from "../workers/meshUtils";
 
@@ -31,14 +30,58 @@ interface Bounds {
     size: THREE.Vector3;
 }
 
+// --- Global State ---
+// Persist simulation progress across tab switches
+const globalSimState = {
+    mode: 'idle' as 'idle' | 'preview' | 'validating' | 'meshing',
+    message: "",
+    percent: 0,
+    logs: [] as string[]
+};
+
 // --- Helper UI Components ---
-function LoadingOverlay({ message, percent }: { message: string, percent: number }) {
+
+// Non-blocking toast for background updates (Auto-Preview)
+function PreviewToast({ message, percent }: { message: string, percent: number }) {
+    return (
+        <div style={{
+            position: 'absolute', bottom: 20, right: 20, width: '300px',
+            backgroundColor: '#2a2a2a', border: '1px solid #444', borderRadius: '6px',
+            padding: '12px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', zIndex: 1000,
+            display: 'flex', flexDirection: 'column', gap: '8px'
+        }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#ccc' }}>Background Task</span>
+                <span style={{ fontSize: '0.8em', color: '#666' }}>{Math.round(percent)}%</span>
+            </div>
+            <div style={{ width: '100%', height: '4px', background: '#444', borderRadius: '2px', overflow: 'hidden' }}>
+                <div style={{ width: `${percent}%`, height: '100%', background: '#646cff', transition: 'width 0.2s' }} />
+            </div>
+            <div style={{ fontSize: '0.85em', color: '#aaa', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {message}
+            </div>
+        </div>
+    );
+}
+
+// Blocking overlay for heavy simulation tasks (Validation & Meshing)
+function LoadingOverlay({ message, percent, logs, onAbort }: { message: string, percent: number, logs: string[], onAbort?: () => void }) {
+    const [showDetails, setShowDetails] = useState(false);
+    const logRef = useRef<HTMLDivElement>(null);
+
+    // Auto-scroll logs
+    useEffect(() => {
+        if (showDetails && logRef.current) {
+            logRef.current.scrollTop = logRef.current.scrollHeight;
+        }
+    }, [logs, showDetails]);
+
     return (
         <div style={{
             position: 'absolute', top: 0, left: 0, width: '100%', height: '100%',
-            backgroundColor: 'rgba(0, 0, 0, 0.85)',
+            backgroundColor: 'rgba(0, 0, 0, 0.9)',
             display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            zIndex: 9999, backdropFilter: 'blur(5px)'
+            zIndex: 9999, backdropFilter: 'blur(4px)'
         }}>
             <div className="spinner" style={{
                 width: '50px', height: '50px', border: '5px solid #444',
@@ -46,7 +89,7 @@ function LoadingOverlay({ message, percent }: { message: string, percent: number
                 animation: 'spin 1s linear infinite', marginBottom: '20px'
             }} />
             
-            <div style={{ width: '300px', height: '10px', background: '#333', borderRadius: '5px', overflow: 'hidden' }}>
+            <div style={{ width: '400px', height: '8px', background: '#333', borderRadius: '4px', overflow: 'hidden' }}>
                 <div style={{ 
                     width: `${Math.max(0, Math.min(100, percent))}%`, 
                     height: '100%', 
@@ -56,6 +99,45 @@ function LoadingOverlay({ message, percent }: { message: string, percent: number
             </div>
             
             <h3 style={{ marginTop: '15px', color: 'white', fontFamily: 'monospace', fontSize: '1.1em' }}>{message}</h3>
+            
+            <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
+                <button 
+                    onClick={() => setShowDetails(!showDetails)}
+                    style={{ 
+                        padding: '6px 12px', background: 'transparent', border: '1px solid #666', 
+                        color: '#ccc', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85em'
+                    }}
+                >
+                    {showDetails ? "Hide Logs" : "Show Logs"}
+                </button>
+                
+                {onAbort && (
+                    <button 
+                        onClick={onAbort}
+                        style={{ 
+                            padding: '6px 12px', background: '#991b1b', border: '1px solid #ef4444', 
+                            color: 'white', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85em'
+                        }}
+                    >
+                        ABORT
+                    </button>
+                )}
+            </div>
+
+            {showDetails && (
+                <div 
+                    ref={logRef}
+                    style={{
+                        marginTop: '15px', width: '80%', maxWidth: '800px', height: '300px',
+                        background: '#111', border: '1px solid #333', borderRadius: '4px',
+                        padding: '10px', overflowY: 'auto', fontFamily: 'monospace', fontSize: '0.8em', color: '#aaa',
+                        whiteSpace: 'pre-wrap'
+                    }}
+                >
+                    {logs.join("")}
+                </div>
+            )}
+            
             <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
         </div>
     );
@@ -74,10 +156,36 @@ interface Props {
 export default function SimulationEditor({ footprints, fabPlans, stackup, params, onJumpToPlan }: Props) {
   // State
   const [activePlanId, setActivePlanId] = useState<string>(fabPlans.length > 0 ? fabPlans[0].id : "");
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [processMessage, setProcessMessage] = useState("");
-  const [processPercent, setProcessPercent] = useState(0);
   
+  // Initialize from global state to persist across tab switches
+  const [simMode, setSimMode] = useState(globalSimState.mode);
+  const [processMessage, setProcessMessage] = useState(globalSimState.message);
+  const [processPercent, setProcessPercent] = useState(globalSimState.percent);
+  const [simLogs, setSimLogs] = useState<string[]>(globalSimState.logs);
+
+  // Sync local state to global
+  useEffect(() => {
+      globalSimState.mode = simMode;
+      globalSimState.message = processMessage;
+      globalSimState.percent = processPercent;
+      globalSimState.logs = simLogs;
+  }, [simMode, processMessage, processPercent, simLogs]);
+
+  // Listen for backend events
+  useEffect(() => {
+      const u1 = listen("gmsh_progress", (event: any) => {
+          setProcessMessage(event.payload.message);
+          setProcessPercent(event.payload.percent);
+      });
+      const u2 = listen("gmsh_log", (event: any) => {
+          setSimLogs(prev => [...prev, event.payload]);
+      });
+      return () => { 
+          u1.then(f => f()); 
+          u2.then(f => f());
+      };
+  }, []);
+
   // Data State
   const [manifoldMetrics, setManifoldMetrics] = useState<ComparisonMetrics | null>(null);
   const [gmshMetrics, setGmshMetrics] = useState<ComparisonMetrics | null>(null);
@@ -89,12 +197,13 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   const [visualSource, setVisualSource] = useState<'manifold' | 'gmsh'>('manifold');
   const [layerClip, setLayerClip] = useState<number>(1.0); // 0.0 to 1.0
   const [shrink, setShrink] = useState(0.9);
+  
   // Separate bounds for alignment
   const [manifoldBounds, setManifoldBounds] = useState<Bounds | null>(null);
   const [gmshBounds, setGmshBounds] = useState<Bounds | null>(null);
 
   const [selectedLayerId, setSelectedLayerId] = useState<string>("");
-  const [partIndex, setPartIndex] = useState<number>(0); // For split parts
+  const [partIndex, setPartIndex] = useState<number>(0); 
   const [validateEnabled, setValidateEnabled] = useState(true);
   const [meshSize, setMeshSize] = useState<number>(5.0);
   
@@ -104,13 +213,11 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   const targetFootprint = footprints.find(f => f.id === activePlan?.footprintId);
 
   // --- Smart State Reset ---
-  // Reset Gmsh results when parameters change to prevent stale comparisons
-  // Reset Gmsh results and switch view to Manifold when parameters change
   useEffect(() => {
       setGmshMetrics(null);
       setTetMesh(null);
       setGmshBounds(null);
-      setVisualSource('manifold'); // <--- Prevent stuck blank screen
+      setVisualSource('manifold'); 
   }, [activePlanId, selectedLayerId, partIndex, (activePlan as any)?.layerSplitSettings]);
 
   // Reset Part Index when Plan or Layer changes
@@ -118,14 +225,18 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
       setPartIndex(0);
   }, [activePlanId, selectedLayerId]);
 
-  // --- Auto-Preview Effect ---
+  // --- Auto-Preview Effect (Background Toast) ---
   useEffect(() => {
     if (!activePlan || !targetFootprint || !selectedLayerId) return;
 
     let isMounted = true;
     const activeSplitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
     
-    // We run the Manifold generation quietly to update the preview
+    // Trigger Background Toast
+    setSimMode('preview');
+    setProcessMessage("Updating Preview...");
+    setProcessPercent(0);
+
     callWorker("computeAnalyzablePart", {
         footprint: targetFootprint,
         allFootprints: footprints,
@@ -135,7 +246,12 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         partIndex: partIndex,
         enableSplit: activeSplitSettings?.enabled || false,
         splitLineIds: activeSplitSettings?.lineIds
-    }, () => {}).then(result => {
+    }, (progress) => {
+        if (!isMounted) return;
+        setProcessMessage(`${progress.message}`);
+        setProcessPercent(progress.percent * 100);
+    }).then(result => {
+        if (isMounted && simMode === 'preview') setSimMode('idle');
         if (!isMounted || !result || !result.meshData) return;
         
         setManifoldMetrics({
@@ -160,23 +276,22 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             setManifoldBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
         }
         
-        // Ensure we are viewing the Manifold result if Gmsh hasn't run yet
         if (visualSource !== 'gmsh') {
              setVisualSource('manifold');
         }
-    }).catch(e => console.error("Auto-preview failed", e));
+    }).catch(e => {
+        console.error("Auto-preview failed", e);
+        if (isMounted) setSimMode('idle');
+    });
 
     return () => { isMounted = false; };
-  }, [activePlanId, selectedLayerId, partIndex, validateEnabled, (activePlan as any)?.layerSplitSettings]); // Re-run on setting changes
-
+  }, [activePlanId, selectedLayerId, partIndex, validateEnabled, (activePlan as any)?.layerSplitSettings]);
 
   // Filter for valid 3D printable layers
   const printableLayers = useMemo(() => {
       if (!activePlan) return [];
       return stackup.filter(l => {
           const method = activePlan.layerMethods[l.id];
-          // Default to Cut/CNC unless explicitly 3D printed?
-          // Adjust logic based on your FabricationPlan defaults
           return method === "3D printed";
       });
   }, [stackup, activePlan]);
@@ -191,17 +306,18 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   // --- Unified Simulation Runner ---
   const runSimulation = async () => {
     if (!activePlan || !targetFootprint) return;
-    setIsProcessing(true);
-    setProcessMessage(validateEnabled ? "Validating & Meshing..." : "Generating Mesh...");
+    
+    // Start Validation Mode
+    setSimMode('validating');
+    setProcessPercent(0);
+    setProcessMessage("Initializing Validation...");
+    setSimLogs([]); 
 
     try {
-        setProcessPercent(0);
-        
         // 1. Validation Step (Frontend Manifold)
         if (validateEnabled) {
             if (!selectedLayerId) throw new Error("Please select a target layer.");
             
-            // Resolve split settings for the worker
             const activeSplitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
             
             const manifoldResult = await callWorker("computeAnalyzablePart", {
@@ -243,30 +359,22 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         }
 
         // 2. Meshing Step (Backend Gmsh)
-        setProcessMessage("Running Gmsh Backend...");
+        setSimMode('meshing'); 
+        setProcessMessage("Preparing Gmsh Geometry...");
+        setProcessPercent(0);
 
-        // PRE-PROCESS: Handle Split Lines for Gmsh
-        // If splitting is enabled for this layer, we convert the split lines into physical "Cuts" (polygons)
-        // that the backend logic can treat as simple subtraction shapes.
-        let processedFootprint = JSON.parse(JSON.stringify(targetFootprint)); // Deep clone
+        // Handle Split Lines for Gmsh
+        let processedFootprint = JSON.parse(JSON.stringify(targetFootprint)); 
         const splitSettings = (activePlan as any).layerSplitSettings?.[selectedLayerId];
 
         if (splitSettings?.enabled) {
-            const activeLineIds = splitSettings.lineIds || [];
             const kerf = parseFloat(splitSettings.kerf || "0.5");
-            const allShapes = footprints.flatMap(f => f.shapes); // Needed for getLineOutlinePoints reference resolution? 
-            // Note: getLineOutlinePoints mostly needs the root footprint to resolve refs.
-            
-            // Remove original splitLines and replace with Cut Polygons
             const newShapes: any[] = [];
             
             processedFootprint.shapes.forEach((s: any) => {
                 if (s.type === "splitLine") {
-                    // Only process if active (or if lineIds is undefined, meaning all are active)
                     const isActive = !splitSettings.lineIds || splitSettings.lineIds.includes(s.id);
-                    
                     if (isActive) {
-                        // 1. Generate the Dovetail/Straight path points
                         const startX = evaluateExpression(s.x, params);
                         const startY = evaluateExpression(s.y, params);
                         const endX = startX + evaluateExpression(s.endX, params);
@@ -277,7 +385,6 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                         
                         const rawPts = generateDovetailPoints(startX, startY, endX, endY, positions, dWidth, dHeight, !!s.flip);
                         
-                        // 2. Mock a FootprintLine to generate the outline (Kerf)
                         const mockLine: any = {
                             id: "temp_split_" + s.id,
                             type: "line",
@@ -285,8 +392,6 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                             thickness: String(kerf)
                         };
 
-                        // 3. Generate Outline
-                        // Note: We use targetFootprint as root. allFootprints might be needed if refs exist, but splitLines are usually local.
                         const outlinePts = getLineOutlinePoints(mockLine, params, kerf, 16, targetFootprint, footprints);
                         
                         if (outlinePts.length > 2) {
@@ -294,12 +399,11 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                                 type: "polygon",
                                 id: mockLine.id,
                                 points: outlinePts.map(p => ({ x: p.x, y: p.y })),
-                                assignedLayers: { [selectedLayerId]: { depth: "1000" } }, // Infinite cut depth
-                                x: "0", y: "0" // Points are already absolute relative to footprint origin
+                                assignedLayers: { [selectedLayerId]: { depth: "1000" } },
+                                x: "0", y: "0"
                             });
                         }
                     }
-                    // Do NOT add the original splitLine back (backend ignores it anyway, but cleaner this way)
                 } else {
                     newShapes.push(s);
                 }
@@ -330,7 +434,6 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             const tetIndices = result.mesh.indices.map((t: number[]) => [t[0], t[1], t[2], t[3]]);
             setTetMesh({ vertices: flatVerts, indices: tetIndices });
 
-            // Calculate Gmsh bounds (Local Z-up)
             let min = new THREE.Vector3(Infinity, Infinity, Infinity);
             let max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
             for(let i=0; i<flatVerts.length; i+=3) {
@@ -343,7 +446,6 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             setGmshBounds({ min, max, center, size });
         }
 
-        // Auto-switch view
         setVisualSource('gmsh');
         setViewMode('mesh');
 
@@ -351,7 +453,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
         console.error(e);
         alert("Simulation Failed: " + e);
     } finally {
-        setIsProcessing(false);
+        setSimMode('idle');
     }
   };
 
@@ -363,11 +465,19 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
 
   return (
     <div style={{ display: "flex", height: "100%", width: "100%", position: "relative" }}>
-      {isProcessing && <LoadingOverlay message={processMessage} percent={processPercent} />}
+      {/* UI Overlays */}
+      {simMode === 'preview' && <PreviewToast message={processMessage} percent={processPercent} />}
+      {(simMode === 'validating' || simMode === 'meshing') && (
+          <LoadingOverlay 
+              message={processMessage} 
+              percent={processPercent} 
+              logs={simLogs}
+              onAbort={simMode === 'meshing' ? () => invoke("abort_gmsh") : undefined} 
+          />
+      )}
 
       {/* --- SIDEBAR CONTROLS --- */}
       <div style={{ width: "350px", background: "#222", borderRight: "1px solid #444", display: "flex", flexDirection: "column", overflowY: "auto" }}>        
-        {/* Header / Selection */}
         <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
             <h3 style={{ margin: "0 0 15px 0" }}>FEA Pre-processor</h3>
             <label style={{ fontSize: "0.85em", color: "#888" }}>Fabrication Plan</label>
@@ -388,7 +498,6 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                 </button>
             </div>
 
-            {/* NEW: Layer/Part Selector */}
             <label style={{ fontSize: "0.85em", color: "#888", marginTop: "15px", display: "block" }}>Target Part (Layer)</label>
             <select 
                 value={selectedLayerId} 
@@ -404,7 +513,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                 ))}
             </select>
 
-            {/* Dynamic Part Selector based on Split Settings */}
+            {/* Dynamic Part Selector */}
             {(() => {
                 const splitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
                 const isSplitEnabled = splitSettings?.enabled;
@@ -445,7 +554,6 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             </div>
         </div>
 
-        {/* Action Section */}
         <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
             <h4 style={{ margin: "0 0 15px 0", color: "#ccc" }}>Actions</h4>
             
@@ -463,13 +571,12 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             <button 
                 className="primary" 
                 onClick={runSimulation} 
-                disabled={isProcessing || !selectedLayerId}
+                disabled={(simMode !== 'idle' && simMode !== 'preview') || !selectedLayerId}
                 style={{ width: "100%", padding: "12px", background: "#2d4b38", border: "1px solid #487e5b", color: "white", cursor: "pointer", borderRadius: "4px" }}
             >
-                {isProcessing ? "Processing..." : "Run Simulation"}
+                {simMode === 'validating' || simMode === 'meshing' ? "Processing..." : "Run Simulation"}
             </button>
 
-            {/* Validation Stats */}
             {validateEnabled && manifoldMetrics && gmshMetrics && (
                 <div style={{ marginTop: "15px", fontSize: "0.85em", background: "#1a1a1a", padding: "10px", borderRadius: "6px" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -498,11 +605,9 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             )}
         </div>
 
-        {/* View Controls */}
         <div style={{ padding: "20px", flex: 1 }}>
             <h4 style={{ margin: "0 0 10px 0", color: "#ccc" }}>Visualization</h4>
             
-            {/* Source Toggle */}
             <div style={{ display: 'flex', marginBottom: '15px', background: '#111', padding: '2px', borderRadius: '4px' }}>
                 <button 
                     onClick={() => setVisualSource('manifold')}
@@ -558,7 +663,6 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
       {/* --- 3D VIEWPORT --- */}
       <div style={{ flex: 1, background: "#111", position: "relative" }}>
         
-        {/* Toggle Mode Button (Floating) */}
         {tetMesh && (
             <div style={{ position: "absolute", top: 20, right: 20, zIndex: 10, background: "#333", borderRadius: "4px", padding: "4px" }}>
                 <button 
@@ -590,14 +694,11 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             <OrbitControls ref={controlsRef} makeDefault />
 
             <group position={[0,0,0]}>
-                {/* Unified Scene Alignment based on Manifold Bounds (Reference) */}
                 {(() => {
-                    // Use Manifold center as the scene center if available, otherwise fallback to Gmsh or 0
                     const center = manifoldBounds?.center || gmshBounds?.center || new THREE.Vector3(0,0,0);
                     
                     return (
                         <group position={[-center.x, -center.y, -center.z]}>
-                            {/* 1. Boundary View (Manifold Output) */}
                             {visualSource === 'manifold' && previewGeo && (
                                 <mesh geometry={previewGeo}>
                                     <meshStandardMaterial 
@@ -616,11 +717,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                                 </mesh>
                             )}
 
-                            {/* 2. Tetrahedral Mesh View (Gmsh Output) */}
                             {visualSource === 'gmsh' && tetMesh && gmshBounds && (
-                                // Gmsh is Z-up (0..T), Manifold is Y-up (-T/2..T/2).
-                                // 1. Center Gmsh mesh at (0,0,0) by subtracting its center.
-                                // 2. Rotate -90 X to align Z-up to Y-up.
                                 <group rotation={[-Math.PI / 2, 0, 0]}>
                                     <group position={[-gmshBounds.center.x, -gmshBounds.center.y, -gmshBounds.center.z]}>
                                         <TetrahedralRenderer 
