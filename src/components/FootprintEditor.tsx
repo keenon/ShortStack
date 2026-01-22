@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText, FootprintSplitLine } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline, isPointInShape } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplitWithRefinement } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
@@ -1499,12 +1499,12 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
               
               // Tolerance based on zoom level (approx 5 pixels)
               const tol = 5 * (viewBoxRef.current.width / wrapperRef.current!.clientWidth);
-              const hitRect = { x1: mWorld.x - tol, y1: mWorld.y - tol, x2: mWorld.x + tol, y2: mWorld.y + tol };
+              const mathPos = { x: mWorld.x, y: -mWorld.y };
               
               // Get shapes in visual order (top to bottom)
               const hits = [...footprint.shapes]
                   .filter(s => isShapeVisible(s))
-                  .filter(s => isShapeInSelection(hitRect, s, params, footprint, allFootprints))
+                  .filter(s => isPointInShape(mWorld, s, params, footprint, allFootprints))
                   .map(s => s.id);
               
               // DEBUG: Flash what we hit (even if nothing)

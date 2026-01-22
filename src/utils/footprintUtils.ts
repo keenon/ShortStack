@@ -639,6 +639,71 @@ function segmentIntersectsRect(p1: {x:number, y:number}, p2: {x:number, y:number
 // Returns FALSE if:
 // 1. Box is strictly INSIDE a closed shape (e.g. inside a board outline)
 // 2. No overlap at all
+export function isPointInShape(
+    p: { x: number, y: number },
+    shape: FootprintShape,
+    params: Parameter[],
+    rootFootprint: Footprint,
+    allFootprints: Footprint[],
+    pX = 0, pY = 0, pA = 0,
+    localTransform = { x: 0, y: 0, angle: 0 }
+): boolean {
+    const aabb = getShapeAABB(shape, params, rootFootprint, allFootprints, pX, pY, pA, localTransform);
+    if (!aabb) return false;
+    
+    // Visual Y is inverted, convert p for standard math check
+    const testP = { x: p.x, y: p.y }; 
+    if (testP.x < aabb.x1 || testP.x > aabb.x2 || testP.y < aabb.y1 || testP.y > aabb.y2) return false;
+
+    const lx = (shape.type === "line") ? 0 : evaluateExpression((shape as any).x, params);
+    const ly = (shape.type === "line") ? 0 : evaluateExpression((shape as any).y, params);
+    const la = (shape.type === "rect" || shape.type === "footprint" || shape.type === "union" || shape.type === "text") ? evaluateExpression((shape as any).angle, params) : 0;
+    
+    const rad = -pA * (Math.PI / 180);
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const gx = pX + (lx * cos - ly * sin);
+    const gy = pY + (lx * sin + ly * cos);
+    const gA = pA + la;
+
+    // Point in Circle
+    if (shape.type === "circle") {
+        const r = evaluateExpression((shape as any).diameter, params) / 2;
+        return ((testP.x - gx) ** 2 + (testP.y + gy) ** 2) <= r * r;
+    }
+
+    // Point in Rotated Rect
+    if (shape.type === "rect") {
+        const w = evaluateExpression((shape as any).width, params);
+        const h = evaluateExpression((shape as any).height, params);
+        const rrad = (gA * Math.PI) / 180;
+        const dx = testP.x - gx;
+        const dy = testP.y + gy;
+        const localX = dx * Math.cos(rrad) + dy * Math.sin(rrad);
+        const localY = -dx * Math.sin(rrad) + dy * Math.cos(rrad);
+        return Math.abs(localX) <= w / 2 && Math.abs(localY) <= h / 2;
+    }
+    
+    // Lines (Check proximity to edge since it has no volume)
+    if (shape.type === "line") {
+        const thick = evaluateExpression((shape as any).thickness, params);
+        const result = getClosestDistanceAlongLine(shape as FootprintLine, {x: testP.x, y: -testP.y}, params, rootFootprint, allFootprints, {x: pX, y: pY, angle: pA});
+        return Math.sqrt((result.closestPoint.x - testP.x)**2 + (result.closestPoint.y + testP.y)**2) < (thick / 2 + 2);
+    }
+
+    if (shape.type === "union") {
+        return (shape as FootprintUnion).shapes.some(s => isPointInShape(p, s, params, rootFootprint, allFootprints, gx, gy, gA));
+    }
+
+    if (shape.type === "footprint") {
+        const ref = shape as FootprintReference;
+        const target = allFootprints.find(f => f.id === ref.footprintId);
+        return target ? target.shapes.some(s => isPointInShape(p, s, params, target, allFootprints, gx, gy, gA)) : false;
+    }
+
+    return true; // Fallback for other types relying on AABB
+}
+
 export function isShapeInSelection(
     selectionBox: Rect,
     shape: FootprintShape,
