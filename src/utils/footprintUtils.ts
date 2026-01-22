@@ -1896,7 +1896,7 @@ export function collectFootprintPoints(
         const gA = pA + ((s as any).angle ? evaluateExpression((s as any).angle, params) : 0);
 
         if (s.type === 'circle') {
-            const r = evaluateExpression((s as any).diameter, params) / 2;
+            const r = 1.2 * evaluateExpression((s as any).diameter, params) / 2; // buffered radius
             for (let i = 0; i < 8; i++) {
                 const ang = (i / 8) * Math.PI * 2;
                 points.push({ x: gx + Math.cos(ang) * r, y: gy + Math.sin(ang) * r });

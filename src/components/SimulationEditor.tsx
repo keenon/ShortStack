@@ -473,6 +473,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
 
         setGmshMetrics({ volume: gmshVol, surfaceArea: 0, computedAt: Date.now() });
 
+        console.log("----------------------------");
         // --- STEP 3: Validate ---
         if (diff > 0.001) { // 0.1% Threshold
              setProcessMessage(`Validation Failed! Diff: ${(diff*100).toFixed(2)}%`);
@@ -482,9 +483,31 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
              const flatVerts = new Float32Array(mesh.vertices.flat());
              const flatIndices = mesh.indices.flat();
              const geo = new THREE.BufferGeometry();
+             // --- DEBUG: Bounds Reporting ---
+            const mBox = manifoldGeo.boundingBox!;
+            
+            console.log("--- MESH ALIGNMENT DEBUG ---");
+            console.log("Manifold Bounds:", { 
+                min: mBox.min, max: mBox.max, 
+                center: new THREE.Vector3().addVectors(mBox.min, mBox.max).multiplyScalar(0.5) 
+            });
+            
              geo.setAttribute('position', new THREE.BufferAttribute(flatVerts, 3));
              geo.setIndex(Array.from(flatIndices));
              geo.computeVertexNormals();
+             geo.computeBoundingBox();
+             const gBox = geo.boundingBox!;
+
+             console.log("Gmsh Bounds:", { 
+                min: gBox.min, max: gBox.max, 
+                center: new THREE.Vector3().addVectors(gBox.min, gBox.max).multiplyScalar(0.5) 
+            });
+            setGmshBounds({ 
+                min: gBox.min, 
+                max: gBox.max,
+                center: new THREE.Vector3().addVectors(gBox.min, gBox.max).multiplyScalar(0.5),
+                size: new THREE.Vector3().subVectors(gBox.max, gBox.min)
+            });
              
              setTetMesh({ vertices: Array.from(flatVerts), indices: mesh.indices });
              setVisualSource('gmsh'); 
@@ -768,7 +791,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             </div>
         )}
 
-        <Canvas shadows camera={{ position: [50, 50, 50], fov: 45 }}>
+        <Canvas shadows camera={{ position: [50, 50, 50], fov: 45, near: 0.1, far: 10000 }}>
             <color attach="background" args={['#1a1a1a']} />
             <Environment preset="city" />
             
@@ -783,31 +806,37 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
 
             <group position={[0,0,0]}>
                 {(() => {
-                    const center = manifoldBounds?.center || gmshBounds?.center || new THREE.Vector3(0,0,0);
+                    // Determine centers independently to avoid mixed-coordinate confusion
+                    const maniCenter = manifoldBounds?.center || new THREE.Vector3(0,0,0);
+                    const gmshCenter = gmshBounds?.center || new THREE.Vector3(0,0,0);
                     
                     return (
-                        <group position={[-center.x, -center.y, -center.z]}>
+                        <>
                             {visualSource === 'manifold' && previewGeo && (
-                                <mesh geometry={previewGeo}>
-                                    <meshStandardMaterial 
-                                        color="#aaa" 
-                                        roughness={0.4} 
-                                        metalness={0.2} 
-                                        transparent 
-                                        opacity={0.9}
-                                        polygonOffset
-                                        polygonOffsetFactor={1}
-                                    />
-                                    <lineSegments>
-                                        <edgesGeometry args={[previewGeo]} />
-                                        <lineBasicMaterial color="#444" />
-                                    </lineSegments>
-                                </mesh>
+                                <group position={[-maniCenter.x, -maniCenter.y, -maniCenter.z]}>
+                                    <mesh geometry={previewGeo}>
+                                        <meshStandardMaterial 
+                                            color="#aaa" 
+                                            roughness={0.4} 
+                                            metalness={0.2} 
+                                            transparent 
+                                            opacity={0.9}
+                                            polygonOffset
+                                            polygonOffsetFactor={1}
+                                        />
+                                        <lineSegments>
+                                            <edgesGeometry args={[previewGeo]} />
+                                            <lineBasicMaterial color="#444" />
+                                        </lineSegments>
+                                    </mesh>
+                                </group>
                             )}
 
                             {visualSource === 'gmsh' && tetMesh && gmshBounds && (
+                                // Rotate -90 X to convert Z-up (Engineering) to Y-up (ThreeJS)
                                 <group rotation={[-Math.PI / 2, 0, 0]}>
-                                    <group position={[-gmshBounds.center.x, -gmshBounds.center.y, -gmshBounds.center.z]}>
+                                    {/* Center in LOCAL space (Z-up) before rotation */}
+                                    <group position={[-gmshCenter.x, -gmshCenter.y, -gmshCenter.z]}>
                                         <TetrahedralRenderer 
                                             mesh={tetMesh} 
                                             shrinkFactor={viewMode === 'boundary' ? 1.0 : shrink} 
@@ -818,7 +847,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                                     </group>
                                 </group>
                             )}
-                        </group>
+                        </>
                     );
                 })()}
             </group>
