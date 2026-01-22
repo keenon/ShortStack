@@ -90,37 +90,7 @@ const LayerVisibilityPanel = ({
       
       {!collapsed && (
         <div className="layer-list-scroll">
-            {/* ROLLBACK BAR SECTION */}
-            <div style={{ padding: '0 5px 15px 5px', borderBottom: '1px solid #333', marginBottom: '10px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#888', marginBottom: '4px' }}>
-                    <span>Rollback Shapes</span>
-                    <span style={{ color: rollbackIndex > 0 ? '#ffaa00' : '#888' }}>{rollbackIndex} suppressed</span>
-                </div>
-                <input 
-                    type="range" min="0" max={totalShapes} value={rollbackIndex} 
-                    onChange={(e) => onSetRollback(parseInt(e.target.value))}
-                    style={{ width: '100%', accentColor: '#ffaa00', cursor: 'pointer' }}
-                />
-            </div>
-
-            {/* PRIMARY GEOMETRY SECTION */}
-            {isBoard && boardOutlines.length > 0 && (
-                <div className="board-outline-section">
-                    <h4>Primary Geometry</h4>
-                    {boardOutlines.map(bo => (
-                        <div 
-                            key={bo.id} 
-                            className={`shape-item ${selectedIds.includes(bo.id) ? "selected" : ""}`}
-                            onClick={() => onSelectShape(bo.id, false)}
-                            style={{ padding: '6px 8px', marginBottom: '4px' }}
-                        >
-                            <IconOutline className="shape-icon" size={14} />
-                            <span className="shape-name-display">{bo.name}</span>
-                        </div>
-                    ))}
-                </div>
-            )}
-
+            
             {/* UNASSIGNED LAYER */}
             <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
                 <div className="layer-vis-info">
@@ -257,6 +227,237 @@ const MeshListPanel = ({
     );
 };
 
+
+// 6. BOARD OUTLINE HEADER (Sits above shape stack)
+const BoardOutlineHeader = ({ 
+    outlines, 
+    selectedIds, 
+    onSelect 
+}: { 
+    outlines: FootprintShape[], 
+    selectedIds: string[], 
+    onSelect: (id: string, multi: boolean) => void 
+}) => {
+    if (outlines.length === 0) return null;
+    
+    return (
+        <div className="board-outline-header">
+            <div className="board-label">Primary Geometry</div>
+            {outlines.map(bo => (
+                <div 
+                    key={bo.id} 
+                    className={`shape-item ${selectedIds.includes(bo.id) ? "selected" : ""}`}
+                    onClick={(e) => onSelect(bo.id, e.metaKey || e.ctrlKey)}
+                >
+                    <IconOutline className="shape-icon" />
+                    <span className="shape-name-display">{bo.name}</span>
+                    {/* Visual indicator that this is special */}
+                    <div style={{width:'8px', height:'8px', borderRadius:'50%', background:'#646cff', marginLeft:'auto'}}></div>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+// 7. ROLLBACK CONTROL BAR (Sits between Board Outline and Shape List)
+const RollbackControl = ({ 
+    count, 
+    total, 
+    onChange 
+}: { 
+    count: number, 
+    total: number, 
+    onChange: (val: number) => void 
+}) => {
+    const pct = total > 0 ? (count / total) * 100 : 0;
+    
+    return (
+        <div className="rollback-container">
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7em', color: '#666', marginBottom:'-4px' }}>
+                <span>Processing Order</span>
+                <span style={{color: count > 0 ? '#ffaa00' : 'inherit'}}>{count > 0 ? `${count} Suppressed` : 'Active'}</span>
+            </div>
+            <div style={{position:'relative', padding:'10px 0'}}>
+                <div className="rollback-visual-bar">
+                    <div className="rollback-progress" style={{width: `${pct}%`}}></div>
+                    <div className="rollback-knob" style={{left: `${pct}%`}}></div>
+                </div>
+                <input 
+                    type="range" 
+                    min="0" 
+                    max={total} 
+                    value={count} 
+                    onChange={(e) => onChange(parseInt(e.target.value))}
+                    className="rollback-input-overlay"
+                />
+            </div>
+        </div>
+    );
+};
+
+
+// 7. INTERNAL SHAPE LIST WITH ROLLBACK BAR
+// Replaces external dependency to allow custom drag-bar logic
+const InternalShapeList = ({
+    shapes,
+    rollbackIndex,
+    onSetRollback,
+    selectedShapeIds,
+    onSelect,
+    onDelete,
+    stackup,
+    isShapeVisible
+}: {
+    shapes: FootprintShape[],
+    rollbackIndex: number,
+    onSetRollback: (i: number) => void,
+    selectedShapeIds: string[],
+    onSelect: (id: string, multi: boolean) => void,
+    onDelete: (id: string) => void,
+    stackup: StackupLayer[],
+    isShapeVisible: (s: FootprintShape) => boolean
+}) => {
+    const [isDraggingBar, setIsDraggingBar] = useState(false);
+    const listRef = useRef<HTMLDivElement>(null);
+    const mouseYRef = useRef<number | null>(null);
+    const reqRef = useRef<number>();
+    
+    // Store latest props in a ref so the effect doesn't need to re-run on every render
+    const propsRef = useRef({ shapes, onSetRollback });
+    useEffect(() => { propsRef.current = { shapes, onSetRollback }; }, [shapes, onSetRollback]);
+
+    // Handle Rollback Bar Drag with Auto-Scroll Loop
+    useEffect(() => {
+        if (!isDraggingBar) return;
+
+        const loop = () => {
+            // Keep loop alive waiting for input
+            reqRef.current = requestAnimationFrame(loop);
+
+            if (!listRef.current || mouseYRef.current === null) return;
+            const container = listRef.current;
+            const rect = container.getBoundingClientRect();
+            const clientY = mouseYRef.current;
+
+            const { shapes, onSetRollback } = propsRef.current;
+            if (clientY < rect.top + 25) {
+                // If we are scrolled down, let the auto-scroll logic (below) handle moving up.
+                // Only snap to index 0 if we are visually at the top of the list.
+                if (container.scrollTop <= 0 && rollbackIndex !== 0) {
+                     onSetRollback(0);
+                     // Do not return; let loop continue to ensure UI responsiveness
+                }
+            }
+
+            // 1. Auto-Scroll Logic
+            const SCROLL_ZONE_PX = 40;
+            const MAX_SPEED = 15;
+            
+            const distTop = clientY - rect.top;
+            const distBottom = rect.bottom - clientY;
+
+            if (distTop < SCROLL_ZONE_PX) {
+                // Scroll Up
+                const speed = Math.max(2, (SCROLL_ZONE_PX - distTop) / SCROLL_ZONE_PX * MAX_SPEED);
+                container.scrollTop -= speed;
+            } else if (distBottom < SCROLL_ZONE_PX) {
+                // Scroll Down
+                const speed = Math.max(2, (SCROLL_ZONE_PX - distBottom) / SCROLL_ZONE_PX * MAX_SPEED);
+                container.scrollTop += speed;
+            }
+
+            // 2. Index Calculation
+            const children = Array.from(container.children).filter(c => c.classList.contains('shape-wrapper'));
+            
+            let targetIdx = 0;
+            // Iterate through items to find where the mouse is currently hovering
+            for (let i = 0; i < children.length; i++) {
+                const rect = children[i].getBoundingClientRect();
+                const midPoint = rect.top + rect.height / 2;
+                if (clientY < midPoint) {
+                    targetIdx = i;
+                    break;
+                }
+                targetIdx = i + 1;
+            }
+            
+            if (targetIdx !== rollbackIndex) {
+                onSetRollback(targetIdx);
+            }
+        };
+
+        const handleMove = (e: MouseEvent) => { mouseYRef.current = e.clientY; };
+        const handleUp = () => {
+            setIsDraggingBar(false);
+            if (reqRef.current) cancelAnimationFrame(reqRef.current);
+            mouseYRef.current = null;
+        };
+
+        // Start Loop
+        reqRef.current = requestAnimationFrame(loop);
+
+        window.addEventListener('mousemove', handleMove);
+        window.addEventListener('mouseup', handleUp);
+        
+        // Only cleanup on unmount or drag end, NOT on prop updates
+        return () => {
+            window.removeEventListener('mousemove', handleMove);
+            window.removeEventListener('mouseup', handleUp);
+            if (reqRef.current) cancelAnimationFrame(reqRef.current);
+        };
+    }, [isDraggingBar]); // DEPENDENCY ARRAY IS STABLE NOW
+
+    return (
+        <div className="shape-list-container" ref={listRef} style={{ position: 'relative' }}>
+            {rollbackIndex === 0 && (
+                <div className="rollback-separator-container" onMouseDown={(e) => { e.preventDefault(); setIsDraggingBar(true); }}>
+                    <div className="rollback-line" />
+                    <div className="rollback-handle" title="Drag to suppress" />
+                </div>
+            )}
+
+            {shapes.map((shape, index) => {
+                const isSuppressed = index < rollbackIndex;
+                const isSelected = selectedShapeIds.includes(shape.id);
+                
+                // Determine assigned layer colors
+                const assignedLayerIds = Object.keys(shape.assignedLayers || {});
+                const dots = assignedLayerIds.map(lid => stackup.find(l => l.id === lid)?.color).filter(Boolean);
+
+                return (
+                    <div key={shape.id} className="shape-wrapper">
+                        <div 
+                            className={`shape-item ${isSelected ? "selected" : ""} ${isSuppressed ? "suppressed" : ""}`}
+                            onClick={(e) => onSelect(shape.id, e.metaKey || e.ctrlKey)}
+                        >
+                            <div className="shape-layer-indicators">
+                                {dots.map((c, i) => <div key={i} className="layer-indicator-dot" style={{background: c}} />)}
+                            </div>
+                            
+                            {shape.type === 'circle' && <IconCircle className="shape-icon" />}
+                            {shape.type === 'rect' && <IconRect className="shape-icon" />}
+                            {shape.type === 'line' && <IconLine className="shape-icon" />}
+                            {shape.type === 'polygon' && <IconPolygon className="shape-icon" />}
+                            {shape.type === 'footprint' && <IconGuide className="shape-icon" />}
+                            {shape.type === 'text' && <IconText className="shape-icon" />}
+                            {shape.type === 'splitLine' && <IconSplit className="shape-icon" />}
+                            
+                            <span className="shape-name-display">{shape.name}</span>
+                        </div>
+
+                        {rollbackIndex === (index + 1) && (
+                            <div className="rollback-separator-container" onMouseDown={(e) => { e.preventDefault(); setIsDraggingBar(true); }}>
+                                <div className="rollback-line" />
+                                <div className="rollback-handle" />
+                            </div>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
+
 // ------------------------------------------------------------------
 // MAIN COMPONENT
 // ------------------------------------------------------------------
@@ -387,6 +588,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
     x: number;
     y: number;
   } | null>(null);
+  const [flashShapeIds, setFlashShapeIds] = useState<string[]>([]);
 
   // NEW: State for Tie Down Interaction
   const [hoveredTieDownId, setHoveredTieDownId] = useState<string | null>(null);
@@ -1264,48 +1466,63 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
   };
 
   const handleShapeMouseDown = (e: React.MouseEvent, id: string, pointIndex?: number) => {
-      // Only allow Left Click (0) for shape interaction.
-      // This allows Right Click (2) and Middle Click (1) to bubble up to camera panning.
-      if (e.button !== 0) return;
-      // Pass through if Alt is held to allow Global Rotation
-      if (e.altKey) return; 
+        // Only allow Left Click (0) for shape interaction.
+        // This allows Right Click (2) and Middle Click (1) to bubble up to camera panning.
+        if (e.button !== 0) return;
+        // Pass through if Alt is held to allow Global Rotation
+        if (e.altKey) return; 
 
-      e.stopPropagation(); e.preventDefault();
-      if (viewMode !== "2D") return;
+        e.stopPropagation(); e.preventDefault();
+        if (viewMode !== "2D") return;
 
-      const multi = e.metaKey || e.ctrlKey;
-      let effectiveSelection: string[] = [];
+        const multi = e.metaKey || e.ctrlKey;
+        let effectiveSelection: string[] = [];
 
-      // Selection logic
-      if (pointIndex !== undefined) {
-          // If we click a point, we focus that single shape
-          effectiveSelection = [id];
-      } else if (multi) {
-          effectiveSelection = selectedShapeIds.includes(id) ? selectedShapeIds.filter(x => x !== id) : [...selectedShapeIds, id];
-      } else if (!selectedShapeIds.includes(id)) {
-          // Normal click on a new item resets selection
-          effectiveSelection = [id];
-      } else {
-          // Already selected, preserve for group drag
-          effectiveSelection = [...selectedShapeIds];
-      }
+        // Selection logic
+        if (pointIndex !== undefined) {
+            // If we click a point, we focus that single shape
+            effectiveSelection = [id];
+        } else if (multi) {
+            effectiveSelection = selectedShapeIds.includes(id) ? selectedShapeIds.filter(x => x !== id) : [...selectedShapeIds, id];
+        } else if (!selectedShapeIds.includes(id)) {
+            // Normal click on a new item resets selection
+            effectiveSelection = [id];
+        } else {
+            // Already selected, preserve for group drag
+            effectiveSelection = [...selectedShapeIds];
+        }
 
-      // SELECTION CYCLING: If clicking an already selected item, look for what's underneath
-      if (pointIndex === undefined && !multi && selectedShapeIds.length === 1 && selectedShapeIds[0] === id) {
-          const mWorld = getMouseWorldPos(e.clientX, e.clientY);
-          const threshold = 2 * (viewBoxRef.current.width / 800);
-          const hitRect = { x1: mWorld.x - threshold, y1: mWorld.y - threshold, x2: mWorld.x + threshold, y2: mWorld.y + threshold };
-          
-          const hits = footprint.shapes
-              .filter(s => isShapeVisible(s) && isShapeInSelection(hitRect, s, params, footprint, allFootprints))
-              .map(s => s.id);
+      // SELECTION CYCLING: Improved Hit Testing
+          if (pointIndex === undefined && !e.altKey && !multi) {
+              const mWorld = getMouseWorldPos(e.clientX, e.clientY);
+              // NOTE: isShapeInSelection expects Visual Coordinates (Y-down), matching the Selection Box logic.
+              
+              // Tolerance based on zoom level (approx 5 pixels)
+              const tol = 5 * (viewBoxRef.current.width / wrapperRef.current!.clientWidth);
+              const hitRect = { x1: mWorld.x - tol, y1: mWorld.y - tol, x2: mWorld.x + tol, y2: mWorld.y + tol };
+              
+              // Get shapes in visual order (top to bottom)
+              const hits = [...footprint.shapes]
+                  .filter(s => isShapeVisible(s))
+                  .filter(s => isShapeInSelection(hitRect, s, params, footprint, allFootprints))
+                  .map(s => s.id);
+              
+              // DEBUG: Flash what we hit (even if nothing)
+              if (hits.length > 0) {
+                  setFlashShapeIds(hits);
+                  setTimeout(() => setFlashShapeIds([]), 250);
+              }
 
-          if (hits.length > 1) {
-              const nextIdx = (hits.indexOf(id) + 1) % hits.length;
-              const nextId = hits[nextIdx];
-              effectiveSelection = [nextId];
-              id = nextId; // Update target for the drag logic below
-          }
+              if (hits.length > 1) {
+            const currentIdx = hits.indexOf(selectedShapeIds[0]);
+            // If we are clicking a stack and already have one of them selected, move to next
+            const nextIdx = (currentIdx + 1) % hits.length;
+            id = hits[nextIdx];
+            effectiveSelection = [id];
+        } else if (hits.length === 1) {
+            id = hits[0];
+            effectiveSelection = [id];
+        }
       }
 
       setSelectedShapeIds(effectiveSelection);
@@ -2791,12 +3008,16 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
   const handleRadius = viewBox.width / 100;
 
   const isShapeVisible = (shape: FootprintShape) => {
-      // Rollback Logic: Shapes are prepended (index 0 is newest). 
-      // If rollbackIndex > 0, we hide the first 'rollbackIndex' items in the array.
+      // Board Outline is ALWAYS visible (unless disabled globally)
+      if (shape.type === "boardOutline") return !!footprint.isBoard;
+
+      // Rollback Logic: 
+      // The shapes array is ordered by Z-index (0 is bottom/oldest, N is top/newest) in some CADs, 
+      // but here 'addShape' prepends: [Newest, ..., Oldest].
+      // The Rollback Bar suppresses items *above* it.
+      // If the bar is at index K, items 0 to K-1 are suppressed.
       const shapeIdx = footprint.shapes.indexOf(shape);
       if (shapeIdx !== -1 && shapeIdx < rollbackIndex) return false;
-
-      if (shape.type === "boardOutline") return !!footprint.isBoard;
       if (shape.type === "wireGuide") return true;
       if (shape.type === "footprint") return true; 
 
@@ -3032,14 +3253,23 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                 onSetRollback={setRollbackIndex}
                 totalShapes={footprint.shapes.length}
             />
-            <ShapeListPanel
-                footprint={{...footprint, shapes: footprint.shapes.filter(s => s.type !== 'boardOutline')}}
-                allFootprints={allFootprints}
+            
+            {/* NEW: Explicit Board Outline Section */}
+            {footprint.isBoard && (
+                <BoardOutlineHeader 
+                    outlines={footprint.shapes.filter(s => s.type === 'boardOutline')}
+                    selectedIds={selectedShapeIds}
+                    onSelect={handleSelection}
+                />
+            )}
+
+            <InternalShapeList
+                shapes={footprint.shapes.filter(s => s.type !== 'boardOutline')}
+                rollbackIndex={rollbackIndex}
+                onSetRollback={setRollbackIndex}
                 selectedShapeIds={selectedShapeIds}
                 onSelect={handleSelection}
                 onDelete={deleteShape}
-                onRename={(id, name) => updateShape(id, "name", name)}
-                onReorder={handleReorder}
                 stackup={stackup}
                 isShapeVisible={isShapeVisible}
             />
@@ -3277,7 +3507,23 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                             )}
                         </g>
                     )}
-
+                    {/* DEBUG HIT FLASH */}
+                    {flashShapeIds.map(id => {
+                        const s = footprint.shapes.find(shape => shape.id === id);
+                        if (!s) return null;
+                        const aabb = getShapeAABB(s, params, footprint, allFootprints);
+                        if (!aabb) return null;
+                        // Visual AABB (Y-down). y1 is min (top), y2 is max (bottom).
+                        return (
+                            <rect 
+                                key={"flash-" + id}
+                                x={aabb.x1} y={aabb.y1} width={aabb.x2 - aabb.x1} height={aabb.y2 - aabb.y1}
+                                fill="none" stroke="#00ffff" strokeWidth={strokeScale * 3} 
+                                vectorEffect="non-scaling-stroke"
+                                style={{ pointerEvents: 'none', filter: 'drop-shadow(0 0 5px #00ffff)' }}
+                            />
+                        );
+                    })}
                     {/* NEW: Selection Box Overlay */}
                     {selectionBox && (
                         <rect 
