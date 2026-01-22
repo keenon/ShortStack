@@ -22,55 +22,10 @@ use crate::optimizer::debug_split_eval;
 
 mod fem; // Assuming the previous code is in a module named fem
 use fem::{tet10::Tet10, quadrature::TetQuadrature, 
-    mesh::TetMesh, tetgen::cmd_tetrahedralize, tetgen::cmd_repair_mesh, 
-    gmsh_interop::start_gmsh_analysis, gmsh_interop::finalize_gmsh_3d, gmsh_interop::abort_gmsh};
+    mesh::TetMesh, gmsh_interop::start_gmsh_analysis, gmsh_interop::finalize_gmsh_3d, gmsh_interop::abort_gmsh};
 
 use nalgebra::Vector3;
 
-// A struct to send to the frontend
-#[derive(serde::Serialize)]
-struct TetVizData {
-    nodes: Vec<[f64; 3]>,
-    integration_points: Vec<[f64; 3]>, // In global coords
-}
-
-#[tauri::command]
-fn get_tet_visualization() -> TetVizData {
-    // 1. Define a distorted tet for visualization interest
-    let mut node_vecs = [Vector3::zeros(); 10];
-    node_vecs[0] = Vector3::new(0.0, 0.0, 0.0);
-    node_vecs[1] = Vector3::new(2.0, 0.2, 0.0);
-    node_vecs[2] = Vector3::new(0.1, 1.5, 0.1);
-    node_vecs[3] = Vector3::new(0.0, 0.1, 1.8);
-    // Calculate midside nodes (linear average)
-    node_vecs[4] = (node_vecs[0] + node_vecs[1]) * 0.5;
-    node_vecs[5] = (node_vecs[1] + node_vecs[2]) * 0.5;
-    node_vecs[6] = (node_vecs[2] + node_vecs[0]) * 0.5;
-    node_vecs[7] = (node_vecs[0] + node_vecs[3]) * 0.5;
-    node_vecs[8] = (node_vecs[1] + node_vecs[3]) * 0.5;
-    node_vecs[9] = (node_vecs[2] + node_vecs[3]) * 0.5;
-
-    // 2. Calculate integration points in Global Space
-    let rule = TetQuadrature::get_rule(5);
-    let mut global_ips = Vec::new();
-
-    for ip in rule {
-        let n = Tet10::shape_functions(&ip.xi);
-        let mut pos = Vector3::zeros();
-        for i in 0..10 {
-            pos += node_vecs[i] * n[i];
-        }
-        global_ips.push([pos.x, pos.y, pos.z]);
-    }
-
-    // Convert nodes to array for JSON
-    let nodes_array = node_vecs.iter().map(|v| [v.x, v.y, v.z]).collect();
-
-    TetVizData {
-        nodes: nodes_array,
-        integration_points: global_ips,
-    }
-}
 
 #[tauri::command]
 fn import_mesh(vertices: Vec<[f64; 3]>, indices: Vec<[usize; 10]>) -> Result<String, String> {
@@ -1191,7 +1146,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             simple_ping, export_layer_files, compute_smart_split, 
-            get_debug_eval, import_mesh, cmd_tetrahedralize, cmd_repair_mesh, 
+            get_debug_eval, import_mesh,
             start_gmsh_analysis, finalize_gmsh_3d, abort_gmsh])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
