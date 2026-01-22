@@ -1,6 +1,6 @@
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{collections::{HashMap, HashSet, VecDeque}, fs, io::{BufRead, BufReader}, path::PathBuf};
 use nalgebra::{Vector3};
 use super::tet10::Tet10;
 
@@ -216,5 +216,184 @@ impl TetMesh {
         self.vertices = new_vertices;
         self.indices = new_indices;
         true
+    }
+}
+
+/// Temporary structure for 2D analysis pass
+#[derive(Serialize, Clone, Debug)]
+pub struct SimpleTriMesh {
+    vertices: Vec<[f64; 3]>,
+    indices: Vec<[usize; 3]>,
+}
+
+pub fn parse_2d_triangle_mesh(path: &PathBuf) -> Result<SimpleTriMesh, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut node_map = HashMap::new();
+    let mut section = "NONE";
+    let mut nodes_in_block = 0;
+    let mut node_tags_buffer = Vec::new();
+    let mut elems_in_block = 0;
+    let mut current_elem_type = 0;
+    
+    for line_res in reader.lines() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        let trim = line.trim();
+        if trim.is_empty() { continue; }
+        if trim.starts_with("$") {
+            if trim == "$Nodes" { section = "NODES_HEADER"; continue; }
+            if trim == "$Elements" { section = "ELEMS_HEADER"; continue; }
+            if !trim.starts_with("$End") { section = "SKIP"; }
+            continue;
+        }
+        if section == "SKIP" { continue; }
+        
+        // Nodes
+        if section == "NODES_HEADER" { section = "NODES_BLOCK_HEADER"; continue; }
+        if section == "NODES_BLOCK_HEADER" {
+            let parts: Vec<&str> = trim.split_whitespace().collect();
+            if parts.len() >= 4 {
+                nodes_in_block = parts[3].parse().unwrap_or(0);
+                if nodes_in_block > 0 { section = "NODES_TAGS"; node_tags_buffer.clear(); }
+            }
+            continue;
+        }
+        if section == "NODES_TAGS" {
+            let tag = trim.parse::<usize>().unwrap_or(0);
+            node_tags_buffer.push(tag);
+            if node_tags_buffer.len() == nodes_in_block { section = "NODES_COORDS"; }
+            continue;
+        }
+        if section == "NODES_COORDS" {
+            let coords: Vec<f64> = trim.split_whitespace().map(|s| s.parse().unwrap_or(0.0)).collect();
+            if coords.len() >= 3 {
+                let tag = node_tags_buffer[node_tags_buffer.len() - nodes_in_block];
+                node_map.insert(tag, vertices.len());
+                vertices.push([coords[0], coords[1], coords[2]]);
+                nodes_in_block -= 1;
+                if nodes_in_block == 0 { section = "NODES_BLOCK_HEADER"; }
+            }
+            continue;
+        }
+        
+        // Elements
+        if section == "ELEMS_HEADER" { section = "ELEMS_BLOCK_HEADER"; continue; }
+        if section == "ELEMS_BLOCK_HEADER" {
+            let parts: Vec<&str> = trim.split_whitespace().collect();
+            if parts.len() >= 4 {
+                current_elem_type = parts[2].parse().unwrap_or(0);
+                elems_in_block = parts[3].parse().unwrap_or(0);
+                section = "ELEMS_DATA";
+            }
+            continue;
+        }
+        if section == "ELEMS_DATA" {
+            let e_parts: Vec<usize> = trim.split_whitespace().map(|s| s.parse().unwrap_or(0)).collect();
+            let node_tags = if e_parts.len() > 1 { &e_parts[1..] } else { &[] };
+            
+            // Type 2 = 3-node Triangle
+            if current_elem_type == 2 && node_tags.len() >= 3 {
+                let n1 = *node_map.get(&node_tags[0]).unwrap_or(&0);
+                let n2 = *node_map.get(&node_tags[1]).unwrap_or(&0);
+                let n3 = *node_map.get(&node_tags[2]).unwrap_or(&0);
+                indices.push([n1, n2, n3]);
+            }
+            // Type 9 = 6-node Triangle (Order 2). Nodes 0-2 are corners.
+            else if current_elem_type == 9 && node_tags.len() >= 6 {
+                let n1 = *node_map.get(&node_tags[0]).unwrap_or(&0);
+                let n2 = *node_map.get(&node_tags[1]).unwrap_or(&0);
+                let n3 = *node_map.get(&node_tags[2]).unwrap_or(&0);
+                indices.push([n1, n2, n3]);
+            }
+
+            elems_in_block -= 1;
+            if elems_in_block == 0 { section = "ELEMS_BLOCK_HEADER"; }
+            continue;
+        }
+    }
+    Ok(SimpleTriMesh { vertices, indices })
+}
+
+/// Returns the centroid (x,y,z) of the Nth largest volume shell found in the 2D mesh
+pub fn get_target_shell_centroid(mesh: &SimpleTriMesh, rank: usize) -> Option<(f64, f64, f64)> {
+    let num_tris = mesh.indices.len();
+    let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut edge_map: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    
+    // Build Graph
+    for (i, tri) in mesh.indices.iter().enumerate() {
+        for &(u, v) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let key = if u < v { (u, v) } else { (v, u) };
+            edge_map.entry(key).or_default().push(i);
+        }
+    }
+    for (_, tris) in edge_map {
+        for &t1 in &tris {
+            for &t2 in &tris {
+                if t1 != t2 { adj.entry(t1).or_default().push(t2); }
+            }
+        }
+    }
+    
+    // Flood Fill
+    let mut visited = vec![false; num_tris];
+    let mut shells = Vec::new();
+    for i in 0..num_tris {
+        if !visited[i] {
+            let mut stack = vec![i];
+            visited[i] = true;
+            let mut comp = Vec::new();
+            while let Some(c) = stack.pop() {
+                comp.push(c);
+                if let Some(neighbors) = adj.get(&c) {
+                    for &n in neighbors {
+                        if !visited[n] { visited[n] = true; stack.push(n); }
+                    }
+                }
+            }
+            shells.push(comp);
+        }
+    }
+    
+    // Calculate Volume (Signed Divergence) & Sort
+    let mut stats = shells.into_iter().map(|comp| {
+        let mut vol = 0.0;
+        let mut cx = 0.0; let mut cy = 0.0; let mut cz = 0.0;
+        let mut v_count = 0.0;
+        
+        for &idx in &comp {
+            let t = mesh.indices[idx];
+            let p1 = mesh.vertices[t[0]];
+            let p2 = mesh.vertices[t[1]];
+            let p3 = mesh.vertices[t[2]];
+            
+            // Vol = 1/6 * p1 . (p2 x p3)
+            let v321 = p3[0] * p2[1] * p1[2];
+            let v231 = p2[0] * p3[1] * p1[2];
+            let v312 = p3[0] * p1[1] * p2[2];
+            let v132 = p1[0] * p3[1] * p2[2];
+            let v213 = p2[0] * p1[1] * p3[2];
+            let v123 = p1[0] * p2[1] * p3[2];
+            vol += (1.0 / 6.0) * (-v321 + v231 + v312 - v132 - v213 + v123);
+            
+            // Centroid Accumulation
+            cx += p1[0]+p2[0]+p3[0];
+            cy += p1[1]+p2[1]+p3[1];
+            cz += p1[2]+p2[2]+p3[2];
+            v_count += 3.0;
+        }
+        ((cx/v_count, cy/v_count, cz/v_count), vol.abs())
+    }).collect::<Vec<_>>();
+    
+    stats.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    
+    if rank < stats.len() {
+        let (centroid, vol) = stats[rank];
+        println!("[Rust] Selected Shell Rank {}: Volume {:.2}, Centroid {:.2},{:.2},{:.2}", rank, vol, centroid.0, centroid.1, centroid.2);
+        Some(centroid)
+    } else {
+        None
     }
 }

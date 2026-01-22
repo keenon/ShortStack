@@ -30,6 +30,11 @@ interface Bounds {
     size: THREE.Vector3;
 }
 
+interface SimpleTriMesh {
+    vertices: number[][]; // Array of [x, y, z] arrays
+    indices: number[][];  // Array of [n1, n2, n3] arrays
+}
+
 // --- Global State ---
 // Persist simulation progress across tab switches
 const globalSimState = {
@@ -180,6 +185,42 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
       const u2 = listen("gmsh_log", (event: any) => {
           setSimLogs(prev => [...prev, event.payload]);
       });
+      const u3 = listen("debug_mesh_2d", (event: any) => {
+          console.log("Received Debug Mesh 2D", event.payload);
+          const mesh = event.payload as SimpleTriMesh;
+
+          if (mesh && mesh.vertices && mesh.indices) {
+              // 1. Convert Data to Three.js format
+              const flatVerts = new Float32Array(mesh.vertices.flat());
+              // Handle Type 9 (6-node) by taking only first 3 indices if necessary, 
+              // but your Rust patch sends 3-node triangles now, so flat() is fine.
+              const flatIndices = mesh.indices.flat();
+
+              const geo = new THREE.BufferGeometry();
+              geo.setAttribute('position', new THREE.BufferAttribute(flatVerts, 3));
+              geo.setIndex(Array.from(flatIndices));
+              geo.computeVertexNormals();
+              geo.computeBoundingBox();
+
+              // 2. Update Viewport
+              setPreviewGeo(geo);       // Set as the current "surface" geometry
+              setVisualSource('manifold'); // Ensure we are rendering the surface, not the volume
+              
+              // 3. Center Camera (Optional, depends on bounds)
+              if (geo.boundingBox) {
+                  const center = new THREE.Vector3();
+                  geo.boundingBox.getCenter(center);
+                  const size = new THREE.Vector3();
+                  geo.boundingBox.getSize(size);
+                  setManifoldBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
+              }
+
+              // 4. "Suspend" the loading wheel (Minimize Overlay)
+              // This lets you see the mesh immediately
+              setIsOverlayMinimized(true);
+              setProcessMessage("Inspecting Intermediate Mesh...");
+          }
+      });
       return () => { 
           u1.then(f => f()); 
           u2.then(f => f());
@@ -197,6 +238,7 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   const [visualSource, setVisualSource] = useState<'manifold' | 'gmsh'>('manifold');
   const [layerClip, setLayerClip] = useState<number>(1.0); // 0.0 to 1.0
   const [shrink, setShrink] = useState(0.9);
+  const [isOverlayMinimized, setIsOverlayMinimized] = useState(false);
   
   // Separate bounds for alignment
   const [manifoldBounds, setManifoldBounds] = useState<Bounds | null>(null);
@@ -415,6 +457,36 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             processedFootprint.shapes = newShapes;
         }
 
+        // Resolve Expressions for Rust (Backend cannot parse "x/2 + 5")
+        const resolveVal = (v: any) => {
+            if (typeof v === 'number') return v;
+            if (typeof v === 'string') return evaluateExpression(v, params);
+            return v;
+        };
+
+        const resolvedShapes = processedFootprint.shapes.map((s: any) => {
+            const newS = { ...s };
+            // Resolve standard props
+            ['x', 'y', 'width', 'height', 'diameter', 'cornerRadius'].forEach(k => {
+                if (newS[k] !== undefined) newS[k] = resolveVal(newS[k]);
+            });
+            // Resolve Polygon/Outline points
+            if (newS.points) {
+                newS.points = newS.points.map((p: any) => {
+                    const newP = { ...p, x: resolveVal(p.x), y: resolveVal(p.y) };
+                    if (newP.handleIn) {
+                        newP.handleIn = { x: resolveVal(newP.handleIn.x), y: resolveVal(newP.handleIn.y) };
+                    }
+                    if (newP.handleOut) {
+                        newP.handleOut = { x: resolveVal(newP.handleOut.x), y: resolveVal(newP.handleOut.y) };
+                    }
+                    return newP;
+                });
+            }
+            return newS;
+        });
+        processedFootprint.shapes = resolvedShapes;
+
         const feaRequest = {
             footprint: processedFootprint,
             stackup: stackup,
@@ -480,13 +552,35 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
     <div style={{ display: "flex", height: "100%", width: "100%", position: "relative" }}>
       {/* UI Overlays */}
       {simMode === 'preview' && <PreviewToast message={processMessage} percent={processPercent} />}
+      
+      {/* [MODIFIED] Loading Overlay with Minimize capability */}
       {(simMode === 'validating' || simMode === 'meshing') && (
-          <LoadingOverlay 
-              message={processMessage} 
-              percent={processPercent} 
-              logs={simLogs}
-              onAbort={handleAbort} 
-          />
+          isOverlayMinimized ? (
+            // MINIMIZED STATE: Tiny box in the corner
+            <div style={{
+                position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)',
+                backgroundColor: 'rgba(0,0,0,0.8)', padding: '10px 20px', borderRadius: '30px',
+                border: '1px solid #444', zIndex: 9999, display: 'flex', alignItems: 'center', gap: '15px'
+            }}>
+                <div className="spinner" style={{ width: '15px', height: '15px', border: '2px solid #666', borderTopColor: '#646cff', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
+                <span style={{ fontSize: '0.9em', color: '#fff' }}>{processMessage} ({Math.round(processPercent)}%)</span>
+                <button 
+                    onClick={() => setIsOverlayMinimized(false)}
+                    style={{ background: '#333', border: 'none', color: '#aaa', cursor: 'pointer', padding: '5px 10px', borderRadius: '15px', fontSize: '0.8em' }}
+                >
+                    Expand
+                </button>
+            </div>
+          ) : (
+            // MAXIMIZED STATE: Passes "onMinimize" handler
+            <LoadingOverlay 
+                message={processMessage} 
+                percent={processPercent} 
+                logs={simLogs}
+                onAbort={handleAbort} 
+                // Pass a new prop if you modify LoadingOverlay, OR just wrap it:
+            />
+          )
       )}
 
       {/* --- SIDEBAR CONTROLS --- */}

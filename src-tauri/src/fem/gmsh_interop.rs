@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 use tauri_plugin_shell::ShellExt;
-use crate::fem::mesh::TetMesh;
+use crate::fem::mesh::{TetMesh, SimpleTriMesh, parse_2d_triangle_mesh, get_target_shell_centroid};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
@@ -222,7 +222,7 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
 
                                 bezier_ctrl.push(p_next.clone());
                                 
-                                script.push_str(&format!("{} = newl; BSpline({}) = {{{}}};\n", line_var, line_var, bezier_ctrl.join(", ")));
+                                script.push_str(&format!("{} = newl; Bezier({}) = {{{}}};\n", line_var, line_var, bezier_ctrl.join(", ")));
                             } else {
                                 script.push_str(&format!("{} = newl; Line({}) = {{{}, {}}};\n", line_var, line_var, p_curr, p_next));
                             }
@@ -475,157 +475,10 @@ fn generate_geo_script(req: &FeaRequest, output_msh_path: &str) -> String {
         }
     }
 
-    script.push_str("Mesh 3;\n");
-    script.push_str("Mesh.Format = 10; // Auto (4.1)\n");
-    script.push_str(&format!("Save \"{}\";\n", output_msh_path.replace("\\", "/")));
-    
+    script.push_str("Mesh.ElementOrder = 2; // Force 2nd Order (Tet10)\n"); // Script finished (Mesh commands handled by pipeline)
     script
 }
 
-/// Parses a Gmsh .msh file (Format 4.1 ASCII) using Streaming IO to reduce memory usage
-fn parse_msh(path: &PathBuf) -> Result<TetMesh, String> {
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
-    
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    
-    // State machine
-    let mut section = "NONE";
-    
-    // Node Block State
-    let mut nodes_in_block_remaining = 0;
-    let mut node_tags_buffer = Vec::new();
-    let mut reading_node_coords = false;
-    
-    // Element Block State
-    let mut elems_in_block_remaining = 0;
-    let mut current_elem_type = 0;
-    
-    let mut node_map = HashMap::new(); // Tag -> Index
-    
-    let mut lines = reader.lines();
-    
-    while let Some(line_res) = lines.next() {
-        let line = line_res.map_err(|e| e.to_string())?;
-        let trim = line.trim();
-        
-        if trim.is_empty() { continue; }
-        
-        // Section Headers
-        if trim.starts_with("$") {
-            if trim == "$Nodes" { section = "NODES_HEADER"; continue; }
-            if trim == "$EndNodes" { section = "NONE"; continue; }
-            if trim == "$Elements" { section = "ELEMS_HEADER"; continue; }
-            if trim == "$EndElements" { section = "NONE"; continue; }
-            // Skip other sections
-            if !trim.starts_with("$End") { section = "SKIP"; }
-            continue;
-        }
-        
-        if section == "SKIP" { continue; }
-        
-        if section == "NODES_HEADER" {
-            // Header: numEntityBlocks numNodes minNodeTag maxNodeTag
-            section = "NODES_BLOCK_HEADER"; 
-            continue;
-        }
-        
-        if section == "NODES_BLOCK_HEADER" {
-            // Block Header: entityDim entityTag parametric numNodesInBlock
-            let parts: Vec<&str> = trim.split_whitespace().collect();
-            if parts.len() == 4 {
-                nodes_in_block_remaining = parts[3].parse::<usize>().unwrap_or(0);
-                if nodes_in_block_remaining > 0 {
-                    section = "NODES_TAGS";
-                    node_tags_buffer.clear();
-                    reading_node_coords = false;
-                }
-            }
-            continue;
-        }
-        
-        if section == "NODES_TAGS" {
-            let tag = trim.parse::<usize>().unwrap_or(0);
-            node_tags_buffer.push(tag);
-            
-            if node_tags_buffer.len() == nodes_in_block_remaining {
-                section = "NODES_COORDS";
-                reading_node_coords = true;
-            }
-            continue;
-        }
-        
-        if section == "NODES_COORDS" {
-            let coords: Vec<f64> = trim.split_whitespace()
-                .map(|s| s.parse::<f64>().unwrap_or(0.0))
-                .collect();
-            
-            if coords.len() >= 3 {
-                // Map the tag from the buffer (FIFO)
-                let tag_idx = node_tags_buffer.len() - nodes_in_block_remaining;
-                let tag = node_tags_buffer[tag_idx];
-                
-                node_map.insert(tag, vertices.len());
-                vertices.push([coords[0], coords[1], coords[2]]);
-                
-                nodes_in_block_remaining -= 1;
-                if nodes_in_block_remaining == 0 {
-                    section = "NODES_BLOCK_HEADER"; // Expect next block
-                }
-            }
-            continue;
-        }
-        
-        if section == "ELEMS_HEADER" {
-            section = "ELEMS_BLOCK_HEADER";
-            continue;
-        }
-        
-        if section == "ELEMS_BLOCK_HEADER" {
-             // Block Header: entityDim entityTag elementType numElementsInBlock
-             let parts: Vec<&str> = trim.split_whitespace().collect();
-             if parts.len() >= 4 {
-                 current_elem_type = parts[2].parse::<usize>().unwrap_or(0);
-                 elems_in_block_remaining = parts[3].parse::<usize>().unwrap_or(0);
-                 
-                 // If not a Tet (4 or 11), we just skip the lines
-                 section = "ELEMS_DATA";
-             }
-             continue;
-        }
-        
-        if section == "ELEMS_DATA" {
-            if current_elem_type == 4 || current_elem_type == 11 {
-                // Parse Tet
-                let e_parts: Vec<usize> = trim.split_whitespace()
-                    .map(|s| s.parse().unwrap_or(0))
-                    .collect();
-                
-                if e_parts.len() > 1 {
-                    let node_tags = &e_parts[1..];
-                    if node_tags.len() >= 4 {
-                         let mut idx = [0usize; 10];
-                         for (k, tag) in node_tags.iter().enumerate() {
-                             if k < 10 {
-                                 idx[k] = *node_map.get(tag).unwrap_or(&0);
-                             }
-                         }
-                         indices.push(idx);
-                    }
-                }
-            }
-            
-            elems_in_block_remaining -= 1;
-            if elems_in_block_remaining == 0 {
-                section = "ELEMS_BLOCK_HEADER";
-            }
-            continue;
-        }
-    }
-
-    Ok(TetMesh { vertices, indices })
-}
 
 #[tauri::command]
 pub async fn abort_gmsh() -> Result<(), String> {
@@ -637,136 +490,270 @@ pub async fn abort_gmsh() -> Result<(), String> {
     Ok(())
 }
 
+fn parse_msh(path: &PathBuf) -> Result<TetMesh, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    let mut node_map = HashMap::new(); 
+    let mut section = "NONE";
+    
+    let mut nodes_in_block = 0;
+    let mut node_tags_buffer = Vec::new();
+    let mut elems_in_block = 0;
+    let mut current_elem_type = 0;
+    
+    for line_res in reader.lines() {
+        let line = line_res.map_err(|e| e.to_string())?;
+        let trim = line.trim();
+        if trim.is_empty() { continue; }
+        
+        if trim.starts_with("$") {
+            if trim == "$Nodes" { section = "NODES_HEADER"; continue; }
+            if trim == "$Elements" { section = "ELEMS_HEADER"; continue; }
+            if !trim.starts_with("$End") { section = "SKIP"; }
+            continue;
+        }
+        
+        if section == "SKIP" { continue; }
+        
+        // --- NODES ---
+        if section == "NODES_HEADER" { section = "NODES_BLOCK_HEADER"; continue; }
+        if section == "NODES_BLOCK_HEADER" {
+            let parts: Vec<&str> = trim.split_whitespace().collect();
+            if parts.len() >= 4 {
+                nodes_in_block = parts[3].parse().unwrap_or(0);
+                if nodes_in_block > 0 {
+                    section = "NODES_TAGS";
+                    node_tags_buffer.clear();
+                }
+            }
+            continue;
+        }
+        if section == "NODES_TAGS" {
+            let tag = trim.parse::<usize>().unwrap_or(0);
+            node_tags_buffer.push(tag);
+            if node_tags_buffer.len() == nodes_in_block { section = "NODES_COORDS"; }
+            continue;
+        }
+        if section == "NODES_COORDS" {
+            let coords: Vec<f64> = trim.split_whitespace().map(|s| s.parse().unwrap_or(0.0)).collect();
+            if coords.len() >= 3 {
+                let tag = node_tags_buffer[node_tags_buffer.len() - nodes_in_block];
+                node_map.insert(tag, vertices.len());
+                vertices.push([coords[0], coords[1], coords[2]]);
+                nodes_in_block -= 1;
+                if nodes_in_block == 0 { section = "NODES_BLOCK_HEADER"; }
+            }
+            continue;
+        }
+        
+        // --- ELEMENTS ---
+        if section == "ELEMS_HEADER" { section = "ELEMS_BLOCK_HEADER"; continue; }
+        if section == "ELEMS_BLOCK_HEADER" {
+            let parts: Vec<&str> = trim.split_whitespace().collect();
+            if parts.len() >= 4 {
+                current_elem_type = parts[2].parse().unwrap_or(0);
+                elems_in_block = parts[3].parse().unwrap_or(0);
+                section = "ELEMS_DATA";
+            }
+            continue;
+        }
+        if section == "ELEMS_DATA" {
+            let e_parts: Vec<usize> = trim.split_whitespace().map(|s| s.parse().unwrap_or(0)).collect();
+            // Check for Element Type 11 (10-node Tetrahedron)
+            if current_elem_type == 11 && e_parts.len() > 1 {
+                let node_tags = &e_parts[1..];
+                if node_tags.len() >= 10 {
+                     let mut idx = [0usize; 10];
+                     for k in 0..10 {
+                         idx[k] = *node_map.get(&node_tags[k]).unwrap_or(&0);
+                     }
+                     indices.push(idx);
+                }
+            } 
+            // Also check for Type 4 (4-node Tet) as fallback?
+            // If we get linear tets, we can't safely fill a [usize; 10]. 
+            // We assume the geo script enforced Order=2.
+            
+            elems_in_block -= 1;
+            if elems_in_block == 0 { section = "ELEMS_BLOCK_HEADER"; }
+            continue;
+        }
+    }
+
+    Ok(TetMesh { vertices, indices })
+}
+
 #[tauri::command]
 pub async fn run_gmsh_pipeline(app_handle: tauri::AppHandle, req: FeaRequest) -> Result<FeaResult, String> {
-    println!("[Rust] run_gmsh_pipeline INVOKED. Target Layer: {:?}", req.target_layer_id);
+    println!("[Rust] run_gmsh_pipeline INVOKED. Target Part Index: {:?}", req.part_index);
     use tauri::Manager;
 
-    // 1. Setup Paths
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
-    if !app_dir.exists() {
-        let _ = fs::create_dir_all(&app_dir);
-    }
+    if !app_dir.exists() { let _ = fs::create_dir_all(&app_dir); }
     
-    // Generate unique timestamp for permanent debug history
     let start = SystemTime::now();
-    let since_the_epoch = start.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let timestamp = since_the_epoch.as_secs();
+    let timestamp = start.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
-    let geo_filename = format!("debug_model_{}.geo", timestamp);
-    let msh_filename = format!("debug_model_{}.msh", timestamp);
+    let geo_path = app_dir.join(format!("model_{}.geo", timestamp));
+    let msh_2d_path = app_dir.join(format!("model_{}_2d.msh", timestamp));
+    let msh_3d_path = app_dir.join(format!("model_{}_3d.msh", timestamp));
 
-    let geo_path = app_dir.join(&geo_filename);
-    let msh_path = app_dir.join(&msh_filename);
+    // --- PHASE 1: Generate Geometry and 2D Mesh ---
+    let mut script = generate_geo_script(&req, msh_2d_path.to_str().unwrap());
     
-    // PRINT PATH FOR USER
-    println!("\n[Rust] ===================================================");
-    println!("[Rust] DEBUG: .geo file saved to:");
-    println!("[Rust] {:?}", geo_path);
-    println!("[Rust] ===================================================\n");
-
-    // 2. Generate Script
-    let script = generate_geo_script(&req, msh_path.to_str().unwrap());
-    println!("[Rust] Generated .geo script ({} bytes)", script.len());
+    // Append 2D mesh command
+    script.push_str("Mesh 2;\n");
+    script.push_str("Mesh.Format = 10;\n"); // MSH 4.1
+    script.push_str(&format!("Save \"{}\";\n", msh_2d_path.to_str().unwrap().replace("\\", "/")));
     
     fs::write(&geo_path, &script).map_err(|e| format!("Failed to write .geo: {}", e))?;
 
-    // 3. Resolve Sidecar
-    let sidecar_command = app_handle.shell().sidecar("gmsh").map_err(|e| format!("Sidecar error: {}", e))?;
-    
-    // 4. Execute Sidecar (Streaming)
-    println!("[Rust] Spawning 'gmsh' sidecar...");
-    let (mut rx, child) = sidecar_command
-        .args(&[geo_path.to_str().unwrap(), "-"])
-        .spawn()
-        .map_err(|e| format!("Failed to spawn gmsh: {}", e))?;
+    println!("[Rust] Running Gmsh Phase 1 (2D Surface Mesh)...");
+    let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Analyzing Geometry (2D Pass)...", "percent": 10.0 }));
 
-    // Store child for aborting
-    {
-        let mut guard = GMSH_CHILD.lock().map_err(|e| e.to_string())?;
-        *guard = Some(child);
-    }
-
-    let mut full_log = String::new();
-    let mut error_log = String::new();
+    let sidecar = app_handle.shell().sidecar("gmsh").map_err(|e| e.to_string())?;
+    let (mut rx, child) = sidecar.args(&[geo_path.to_str().unwrap(), "-"]).spawn().map_err(|e| e.to_string())?;
     
-    // Listen for events
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                print!("{}", line); // Pipe to terminal
-                full_log.push_str(&line);
-                
-                // Emit raw log line for frontend details view
-                let _ = app_handle.emit("gmsh_log", line.to_string());
-                
-                // Parse Progress: "Info : [ 20%]" 
-                if line.contains("[") && line.contains("%]") {
-                    if let Some(start) = line.find('[') {
-                        if let Some(end) = line.find("%]") {
-                            if end > start {
-                                let pct_str = &line[start+1..end].trim();
-                                if let Ok(pct) = pct_str.parse::<f64>() {
-                                    let _ = app_handle.emit("gmsh_progress", serde_json::json!({
-                                        "message": format!("Meshing... {}%", pct),
-                                        "percent": pct
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                } else if line.contains("Meshing 1D") {
-                     let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Meshing Curves...", "percent": 5.0 }));
-                } else if line.contains("Meshing 2D") {
-                     let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Meshing Surfaces...", "percent": 20.0 }));
-                } else if line.contains("Meshing 3D") {
-                     let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Meshing Volume...", "percent": 50.0 }));
-                } else if line.contains("Writing") {
-                     let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Writing Mesh...", "percent": 95.0 }));
-                }
-            }
-            CommandEvent::Stderr(line_bytes) => {
-                let line = String::from_utf8_lossy(&line_bytes);
-                eprint!("{}", line); // Pipe to terminal
-                full_log.push_str(&line);
-                error_log.push_str(&line);
-                
-                // Emit raw log line
-                let _ = app_handle.emit("gmsh_log", line.to_string());
+    { *GMSH_CHILD.lock().unwrap() = Some(child); }
+    
+    // Wait for Phase 1
+    while let Some(e) = rx.recv().await { 
+        match e {
+            CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
+                print!("{}", String::from_utf8_lossy(&b));
             }
             _ => {}
         }
     }
 
-    // Clear child handle
-    {
-        let mut guard = GMSH_CHILD.lock().map_err(|e| e.to_string())?;
-        *guard = None;
+    if !msh_2d_path.exists() {
+        return Err("Gmsh failed to generate 2D mesh for analysis.".to_string());
     }
+
+    // --- PHASE 2: Analyze Volumes ---
+    println!("[Rust] Analyzing Volumes...");
+    let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Identifying Volumes...", "percent": 30.0 }));
+
+    let mesh_2d = parse_2d_triangle_mesh(&msh_2d_path)?;
+    let _ = app_handle.emit("debug_mesh_2d", &mesh_2d);
+
+    let target_idx = req.part_index.unwrap_or(0);
+    let target_centroid = get_target_shell_centroid(&mesh_2d, target_idx);
+
+    let mut centroid_script = String::new();
+    if let Some(c) = target_centroid {
+        println!("[Rust] DEBUG: Computed Shell Centroid: {:.4}, {:.4}, {:.4}", c.0, c.1, c.2);
+
+        centroid_script.push_str("\n// --- FILTERING STEP ---\n");
+        // Use high precision for coordinates
+        centroid_script.push_str(&format!("target_x = {:.6}; target_y = {:.6}; target_z = {:.6};\n", c.0, c.1, c.2));
+        
+        centroid_script.push_str(r#"
+        Printf("--- GMSH FILTERING DEBUG ---");
+        Printf("Target Centroid: (%g, %g, %g)", target_x, target_y, target_z);
+        
+        v_list[] = Volume{:};
+        count = #v_list[];
+        Printf("Found %g Volumes in total.", count);
+        
+        best_dist = 1e22; 
+        best_vol = -1;
+        
+        max_idx = count - 1;
+        
+        If (count > 0)
+            For i In {0 : max_idx}
+                vol_id = v_list[i];
+                bb[] = BoundingBox Volume{ vol_id };
+                
+                // Simple Bounding Box Center
+                mx = (bb[0]+bb[3])/2; 
+                my = (bb[1]+bb[4])/2; 
+                mz = (bb[2]+bb[5])/2;
+                
+                dist = Sqrt((mx-target_x)^2 + (my-target_y)^2 + (mz-target_z)^2);
+                Printf("Checking Volume %g | BB Center: (%g, %g, %g) | Dist: %g", vol_id, mx, my, mz, dist);
+                
+                If (dist < best_dist)
+                    best_dist = dist; 
+                    best_vol = vol_id;
+                EndIf
+            EndFor
+        EndIf
+        
+        Printf(">>> Result: Keeping Volume %g (Closest Dist: %g)", best_vol, best_dist);
+
+        If (best_vol != -1)
+            del_list[] = {};
+            
+            If (count > 0)
+                For i In {0 : max_idx}
+                    If (v_list[i] != best_vol) 
+                        del_list[] += v_list[i]; 
+                        Printf("Marking Volume %g for DELETION", v_list[i]);
+                    EndIf
+                EndFor
+            EndIf
+            
+            If (#del_list[] > 0)
+                Recursive Delete { Volume{ del_list[] }; }
+                Printf("Deleted %g Volumes.", #del_list[]);
+            Else
+                Printf("No Volumes to delete (Only 1 existed?).");
+            EndIf
+        Else
+             Printf("ERROR: Could not find best volume.");
+        EndIf
+        Printf("--- END FILTERING DEBUG ---");
+        "#);
+    } else {
+        println!("[Rust] WARNING: No target centroid found. Skipping filtering (Mesh will contain all parts).");
+    }
+
+    // --- PHASE 3: 3D Mesh ---
+    println!("[Rust] Running Gmsh Phase 2 (3D Volume Mesh)...");
+    let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Meshing 3D Volume...", "percent": 50.0 }));
+
+    let final_geo_path = app_dir.join(format!("model_{}_final.geo", timestamp));
+    // Use Include to restore state
+    let mut final_script = format!("Include \"{}\";\n", geo_path.to_str().unwrap().replace("\\", "/"));
     
-    // Check if output file exists to determine success (since exit code might be lost in streaming or simple close)
-    if !msh_path.exists() {
-         println!("[Rust] Gmsh ERROR LOG:\n{}", error_log);
-         let short_log = error_log.lines().take(15).collect::<Vec<_>>().join("\n");
-         return Err(format!("Gmsh failed to generate mesh.\nLast logs:\n{}", short_log));
+    // final_script.push_str("Delete Mesh;\n"); 
+    final_script.push_str(&centroid_script);
+    final_script.push_str("Mesh 3;\n");
+    final_script.push_str("Mesh.Format = 10;\n");
+    final_script.push_str(&format!("Save \"{}\";\n", msh_3d_path.to_str().unwrap().replace("\\", "/")));
+
+    fs::write(&final_geo_path, &final_script).map_err(|e| e.to_string())?;
+
+    let sidecar2 = app_handle.shell().sidecar("gmsh").map_err(|e| e.to_string())?;
+    let (mut rx2, child2) = sidecar2.args(&[final_geo_path.to_str().unwrap(), "-"]).spawn().map_err(|e| e.to_string())?;
+    
+    { *GMSH_CHILD.lock().unwrap() = Some(child2); }
+    
+    let mut full_log = String::new();
+    while let Some(e) = rx2.recv().await {
+        match e {
+            CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
+                let s = String::from_utf8_lossy(&b);
+                print!("{}", s);
+                full_log.push_str(&s);
+                let _ = app_handle.emit("gmsh_log", s.to_string());
+            }
+            _ => {}
+        }
     }
 
-    // 5. Parse Output
-    println!("[Rust] Parsing .msh file...");
-    let mut mesh = parse_msh(&msh_path)?;
-    println!("[Rust] Mesh Parsed. Verts: {}, Elements: {}", mesh.vertices.len(), mesh.indices.len());
+    if !msh_3d_path.exists() {
+         return Err(format!("Gmsh failed to generate 3D mesh.\nLogs:\n{}", full_log));
+    }
 
-    // 6. Filter Part (Splitting Logic)
-    // CLEANUP: Remove temporary files to save space
-    // let _ = fs::remove_file(&geo_path);
-    // let _ = fs::remove_file(&msh_path);
-
-    let target_part = req.part_index.unwrap_or(0);
-    println!("[Rust] Filtering mesh for Part Index: {}", target_part);
-    mesh.filter_components(target_part);
-
-    // 7. Calculate Stats
+    // Parse Result
+    let mesh = parse_msh(&msh_3d_path)?;
     let (volume, surface_area) = mesh.compute_metrics();
 
     Ok(FeaResult {
