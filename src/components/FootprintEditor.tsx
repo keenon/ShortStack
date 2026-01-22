@@ -57,12 +57,24 @@ const LayerVisibilityPanel = ({
   onToggle,
   onExport,
   isBoard,
+  boardOutlines,
+  selectedIds,
+  onSelectShape,
+  rollbackIndex,
+  onSetRollback,
+  totalShapes
 }: {
   stackup: StackupLayer[];
   visibility: Record<string, boolean>;
   onToggle: (id: string) => void;
   onExport: (id: string, type: "SVG_DEPTH" | "SVG_CUT" | "DXF_CUT" | "SVG" | "DXF" | "STL") => void;
   isBoard: boolean;
+  boardOutlines: FootprintShape[];
+  selectedIds: string[];
+  onSelectShape: (id: string, multi: boolean) => void;
+  rollbackIndex: number;
+  onSetRollback: (idx: number) => void;
+  totalShapes: number;
 }) => {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -78,6 +90,37 @@ const LayerVisibilityPanel = ({
       
       {!collapsed && (
         <div className="layer-list-scroll">
+            {/* ROLLBACK BAR SECTION */}
+            <div style={{ padding: '0 5px 15px 5px', borderBottom: '1px solid #333', marginBottom: '10px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#888', marginBottom: '4px' }}>
+                    <span>Rollback Shapes</span>
+                    <span style={{ color: rollbackIndex > 0 ? '#ffaa00' : '#888' }}>{rollbackIndex} suppressed</span>
+                </div>
+                <input 
+                    type="range" min="0" max={totalShapes} value={rollbackIndex} 
+                    onChange={(e) => onSetRollback(parseInt(e.target.value))}
+                    style={{ width: '100%', accentColor: '#ffaa00', cursor: 'pointer' }}
+                />
+            </div>
+
+            {/* PRIMARY GEOMETRY SECTION */}
+            {isBoard && boardOutlines.length > 0 && (
+                <div className="board-outline-section">
+                    <h4>Primary Geometry</h4>
+                    {boardOutlines.map(bo => (
+                        <div 
+                            key={bo.id} 
+                            className={`shape-item ${selectedIds.includes(bo.id) ? "selected" : ""}`}
+                            onClick={() => onSelectShape(bo.id, false)}
+                            style={{ padding: '6px 8px', marginBottom: '4px' }}
+                        >
+                            <IconOutline className="shape-icon" size={14} />
+                            <span className="shape-name-display">{bo.name}</span>
+                        </div>
+                    ))}
+                </div>
+            )}
+
             {/* UNASSIGNED LAYER */}
             <div className={`layer-vis-item ${visibility["unassigned"] === false ? "is-hidden" : ""}`}>
                 <div className="layer-vis-info">
@@ -277,6 +320,7 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const setSelectedShapeIds = (newSelection: string[]) => updateHistory({ ...editorState, selectedShapeIds: newSelection });
 
   const [processingMessage, setProcessingMessage] = useState<string | null>(null);
+  const [rollbackIndex, setRollbackIndex] = useState(0);
   
   // NEW: Selection Box State
   const [selectionBox, setSelectionBox] = useState<{ start: {x: number, y: number}, current: {x: number, y: number} } | null>(null);
@@ -1244,6 +1288,24 @@ const handleGlobalMouseMove = (e: MouseEvent) => {
       } else {
           // Already selected, preserve for group drag
           effectiveSelection = [...selectedShapeIds];
+      }
+
+      // SELECTION CYCLING: If clicking an already selected item, look for what's underneath
+      if (pointIndex === undefined && !multi && selectedShapeIds.length === 1 && selectedShapeIds[0] === id) {
+          const mWorld = getMouseWorldPos(e.clientX, e.clientY);
+          const threshold = 2 * (viewBoxRef.current.width / 800);
+          const hitRect = { x1: mWorld.x - threshold, y1: mWorld.y - threshold, x2: mWorld.x + threshold, y2: mWorld.y + threshold };
+          
+          const hits = footprint.shapes
+              .filter(s => isShapeVisible(s) && isShapeInSelection(hitRect, s, params, footprint, allFootprints))
+              .map(s => s.id);
+
+          if (hits.length > 1) {
+              const nextIdx = (hits.indexOf(id) + 1) % hits.length;
+              const nextId = hits[nextIdx];
+              effectiveSelection = [nextId];
+              id = nextId; // Update target for the drag logic below
+          }
       }
 
       setSelectedShapeIds(effectiveSelection);
@@ -2729,11 +2791,13 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
   const handleRadius = viewBox.width / 100;
 
   const isShapeVisible = (shape: FootprintShape) => {
-      // Board outlines visible based on isBoard flag
+      // Rollback Logic: Shapes are prepended (index 0 is newest). 
+      // If rollbackIndex > 0, we hide the first 'rollbackIndex' items in the array.
+      const shapeIdx = footprint.shapes.indexOf(shape);
+      if (shapeIdx !== -1 && shapeIdx < rollbackIndex) return false;
+
       if (shape.type === "boardOutline") return !!footprint.isBoard;
-      // Wire guides always visible in editor
       if (shape.type === "wireGuide") return true;
-      // Recursive footprints are visible if not explicitly hidden
       if (shape.type === "footprint") return true; 
 
       const assignedIds = Object.keys(shape.assignedLayers || {});
@@ -2961,9 +3025,15 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                 onToggle={toggleLayerVisibility} 
                 onExport={handleExport}
                 isBoard={!!footprint.isBoard}
+                boardOutlines={footprint.shapes.filter(s => s.type === 'boardOutline')}
+                selectedIds={selectedShapeIds}
+                onSelectShape={handleSelection}
+                rollbackIndex={rollbackIndex}
+                onSetRollback={setRollbackIndex}
+                totalShapes={footprint.shapes.length}
             />
             <ShapeListPanel
-                footprint={footprint}
+                footprint={{...footprint, shapes: footprint.shapes.filter(s => s.type !== 'boardOutline')}}
                 allFootprints={allFootprints}
                 selectedShapeIds={selectedShapeIds}
                 onSelect={handleSelection}
