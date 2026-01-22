@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use serde::{Deserialize, Serialize};
 use tauri_plugin_shell::ShellExt;
-use crate::fem::mesh::{TetMesh, SimpleTriMesh, parse_2d_triangle_mesh, get_target_shell_centroid};
+use crate::fem::mesh::{TetMesh, SimpleTriMesh, parse_2d_triangle_mesh, get_target_shell_info};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
@@ -24,6 +24,15 @@ pub struct FeaRequest {
     pub mesh_size: f64,
     pub target_layer_id: Option<String>,
     pub part_index: Option<usize>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct AnalysisResult {
+    pub session_id: String,
+    pub mesh: SimpleTriMesh, // The 2D mesh of the SELECTED part only
+    pub volume: f64,
+    pub surface_area: f64,
+    pub logs: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -588,178 +597,161 @@ fn parse_msh(path: &PathBuf) -> Result<TetMesh, String> {
 }
 
 #[tauri::command]
-pub async fn run_gmsh_pipeline(app_handle: tauri::AppHandle, req: FeaRequest) -> Result<FeaResult, String> {
-    println!("[Rust] run_gmsh_pipeline INVOKED. Target Part Index: {:?}", req.part_index);
+pub async fn start_gmsh_analysis(app_handle: tauri::AppHandle, req: FeaRequest) -> Result<AnalysisResult, String> {
     use tauri::Manager;
-
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     if !app_dir.exists() { let _ = fs::create_dir_all(&app_dir); }
     
     let start = SystemTime::now();
-    let timestamp = start.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let session_id = start.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
 
-    let geo_path = app_dir.join(format!("model_{}.geo", timestamp));
-    let msh_2d_path = app_dir.join(format!("model_{}_2d.msh", timestamp));
-    let msh_3d_path = app_dir.join(format!("model_{}_3d.msh", timestamp));
+    let geo_path = app_dir.join(format!("model_{}.geo", session_id));
+    let msh_2d_path = app_dir.join(format!("model_{}_2d.msh", session_id));
 
     // --- PHASE 1: Generate Geometry and 2D Mesh ---
     let mut script = generate_geo_script(&req, msh_2d_path.to_str().unwrap());
     
     // Append 2D mesh command
     script.push_str("Mesh 2;\n");
-    script.push_str("Mesh.Format = 10;\n"); // MSH 4.1
+    script.push_str("Mesh.Format = 10;\n"); 
     script.push_str(&format!("Save \"{}\";\n", msh_2d_path.to_str().unwrap().replace("\\", "/")));
     
     fs::write(&geo_path, &script).map_err(|e| format!("Failed to write .geo: {}", e))?;
 
-    println!("[Rust] Running Gmsh Phase 1 (2D Surface Mesh)...");
-    let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Analyzing Geometry (2D Pass)...", "percent": 10.0 }));
-
     let sidecar = app_handle.shell().sidecar("gmsh").map_err(|e| e.to_string())?;
     let (mut rx, child) = sidecar.args(&[geo_path.to_str().unwrap(), "-"]).spawn().map_err(|e| e.to_string())?;
-    
     { *GMSH_CHILD.lock().unwrap() = Some(child); }
     
-    // Wait for Phase 1
+    let mut logs = String::new();
     while let Some(e) = rx.recv().await { 
         match e {
             CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
-                print!("{}", String::from_utf8_lossy(&b));
+                let s = String::from_utf8_lossy(&b);
+                logs.push_str(&s);
+                let _ = app_handle.emit("gmsh_log", s.to_string()); // Still emit logs for UI
             }
             _ => {}
         }
     }
 
     if !msh_2d_path.exists() {
-        return Err("Gmsh failed to generate 2D mesh for analysis.".to_string());
+        return Err("Gmsh failed to generate 2D mesh.".to_string());
     }
 
     // --- PHASE 2: Analyze Volumes ---
-    println!("[Rust] Analyzing Volumes...");
-    let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Identifying Volumes...", "percent": 30.0 }));
-
     let mesh_2d = parse_2d_triangle_mesh(&msh_2d_path)?;
-    let _ = app_handle.emit("debug_mesh_2d", &mesh_2d);
-
     let target_idx = req.part_index.unwrap_or(0);
-    let target_centroid = get_target_shell_centroid(&mesh_2d, target_idx);
+    
+    // Get info for the specific part requested
+    if let Some((_, vol, indices)) = get_target_shell_info(&mesh_2d, target_idx) {
+        
+        // Filter mesh to return only the relevant part to frontend
+        let mut filtered_indices = Vec::new();
+        let mut used_nodes = HashMap::new();
+        let mut filtered_verts = Vec::new();
+        
+        for &tri_idx in &indices {
+            let tri = mesh_2d.indices[tri_idx];
+            let mut new_tri = [0usize; 3];
+            for k in 0..3 {
+                let old_node = tri[k];
+                if let Some(&new_id) = used_nodes.get(&old_node) {
+                    new_tri[k] = new_id;
+                } else {
+                    let new_id = filtered_verts.len();
+                    used_nodes.insert(old_node, new_id);
+                    filtered_verts.push(mesh_2d.vertices[old_node]);
+                    new_tri[k] = new_id;
+                }
+            }
+            filtered_indices.push(new_tri);
+        }
 
-    let mut centroid_script = String::new();
-    if let Some(c) = target_centroid {
-        println!("[Rust] DEBUG: Computed Shell Centroid: {:.4}, {:.4}, {:.4}", c.0, c.1, c.2);
+        Ok(AnalysisResult {
+            session_id,
+            mesh: SimpleTriMesh { vertices: filtered_verts, indices: filtered_indices },
+            volume: vol,
+            surface_area: 0.0, // TODO: Calc surface if needed
+            logs,
+        })
+    } else {
+        Err(format!("Could not find part index {} in generated geometry.", target_idx))
+    }
+}
 
-        centroid_script.push_str("\n// --- FILTERING STEP ---\n");
-        // Use high precision for coordinates
-        centroid_script.push_str(&format!("target_x = {:.6}; target_y = {:.6}; target_z = {:.6};\n", c.0, c.1, c.2));
-        
-        centroid_script.push_str(r#"
-        Printf("--- GMSH FILTERING DEBUG ---");
-        Printf("Target Centroid: (%g, %g, %g)", target_x, target_y, target_z);
-        
-        v_list[] = Volume{:};
-        count = #v_list[];
-        Printf("Found %g Volumes in total.", count);
-        
-        best_dist = 1e22; 
-        best_vol = -1;
-        
-        max_idx = count - 1;
-        
-        If (count > 0)
-            For i In {0 : max_idx}
-                vol_id = v_list[i];
-                bb[] = BoundingBox Volume{ vol_id };
-                
-                // Simple Bounding Box Center
-                mx = (bb[0]+bb[3])/2; 
-                my = (bb[1]+bb[4])/2; 
-                mz = (bb[2]+bb[5])/2;
-                
-                dist = Sqrt((mx-target_x)^2 + (my-target_y)^2 + (mz-target_z)^2);
-                Printf("Checking Volume %g | BB Center: (%g, %g, %g) | Dist: %g", vol_id, mx, my, mz, dist);
-                
-                If (dist < best_dist)
-                    best_dist = dist; 
-                    best_vol = vol_id;
-                EndIf
-            EndFor
-        EndIf
-        
-        Printf(">>> Result: Keeping Volume %g (Closest Dist: %g)", best_vol, best_dist);
+#[tauri::command]
+pub async fn finalize_gmsh_3d(app_handle: tauri::AppHandle, session_id: String, part_index: usize) -> Result<FeaResult, String> {
+    use tauri::Manager;
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    
+    let geo_path = app_dir.join(format!("model_{}.geo", session_id));
+    let msh_2d_path = app_dir.join(format!("model_{}_2d.msh", session_id));
+    let msh_3d_path = app_dir.join(format!("model_{}_3d.msh", session_id));
 
-        If (best_vol != -1)
-            del_list[] = {};
-            
+    if !msh_2d_path.exists() { return Err("Session expired or files missing.".to_string()); }
+
+    // Re-calculate centroid to generate filter script (stateless for simplicity)
+    let mesh_2d = parse_2d_triangle_mesh(&msh_2d_path)?;
+    let target_info = get_target_shell_info(&mesh_2d, part_index);
+
+    let mut filter_script = String::new();
+    if let Some((c, _, _)) = target_info {
+         // Generate the same filter script as before
+         filter_script.push_str("\n// --- FILTERING ---\n");
+         filter_script.push_str(&format!("tx={:.6}; ty={:.6}; tz={:.6};\n", c.0, c.1, c.2));
+         filter_script.push_str(r#"
+            v_list[] = Volume{:};
+            best_dist = 1e22; best_vol = -1;
+            count = #v_list[];
+            max_idx = count - 1;
             If (count > 0)
                 For i In {0 : max_idx}
-                    If (v_list[i] != best_vol) 
-                        del_list[] += v_list[i]; 
-                        Printf("Marking Volume %g for DELETION", v_list[i]);
-                    EndIf
+                    bb[] = BoundingBox Volume{ v_list[i] };
+                    mx = (bb[0]+bb[3])/2; my = (bb[1]+bb[4])/2; mz = (bb[2]+bb[5])/2;
+                    dist = Sqrt((mx-tx)^2 + (my-ty)^2 + (mz-tz)^2);
+                    If (dist < best_dist) best_dist = dist; best_vol = v_list[i]; EndIf
                 EndFor
             EndIf
-            
-            If (#del_list[] > 0)
-                Recursive Delete { Volume{ del_list[] }; }
-                Printf("Deleted %g Volumes.", #del_list[]);
-            Else
-                Printf("No Volumes to delete (Only 1 existed?).");
+            If (best_vol != -1)
+                del_list[] = {};
+                If (count > 0)
+                    For i In {0 : max_idx}
+                        If (v_list[i] != best_vol) del_list[] += v_list[i]; EndIf
+                    EndFor
+                EndIf
+                If (#del_list[] > 0) Recursive Delete { Volume{ del_list[] }; } EndIf
             EndIf
-        Else
-             Printf("ERROR: Could not find best volume.");
-        EndIf
-        Printf("--- END FILTERING DEBUG ---");
-        "#);
-    } else {
-        println!("[Rust] WARNING: No target centroid found. Skipping filtering (Mesh will contain all parts).");
+         "#);
     }
 
-    // --- PHASE 3: 3D Mesh ---
-    println!("[Rust] Running Gmsh Phase 2 (3D Volume Mesh)...");
-    let _ = app_handle.emit("gmsh_progress", serde_json::json!({ "message": "Meshing 3D Volume...", "percent": 50.0 }));
-
-    let final_geo_path = app_dir.join(format!("model_{}_final.geo", timestamp));
-    // Use Include to restore state
+    let final_geo_path = app_dir.join(format!("model_{}_final.geo", session_id));
     let mut final_script = format!("Include \"{}\";\n", geo_path.to_str().unwrap().replace("\\", "/"));
-    
-    // final_script.push_str("Delete Mesh;\n"); 
-    final_script.push_str(&centroid_script);
+    final_script.push_str("Delete Mesh;\n"); 
+    final_script.push_str(&filter_script);
     final_script.push_str("Mesh 3;\n");
     final_script.push_str("Mesh.Format = 10;\n");
     final_script.push_str(&format!("Save \"{}\";\n", msh_3d_path.to_str().unwrap().replace("\\", "/")));
-
+    
     fs::write(&final_geo_path, &final_script).map_err(|e| e.to_string())?;
 
-    let sidecar2 = app_handle.shell().sidecar("gmsh").map_err(|e| e.to_string())?;
-    let (mut rx2, child2) = sidecar2.args(&[final_geo_path.to_str().unwrap(), "-"]).spawn().map_err(|e| e.to_string())?;
+    let sidecar = app_handle.shell().sidecar("gmsh").map_err(|e| e.to_string())?;
+    let (mut rx, child) = sidecar.args(&[final_geo_path.to_str().unwrap(), "-"]).spawn().map_err(|e| e.to_string())?;
+    { *GMSH_CHILD.lock().unwrap() = Some(child); }
     
-    { *GMSH_CHILD.lock().unwrap() = Some(child2); }
-    
-    let mut full_log = String::new();
-    while let Some(e) = rx2.recv().await {
+    let mut logs = String::new();
+    while let Some(e) = rx.recv().await {
         match e {
             CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
-                let s = String::from_utf8_lossy(&b);
-                print!("{}", s);
-                full_log.push_str(&s);
-                let _ = app_handle.emit("gmsh_log", s.to_string());
+                logs.push_str(&String::from_utf8_lossy(&b));
             }
             _ => {}
         }
     }
 
-    if !msh_3d_path.exists() {
-         return Err(format!("Gmsh failed to generate 3D mesh.\nLogs:\n{}", full_log));
-    }
+    if !msh_3d_path.exists() { return Err(format!("Gmsh 3D failed.\n{}", logs)); }
 
-    // Parse Result
     let mesh = parse_msh(&msh_3d_path)?;
     let (volume, surface_area) = mesh.compute_metrics();
 
-    Ok(FeaResult {
-        mesh,
-        volume,
-        surface_area,
-        logs: full_log,
-    })
+    Ok(FeaResult { mesh, volume, surface_area, logs })
 }

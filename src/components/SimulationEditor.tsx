@@ -353,73 +353,74 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
   const runSimulation = async () => {
     if (!activePlan || !targetFootprint) return;
     
-    // Start Validation Mode
-    setSimMode('validating');
+    // Reset Views
+    setSimMode('validating'); // Re-using 'validating' for the Analysis Phase
     setProcessPercent(0);
-    setProcessMessage("Initializing Validation...");
+    setProcessMessage("Computing Manifold Geometry...");
     setSimLogs([]); 
+    setTetMesh(null);
+    setIsOverlayMinimized(false);
 
     try {
-        // 1. Validation Step (Frontend Manifold)
-        if (validateEnabled) {
-            if (!selectedLayerId) throw new Error("Please select a target layer.");
-            
-            const activeSplitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
-            
-            const manifoldResult = await callWorker("computeAnalyzablePart", {
-                footprint: targetFootprint,
-                allFootprints: footprints,
-                stackup,
-                params,
-                layerId: selectedLayerId,
-                partIndex: partIndex,
-                enableSplit: activeSplitSettings?.enabled || false,
-                splitLineIds: activeSplitSettings?.lineIds
-            }, (progress) => {
-                setProcessMessage(`Validating: ${progress.message}`);
-                setProcessPercent(progress.percent * 100);
-            });
+        if (!selectedLayerId) throw new Error("Please select a target layer.");
 
-            if (manifoldResult && manifoldResult.meshData) {
-                setManifoldMetrics({
-                    volume: manifoldResult.volume,
-                    surfaceArea: manifoldResult.surfaceArea,
-                    computedAt: Date.now()
-                });
+        // --- STEP 1: Manifold Calculation (Ground Truth) ---
+        const activeSplitSettings = (activePlan as any)?.layerSplitSettings?.[selectedLayerId];
+        
+        // This is a Promise that resolves when worker is done
+        const manifoldResult = await callWorker("computeAnalyzablePart", {
+            footprint: targetFootprint,
+            allFootprints: footprints,
+            stackup,
+            params,
+            layerId: selectedLayerId,
+            partIndex: partIndex,
+            enableSplit: activeSplitSettings?.enabled || false,
+            splitLineIds: activeSplitSettings?.lineIds
+        }, (progress) => {
+            setProcessMessage(`Manifold: ${progress.message}`);
+        });
 
-                const geo = new THREE.BufferGeometry();
-                geo.setAttribute('position', new THREE.Float32BufferAttribute(manifoldResult.meshData.vertices, 3));
-                if (manifoldResult.meshData.indices) geo.setIndex(Array.from(manifoldResult.meshData.indices));
-                geo.computeVertexNormals();
-                geo.computeBoundingBox();
-                setPreviewGeo(geo);
-                
-                if (geo.boundingBox) {
-                    const size = new THREE.Vector3();
-                    const center = new THREE.Vector3();
-                    geo.boundingBox.getSize(size);
-                    geo.boundingBox.getCenter(center);
-                    setManifoldBounds({ min: geo.boundingBox.min, max: geo.boundingBox.max, center, size });
-                }
-            }
+        if (!manifoldResult || !manifoldResult.meshData) throw new Error("Manifold Generation Failed");
+
+        setManifoldMetrics({
+            volume: manifoldResult.volume,
+            surfaceArea: manifoldResult.surfaceArea,
+            computedAt: Date.now()
+        });
+        
+        // Update Preview
+        const manifoldGeo = new THREE.BufferGeometry();
+        manifoldGeo.setAttribute('position', new THREE.Float32BufferAttribute(manifoldResult.meshData.vertices, 3));
+        if (manifoldResult.meshData.indices) manifoldGeo.setIndex(Array.from(manifoldResult.meshData.indices));
+        manifoldGeo.computeVertexNormals();
+        manifoldGeo.computeBoundingBox();
+        setPreviewGeo(manifoldGeo);
+        if (manifoldGeo.boundingBox) {
+             const center = new THREE.Vector3();
+             manifoldGeo.boundingBox.getCenter(center);
+             const size = new THREE.Vector3();
+             manifoldGeo.boundingBox.getSize(size);
+             setManifoldBounds({ min: manifoldGeo.boundingBox.min, max: manifoldGeo.boundingBox.max, center, size });
         }
 
-        // 2. Meshing Step (Backend Gmsh)
-        setSimMode('meshing'); 
-        setProcessMessage("Preparing Gmsh Geometry...");
-        setProcessPercent(0);
+        // --- STEP 2: Gmsh 2D Analysis ---
+        setProcessMessage("Running Gmsh 2D Analysis...");        
+        // Reuse the resolution logic for variables
+        const resolveVal = (v: any) => {
+            if (typeof v === 'number') return v;
+            if (typeof v === 'string') return evaluateExpression(v, params);
+            return v;
+        };
 
-        // Handle Split Lines for Gmsh
+        // Prepare Footprint with Splits for Gmsh
         let processedFootprint = JSON.parse(JSON.stringify(targetFootprint)); 
-        const splitSettings = (activePlan as any).layerSplitSettings?.[selectedLayerId];
-
-        if (splitSettings?.enabled) {
-            const kerf = parseFloat(splitSettings.kerf || "0.5");
+        if (activeSplitSettings?.enabled) {
+            const kerf = parseFloat(activeSplitSettings.kerf || "0.5");
             const newShapes: any[] = [];
-            
             processedFootprint.shapes.forEach((s: any) => {
-                if (s.type === "splitLine") {
-                    const isActive = !splitSettings.lineIds || splitSettings.lineIds.includes(s.id);
+                 if (s.type === "splitLine") {
+                    const isActive = !activeSplitSettings.lineIds || activeSplitSettings.lineIds.includes(s.id);
                     if (isActive) {
                         const startX = evaluateExpression(s.x, params);
                         const startY = evaluateExpression(s.y, params);
@@ -428,64 +429,32 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
                         const positions = (s.dovetailPositions || []).map((p: string) => evaluateExpression(p, params));
                         const dWidth = evaluateExpression(s.dovetailWidth, params);
                         const dHeight = evaluateExpression(s.dovetailHeight, params);
-                        
                         const rawPts = generateDovetailPoints(startX, startY, endX, endY, positions, dWidth, dHeight, !!s.flip);
-                        
-                        const mockLine: any = {
-                            id: "temp_split_" + s.id,
-                            type: "line",
-                            points: rawPts.map(p => ({ x: p.x, y: p.y })),
-                            thickness: String(kerf)
-                        };
-
+                        const mockLine: any = { id: "temp_split_" + s.id, type: "line", points: rawPts.map(p => ({ x: p.x, y: p.y })), thickness: String(kerf) };
                         const outlinePts = getLineOutlinePoints(mockLine, params, kerf, 16, targetFootprint, footprints);
-                        
                         if (outlinePts.length > 2) {
-                            newShapes.push({
-                                type: "polygon",
-                                id: mockLine.id,
-                                points: outlinePts.map(p => ({ x: p.x, y: p.y })),
-                                assignedLayers: { [selectedLayerId]: { depth: "1000" } },
-                                x: "0", y: "0"
-                            });
+                            newShapes.push({ type: "polygon", id: mockLine.id, points: outlinePts.map(p => ({ x: p.x, y: p.y })), assignedLayers: { [selectedLayerId]: { depth: "1000" } }, x: "0", y: "0" });
                         }
                     }
-                } else {
-                    newShapes.push(s);
-                }
+                 } else { newShapes.push(s); }
             });
             processedFootprint.shapes = newShapes;
         }
 
-        // Resolve Expressions for Rust (Backend cannot parse "x/2 + 5")
-        const resolveVal = (v: any) => {
-            if (typeof v === 'number') return v;
-            if (typeof v === 'string') return evaluateExpression(v, params);
-            return v;
-        };
-
-        const resolvedShapes = processedFootprint.shapes.map((s: any) => {
-            const newS = { ...s };
-            // Resolve standard props
-            ['x', 'y', 'width', 'height', 'diameter', 'cornerRadius'].forEach(k => {
-                if (newS[k] !== undefined) newS[k] = resolveVal(newS[k]);
-            });
-            // Resolve Polygon/Outline points
-            if (newS.points) {
+        // Resolve Shapes (using the previously injected logic if available, or re-implementing briefly)
+        processedFootprint.shapes = processedFootprint.shapes.map((s: any) => {
+             const newS = { ...s };
+             ['x', 'y', 'width', 'height', 'diameter', 'cornerRadius'].forEach(k => { if (newS[k] !== undefined) newS[k] = resolveVal(newS[k]); });
+             if (newS.points) {
                 newS.points = newS.points.map((p: any) => {
                     const newP = { ...p, x: resolveVal(p.x), y: resolveVal(p.y) };
-                    if (newP.handleIn) {
-                        newP.handleIn = { x: resolveVal(newP.handleIn.x), y: resolveVal(newP.handleIn.y) };
-                    }
-                    if (newP.handleOut) {
-                        newP.handleOut = { x: resolveVal(newP.handleOut.x), y: resolveVal(newP.handleOut.y) };
-                    }
+                    if (newP.handleIn) newP.handleIn = { x: resolveVal(newP.handleIn.x), y: resolveVal(newP.handleIn.y) };
+                    if (newP.handleOut) newP.handleOut = { x: resolveVal(newP.handleOut.x), y: resolveVal(newP.handleOut.y) };
                     return newP;
                 });
-            }
-            return newS;
+             }
+             return newS;
         });
-        processedFootprint.shapes = resolvedShapes;
 
         const feaRequest = {
             footprint: processedFootprint,
@@ -496,40 +465,63 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
             part_index: partIndex
         };
 
-        const result: any = await invoke("run_gmsh_pipeline", { req: feaRequest })
-            .catch(err => { throw new Error("Backend invoke failed: " + JSON.stringify(err)); });
+        const analysis: any = await invoke("start_gmsh_analysis", { req: feaRequest });
         
-        setGmshMetrics({
-            volume: result.volume,
-            surfaceArea: result.surface_area,
-            computedAt: Date.now()
-        });
+        const gmshVol = analysis.volume;
+        const maniVol = manifoldResult.volume;
+        const diff = Math.abs((gmshVol - maniVol) / maniVol);
 
-        if (result.mesh && result.mesh.vertices) {
-            const flatVerts = result.mesh.vertices.flat();
-            const tetIndices = result.mesh.indices.map((t: number[]) => [t[0], t[1], t[2], t[3]]);
-            setTetMesh({ vertices: flatVerts, indices: tetIndices });
+        setGmshMetrics({ volume: gmshVol, surfaceArea: 0, computedAt: Date.now() });
 
-            let min = new THREE.Vector3(Infinity, Infinity, Infinity);
-            let max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-            for(let i=0; i<flatVerts.length; i+=3) {
-                const x = flatVerts[i], y = flatVerts[i+1], z = flatVerts[i+2];
-                if (x < min.x) min.x = x; if (y < min.y) min.y = y; if (z < min.z) min.z = z;
-                if (x > max.x) max.x = x; if (y > max.y) max.y = y; if (z > max.z) max.z = z;
-            }
-            const size = new THREE.Vector3().subVectors(max, min);
-            const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
-            setGmshBounds({ min, max, center, size });
+        // --- STEP 3: Validate ---
+        if (diff > 0.001) { // 0.1% Threshold
+             setProcessMessage(`Validation Failed! Diff: ${(diff*100).toFixed(2)}%`);
+             
+             // Show the 2D mesh from Gmsh
+             const mesh = analysis.mesh;
+             const flatVerts = new Float32Array(mesh.vertices.flat());
+             const flatIndices = mesh.indices.flat();
+             const geo = new THREE.BufferGeometry();
+             geo.setAttribute('position', new THREE.BufferAttribute(flatVerts, 3));
+             geo.setIndex(Array.from(flatIndices));
+             geo.computeVertexNormals();
+             
+             setTetMesh({ vertices: Array.from(flatVerts), indices: mesh.indices });
+             setVisualSource('gmsh'); 
+             setSimMode('idle'); // Stop
+             alert(`Validation Failed!\nManifold Vol: ${maniVol.toFixed(2)}\nGmsh Vol: ${gmshVol.toFixed(2)}\nDifference: ${(diff*100).toFixed(2)}%\n\nShowing Gmsh 2D Analysis mesh.`);
+             return;
         }
 
+        // --- STEP 4: Finalize 3D ---
+        setSimMode('meshing');
+        setProcessMessage("Validation Passed. Meshing 3D...");
+        
+        const finalRes: any = await invoke("finalize_gmsh_3d", { sessionId: analysis.session_id, partIndex: partIndex });
+        
+        setGmshMetrics({ volume: finalRes.volume, surfaceArea: finalRes.surface_area, computedAt: Date.now() });
+        const flatVerts = finalRes.mesh.vertices.flat();
+        const tetIndices = finalRes.mesh.indices.map((t: number[]) => [t[0], t[1], t[2], t[3]]);
+        setTetMesh({ vertices: flatVerts, indices: tetIndices });
+        
+        // Update Bounds
+        let min = new THREE.Vector3(Infinity, Infinity, Infinity);
+        let max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+        for(let i=0; i<flatVerts.length; i+=3) {
+            const x = flatVerts[i], y = flatVerts[i+1], z = flatVerts[i+2];
+            if (x < min.x) min.x = x; if (y < min.y) min.y = y; if (z < min.z) min.z = z;
+            if (x > max.x) max.x = x; if (y > max.y) max.y = y; if (z > max.z) max.z = z;
+        }
+        setGmshBounds({ min, max, center: new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5), size: new THREE.Vector3().subVectors(max, min) });
+        
         setVisualSource('gmsh');
-        setViewMode('mesh');
+        setSimMode('idle');
 
     } catch (e) {
         console.error(e);
-        alert("Simulation Failed: " + e);
-    } finally {
         setSimMode('idle');
+        setProcessMessage("Failed: " + e);
+        alert("Simulation Error: " + e);
     }
   };
 
@@ -663,17 +655,6 @@ export default function SimulationEditor({ footprints, fabPlans, stackup, params
 
         <div style={{ padding: "20px", borderBottom: "1px solid #333" }}>
             <h4 style={{ margin: "0 0 15px 0", color: "#ccc" }}>Actions</h4>
-            
-            <div style={{ marginBottom: "15px" }}>
-                <label className="checkbox-label" style={{ display: "flex", alignItems: "center", gap: "8px", color: "#ccc", cursor: "pointer" }}>
-                    <input 
-                        type="checkbox" 
-                        checked={validateEnabled} 
-                        onChange={(e) => setValidateEnabled(e.target.checked)} 
-                    />
-                    Validate against Manifold
-                </label>
-            </div>
 
             <button 
                 className="primary" 

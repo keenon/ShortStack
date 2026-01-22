@@ -222,8 +222,8 @@ impl TetMesh {
 /// Temporary structure for 2D analysis pass
 #[derive(Serialize, Clone, Debug)]
 pub struct SimpleTriMesh {
-    vertices: Vec<[f64; 3]>,
-    indices: Vec<[usize; 3]>,
+    pub vertices: Vec<[f64; 3]>,
+    pub indices: Vec<[usize; 3]>,
 }
 
 pub fn parse_2d_triangle_mesh(path: &PathBuf) -> Result<SimpleTriMesh, String> {
@@ -316,8 +316,7 @@ pub fn parse_2d_triangle_mesh(path: &PathBuf) -> Result<SimpleTriMesh, String> {
     Ok(SimpleTriMesh { vertices, indices })
 }
 
-/// Returns the centroid (x,y,z) of the Nth largest volume shell found in the 2D mesh
-pub fn get_target_shell_centroid(mesh: &SimpleTriMesh, rank: usize) -> Option<(f64, f64, f64)> {
+pub fn get_target_shell_info(mesh: &SimpleTriMesh, rank: usize) -> Option<((f64, f64, f64), f64, Vec<usize>)> {
     let num_tris = mesh.indices.len();
     let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut edge_map: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
@@ -357,7 +356,7 @@ pub fn get_target_shell_centroid(mesh: &SimpleTriMesh, rank: usize) -> Option<(f
         }
     }
     
-    // Calculate Volume (Signed Divergence) & Sort
+    // Calculate Stats & Sort
     let mut stats = shells.into_iter().map(|comp| {
         let mut vol = 0.0;
         let mut cx = 0.0; let mut cy = 0.0; let mut cz = 0.0;
@@ -369,7 +368,6 @@ pub fn get_target_shell_centroid(mesh: &SimpleTriMesh, rank: usize) -> Option<(f
             let p2 = mesh.vertices[t[1]];
             let p3 = mesh.vertices[t[2]];
             
-            // Vol = 1/6 * p1 . (p2 x p3)
             let v321 = p3[0] * p2[1] * p1[2];
             let v231 = p2[0] * p3[1] * p1[2];
             let v312 = p3[0] * p1[1] * p2[2];
@@ -378,21 +376,19 @@ pub fn get_target_shell_centroid(mesh: &SimpleTriMesh, rank: usize) -> Option<(f
             let v123 = p1[0] * p2[1] * p3[2];
             vol += (1.0 / 6.0) * (-v321 + v231 + v312 - v132 - v213 + v123);
             
-            // Centroid Accumulation
             cx += p1[0]+p2[0]+p3[0];
             cy += p1[1]+p2[1]+p3[1];
             cz += p1[2]+p2[2]+p3[2];
             v_count += 3.0;
         }
-        ((cx/v_count, cy/v_count, cz/v_count), vol.abs())
+        ((cx/v_count, cy/v_count, cz/v_count), vol.abs(), comp)
     }).collect::<Vec<_>>();
     
     stats.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     
     if rank < stats.len() {
-        let (centroid, vol) = stats[rank];
-        println!("[Rust] Selected Shell Rank {}: Volume {:.2}, Centroid {:.2},{:.2},{:.2}", rank, vol, centroid.0, centroid.1, centroid.2);
-        Some(centroid)
+        let (centroid, vol, indices) = stats.remove(rank);
+        Some((centroid, vol, indices))
     } else {
         None
     }

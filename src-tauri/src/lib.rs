@@ -21,7 +21,9 @@ use csgrs::traits::CSG;
 use crate::optimizer::debug_split_eval;
 
 mod fem; // Assuming the previous code is in a module named fem
-use fem::{tet10::Tet10, quadrature::TetQuadrature, mesh::TetMesh, tetgen::cmd_tetrahedralize, tetgen::cmd_repair_mesh, gmsh_interop::run_gmsh_pipeline, gmsh_interop::abort_gmsh};
+use fem::{tet10::Tet10, quadrature::TetQuadrature, 
+    mesh::TetMesh, tetgen::cmd_tetrahedralize, tetgen::cmd_repair_mesh, 
+    gmsh_interop::start_gmsh_analysis, gmsh_interop::finalize_gmsh_3d, gmsh_interop::abort_gmsh};
 
 use nalgebra::Vector3;
 
@@ -1180,7 +1182,6 @@ fn simple_ping(val: String) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-
     tauri::Builder::default()
         // Initialize the plugins here
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1189,7 +1190,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
-            simple_ping, export_layer_files, compute_smart_split, get_debug_eval, import_mesh, cmd_tetrahedralize, cmd_repair_mesh, run_gmsh_pipeline, abort_gmsh])
+            simple_ping, export_layer_files, compute_smart_split, 
+            get_debug_eval, import_mesh, cmd_tetrahedralize, cmd_repair_mesh, 
+            start_gmsh_analysis, finalize_gmsh_3d, abort_gmsh])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
