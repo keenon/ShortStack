@@ -4,11 +4,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Footprint, FootprintShape, Parameter, StackupLayer, FootprintReference, FootprintLine, FootprintWireGuide, FootprintMesh, FootprintBoardOutline, Point, MeshAsset, FootprintPolygon, FootprintUnion, FootprintText, FootprintSplitLine } from "../types";
 import Footprint3DView, { Footprint3DViewHandle } from "./Footprint3DView";
-import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline, isPointInShape } from "../utils/footprintUtils";
+import { modifyExpression, isFootprintOptionValid, evaluateExpression, resolvePoint, bezier1D, getShapeAABB, isShapeInSelection, rotatePoint, getAvailableWireGuides, findWireGuideByPath, getFootprintAABB, getTransformAlongLine, getClosestDistanceAlongLine, getLineLength, repairBoardAssignments, collectGlobalObstacles, getTessellatedBoardOutline, isPointInShape, collectFootprintPoints, computeConvexHull } from "../utils/footprintUtils";
 import { RecursiveShapeRenderer } from "./FootprintRenderers";
 import { checkSplitPartSizes, findSafeSplitLine, autoComputeSplitWithRefinement } from "../utils/splitUtils";
 import FootprintPropertiesPanel from "./FootprintPropertiesPanel";
-import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit  } from "./Icons";
+import { IconCircle, IconRect, IconLine, IconGuide, IconOutline, IconMesh, IconPolygon, IconText, IconSplit, IconShrink  } from "./Icons";
 import ShapeListPanel from "./ShapeListPanel";
 import { useUndoHistory } from "../hooks/useUndoHistory"; 
 import { collectExportShapesAsync } from "../utils/exportUtils";
@@ -180,7 +180,7 @@ const MeshListPanel = ({
             </div>
 
             {!collapsed && (
-                <div className="shape-list-container">
+                <div>
                     {meshes.map(mesh => {
                         const asset = meshAssets.find(a => a.id === mesh.meshId);
                         return (
@@ -232,17 +232,29 @@ const MeshListPanel = ({
 const BoardOutlineHeader = ({ 
     outlines, 
     selectedIds, 
-    onSelect 
+    onSelect,
+    onShrinkwrap
 }: { 
     outlines: FootprintShape[], 
     selectedIds: string[], 
-    onSelect: (id: string, multi: boolean) => void 
+    onSelect: (id: string, multi: boolean) => void,
+    onShrinkwrap: () => void
 }) => {
     if (outlines.length === 0) return null;
     
     return (
         <div className="board-outline-header">
-            <div className="board-label">Primary Geometry</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="board-label">Primary Geometry</div>
+                <button 
+                    className="vis-toggle-btn" 
+                    style={{ fontSize: '0.7em', padding: '2px 6px', background: '#3b5b9d', color: 'white', marginBottom: '4px' }}
+                    onClick={(e) => { e.stopPropagation(); onShrinkwrap(); }}
+                    title="Shrinkwrap outline to content"
+                >
+                    <IconShrink size={12} />
+                </button>
+            </div>
             {outlines.map(bo => (
                 <div 
                     key={bo.id} 
@@ -625,6 +637,39 @@ export default function FootprintEditor({ footprint: initialFootprint, allFootpr
   const [viewBox, setViewBox] = useState({ x: -50, y: -50, width: 100, height: 100 });
   const [viewMode, setViewMode] = useState<"2D" | "3D">("2D");
   const [deferredFootprint, setDeferredFootprint] = useState(footprint);
+
+  const handleShrinkwrap = () => {
+      const outlines = footprint.shapes.filter(s => s.type === 'boardOutline');
+      if (outlines.length === 0) return;
+      
+      // Target either the selected outline or the first one
+      const targetOutline = outlines.find(o => selectedShapeIds.includes(o.id)) || outlines[0];
+      
+      // 1. Collect points from all visible geometry except the outline itself
+      const points = collectFootprintPoints(footprint, allFootprints, params, 0, 0, 0, targetOutline.id);
+      if (points.length < 3) {
+          alert("Not enough geometry found to create a boundary.");
+          return;
+      }
+
+      // 2. Compute Hull
+      const hullPoints = computeConvexHull(points);
+      
+      // 3. Map to Point objects
+      // We set origin to 0,0 and provide 10mm padding
+      const PADDING = 10;
+      const newPoints: Point[] = hullPoints.map(p => ({
+          id: crypto.randomUUID(),
+          x: p.x.toFixed(4),
+          y: p.y.toFixed(4)
+      }));
+
+      const updatedOutline = { ...targetOutline, x: "0", y: "0", points: newPoints };
+      setFootprint({ 
+          ...footprint, 
+          shapes: footprint.shapes.map(s => s.id === targetOutline.id ? updatedOutline : s) 
+      });
+  };
 
   useEffect(() => {
     if (viewMode === "2D") return;
@@ -3260,6 +3305,7 @@ const handleExport = async (layerId: string, format: "SVG_DEPTH" | "SVG_CUT" | "
                     outlines={footprint.shapes.filter(s => s.type === 'boardOutline')}
                     selectedIds={selectedShapeIds}
                     onSelect={handleSelection}
+                    onShrinkwrap={handleShrinkwrap}
                 />
             )}
 

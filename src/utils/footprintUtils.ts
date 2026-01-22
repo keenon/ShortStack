@@ -1846,6 +1846,92 @@ export function getClosestDistanceAlongLine(
  * Ensures that if a footprint is marked as a board, it has at least one outline
  * and every layer in the stackup is assigned to a valid outline.
  */
+/**
+ * Standard Monotone Chain algorithm to find convex hull of a point set.
+ */
+export function computeConvexHull(points: { x: number, y: number }[]): { x: number, y: number }[] {
+    if (points.length <= 2) return points;
+    const sorted = [...points].sort((a, b) => a.x !== b.x ? a.x - b.x : a.y - b.y);
+
+    const crossProduct = (a: any, b: any, c: any) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+
+    const upper = [];
+    for (const p of sorted) {
+        while (upper.length >= 2 && crossProduct(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+        upper.push(p);
+    }
+
+    const lower = [];
+    for (let i = sorted.length - 1; i >= 0; i--) {
+        const p = sorted[i];
+        while (lower.length >= 2 && crossProduct(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+        lower.push(p);
+    }
+
+    upper.pop();
+    lower.pop();
+    return upper.concat(lower);
+}
+
+/**
+ * Recursively collects all vertex points of visible shapes to define a bounding boundary.
+ */
+export function collectFootprintPoints(
+    fp: Footprint,
+    allFootprints: Footprint[],
+    params: Parameter[],
+    pX = 0, pY = 0, pA = 0,
+    ignoreId?: string
+): { x: number, y: number }[] {
+    let points: { x: number, y: number }[] = [];
+
+    fp.shapes.forEach((s, idx) => {
+        if (s.id === ignoreId) return;
+
+        const lx = (s.type === "line") ? 0 : evaluateExpression((s as any).x, params);
+        const ly = (s.type === "line") ? 0 : evaluateExpression((s as any).y, params);
+        const rad = -pA * (Math.PI / 180);
+        const gx = pX + (lx * Math.cos(rad) - ly * Math.sin(rad));
+        const gy = pY + (lx * Math.sin(rad) + ly * Math.cos(rad));
+        const gA = pA + ((s as any).angle ? evaluateExpression((s as any).angle, params) : 0);
+
+        if (s.type === 'circle') {
+            const r = evaluateExpression((s as any).diameter, params) / 2;
+            for (let i = 0; i < 8; i++) {
+                const ang = (i / 8) * Math.PI * 2;
+                points.push({ x: gx + Math.cos(ang) * r, y: gy + Math.sin(ang) * r });
+            }
+        } else if (s.type === 'rect') {
+            const w = evaluateExpression((s as any).width, params) / 2;
+            const h = evaluateExpression((s as any).height, params) / 2;
+            const rrad = -gA * (Math.PI / 180);
+            [[-w, -h], [w, -h], [w, h], [-w, h]].forEach(([px, py]) => {
+                points.push({
+                    x: gx + (px * Math.cos(rrad) - py * Math.sin(rrad)),
+                    y: gy + (px * Math.sin(rrad) + py * Math.cos(rrad))
+                });
+            });
+        } else if (s.type === 'line' || s.type === 'polygon' || s.type === 'boardOutline') {
+            (s as any).points.forEach((p: Point) => {
+                const res = resolvePoint(p, fp, allFootprints, params);
+                const rrad = -pA * (Math.PI / 180);
+                points.push({
+                    x: gx + (res.x * Math.cos(rrad) - res.y * Math.sin(rrad)),
+                    y: gy + (res.x * Math.sin(rrad) + res.y * Math.cos(rrad))
+                });
+            });
+        } else if (s.type === 'footprint') {
+            const child = allFootprints.find(f => f.id === (s as FootprintReference).footprintId);
+            if (child) points = points.concat(collectFootprintPoints(child, allFootprints, params, gx, gy, gA));
+        } else if (s.type === 'union') {
+            (s as FootprintUnion).shapes.forEach(us => {
+                points = points.concat(collectFootprintPoints({ ...fp, shapes: [us] }, allFootprints, params, gx, gy, gA));
+            });
+        }
+    });
+    return points;
+}
+
 export function repairBoardAssignments(
     footprint: Footprint,
     stackup: StackupLayer[]

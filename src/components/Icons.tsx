@@ -93,3 +93,9 @@ export const IconSplit = ({ size = 16, className = "" }: any) => (
     <path d="M4 14l0 6l6 0" />
   </svg>
 );
+
+export const IconShrink = ({ size = 16, className = "" }: IconProps) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+        <path d="m15 15 6 6m-6-6v4.8m0-4.8h4.8M9 9 3 3m6 6V4.2M9 9H4.2M15 9l6-6m-6 6V4.2M15 9h4.8M9 15l-6 6m6-6v4.8M9 15H4.2" />
+    </svg>
+);
